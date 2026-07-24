@@ -1,0 +1,86 @@
+{
+  "name": "shiyin-minimax-meeting-notes",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n web,asr \"vinext dev\" \"node server/realtime-proxy.mjs\"",
+    "desktop:dev": "electron desktop/main.mjs",
+    "desktop:start": "electron desktop/main.mjs --production",
+    "desktop:pack": "npm run build && electron-builder --dir",
+    "desktop:dist": "npm run build && electron-builder",
+    "dev:web": "vinext dev",
+    "asr:proxy": "node server/realtime-proxy.mjs",
+    "build": "vinext build",
+    "start": "vinext start",
+    "test": "npm run build && node --test tests/rendered-html.test.mjs tests/local-persistence.test.mjs",
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "db:generate": "drizzle-kit generate"
+  },
+  "dependencies": {
+    "@phosphor-icons/react": "^2.1.10",
+    "drizzle-orm": "0.45.2",
+    "https-proxy-agent": "7.0.6",
+    "next": "16.2.6",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
+    "sherpa-onnx-node": "1.13.4",
+    "ws": "8.18.3"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "1.37.1",
+    "@tailwindcss/postcss": "4.2.1",
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.2",
+    "@vitejs/plugin-rsc": "0.5.26",
+    "concurrently": "9.2.1",
+    "drizzle-kit": "0.31.10",
+    "electron": "43.2.0",
+    "electron-builder": "26.15.3",
+    "eslint": "9.39.4",
+    "eslint-config-next": "16.2.6",
+    "react-server-dom-webpack": "19.2.6",
+    "tailwindcss": "4.2.1",
+    "typescript": "5.9.3",
+    "vinext": "0.0.50",
+    "vite": "8.0.13",
+    "wait-on": "9.0.3",
+    "wrangler": "4.92.0"
+  },
+  "main": "desktop/main.mjs",
+  "build": {
+    "appId": "com.phenosola.shiyin",
+    "productName": "拾音 AI",
+    "files": [
+      "desktop/**/*",
+      "build/icon.ico",
+      "server/**/*",
+      "dist/**/*",
+      "public/**/*",
+      "package.json",
+      "node_modules/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "models",
+        "to": "models",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "type": "module"
+}
