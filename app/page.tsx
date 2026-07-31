@@ -15,11 +15,15 @@ import {
   Sparkle,
   Target,
   UsersThree,
+  Waveform,
   WarningCircle,
+  X,
 } from "@phosphor-icons/react";
 
 type View = "transcript" | "summary" | "actions";
 type MeetingStatus = "recording" | "correcting" | "summarizing" | "completed" | "failed";
+type SummaryTemplateId = "meeting-minutes" | "daily-log" | "project-sync" | "brainstorm";
+type ReportStyle = "detailed" | "visual";
 type Speaker = {
   id: string;
   meetingId: string;
@@ -43,6 +47,9 @@ type Segment = {
 type Summary = {
   headline?: string;
   overview: string;
+  isLiveDraft?: boolean;
+  generatedAt?: string;
+  throughSeq?: number | null;
   meetingBackground?: string;
   overviewCards?: Array<{
     title: string;
@@ -118,8 +125,13 @@ type MeetingBrief = {
   startedAt: string;
   endedAt: string | null;
   durationMs: number;
+  audioPath: string | null;
   summary: Summary | null;
+  liveSummary: Summary | null;
   error: string | null;
+  summaryTemplate: SummaryTemplateId;
+  templateVersion: number;
+  reportStyle: ReportStyle;
 };
 type Meeting = MeetingBrief & {
   speakers: Speaker[];
@@ -138,6 +150,30 @@ declare global {
 
 const websocketBase = process.env.NEXT_PUBLIC_ASR_PROXY_URL || "ws://127.0.0.1:8788";
 const apiBase = process.env.NEXT_PUBLIC_API_URL || websocketBase.replace(/^ws/, "http");
+const DEFAULT_SUMMARY_TEMPLATE: SummaryTemplateId = "meeting-minutes";
+const DEFAULT_REPORT_STYLE: ReportStyle = "detailed";
+const summaryTemplates: Array<{
+  id: SummaryTemplateId;
+  name: string;
+  description: string;
+  accent: string;
+}> = [
+  { id: "meeting-minutes", name: "会议纪要", description: "决策、议题、风险与行动项", accent: "blue" },
+  { id: "daily-log", name: "日常记录", description: "按时间整理交流、灵感与提醒", accent: "cyan" },
+  { id: "project-sync", name: "项目周会", description: "进展、阻塞、依赖与下一步", accent: "green" },
+  { id: "brainstorm", name: "头脑风暴", description: "想法簇、优缺点与验证实验", accent: "violet" },
+];
+
+function summaryTemplateName(id: SummaryTemplateId | undefined) {
+  return summaryTemplates.find((template) => template.id === id)?.name || "会议纪要";
+}
+
+function summaryTemplateIcon(id: SummaryTemplateId, size = 20) {
+  if (id === "daily-log") return <Quotes size={size} weight="duotone" />;
+  if (id === "project-sync") return <Target size={size} weight="duotone" />;
+  if (id === "brainstorm") return <Brain size={size} weight="duotone" />;
+  return <ListChecks size={size} weight="duotone" />;
+}
 
 function formatClock(milliseconds: number | null | undefined) {
   const seconds = Math.max(0, Math.round((milliseconds || 0) / 1000));
@@ -164,6 +200,29 @@ function statusLabel(status: MeetingStatus) {
     completed: "已完成",
     failed: "处理失败",
   }[status];
+}
+
+function summaryLooksInvalid(summary: Summary | null | undefined) {
+  if (!summary) return false;
+  const overview = String(summary.overview || "").trim();
+  if (/^```(?:json)?/i.test(overview) || (/^\{/.test(overview) && /"(?:headline|overview|chapters)"\s*:/.test(overview))) {
+    return true;
+  }
+  const structuredItems = [
+    summary.overviewCards,
+    summary.keyFacts,
+    summary.decisions,
+    summary.topics,
+    summary.detailedTopics,
+    summary.risks,
+    summary.aiInsights,
+    summary.actionItems,
+    summary.chapters,
+    summary.speakerInsights,
+    summary.notableMoments,
+    summary.keywords,
+  ].reduce((total, items) => total + (items?.length || 0), 0);
+  return !summary.headline && structuredItems === 0;
 }
 
 function microphoneScore(input: AudioInput) {
@@ -222,7 +281,15 @@ export default function Home() {
   const [inputLevel, setInputLevel] = useState(0);
   const [audioWarning, setAudioWarning] = useState("");
   const [highlightedSeq, setHighlightedSeq] = useState<number | null>(null);
+  const [renamingSpeaker, setRenamingSpeaker] = useState<Speaker | null>(null);
+  const [speakerNameDraft, setSpeakerNameDraft] = useState("");
+  const [templateDialogOpen, setTemplateDialogOpen] = useState(false);
+  const [defaultSummaryTemplate, setDefaultSummaryTemplate] = useState<SummaryTemplateId>(DEFAULT_SUMMARY_TEMPLATE);
+  const [defaultReportStyle, setDefaultReportStyle] = useState<ReportStyle>(DEFAULT_REPORT_STYLE);
+  const [templateDraft, setTemplateDraft] = useState<SummaryTemplateId>(DEFAULT_SUMMARY_TEMPLATE);
+  const [reportStyleDraft, setReportStyleDraft] = useState<ReportStyle>(DEFAULT_REPORT_STYLE);
   const socketRef = useRef<WebSocket | null>(null);
+  const playbackRef = useRef<HTMLAudioElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const recordingRef = useRef(false);
@@ -230,6 +297,27 @@ export default function Home() {
   const captureStartedAtRef = useRef(0);
   const lastLevelUpdateRef = useRef(0);
   const silenceWarningShownRef = useRef(false);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const savedTemplate = window.localStorage.getItem("shiyin.summaryTemplate") as SummaryTemplateId | null;
+      const savedStyle = window.localStorage.getItem("shiyin.reportStyle");
+      if (summaryTemplates.some((template) => template.id === savedTemplate)) {
+        setDefaultSummaryTemplate(savedTemplate!);
+      }
+      if (savedStyle === "visual") setDefaultReportStyle("visual");
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!templateDialogOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setTemplateDialogOpen(false);
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [templateDialogOpen]);
 
   const refreshAudioInputs = useCallback(async () => {
     const devices = (await navigator.mediaDevices.enumerateDevices())
@@ -334,17 +422,31 @@ export default function Home() {
     () => new Map(meeting?.speakers.map((speaker) => [speaker.id, speaker]) || []),
     [meeting?.speakers],
   );
-  const actions = meeting?.summary?.actionItems || [];
-  const chapters = meeting?.summary?.chapters || [];
-  const overviewCards = meeting?.summary?.overviewCards || [];
-  const keyFacts = meeting?.summary?.keyFacts || [];
-  const detailedTopics = meeting?.summary?.detailedTopics || [];
-  const aiInsights = meeting?.summary?.aiInsights || [];
-  const speakerInsights = useMemo(
-    () => meeting?.summary?.speakerInsights || [],
-    [meeting?.summary?.speakerInsights],
+  const finalSummaryInvalid = summaryLooksInvalid(meeting?.summary);
+  const liveSummaryInvalid = summaryLooksInvalid(meeting?.liveSummary);
+  const finalSummary = finalSummaryInvalid ? null : meeting?.summary;
+  const liveSummary = liveSummaryInvalid ? null : meeting?.liveSummary;
+  const usingLiveSummary = Boolean(!finalSummary && liveSummary);
+  const summaryFailed = Boolean(
+    !finalSummary
+    && !liveSummary
+    && (finalSummaryInvalid || (meeting?.status === "failed" && meeting.error?.startsWith("总结失败"))),
   );
-  const notableMoments = meeting?.summary?.notableMoments || [];
+  const summaryFailureMessage = finalSummaryInvalid
+    ? "上次生成的总结格式异常，原始内容已被安全隐藏。请重新生成。"
+    : meeting?.error || "";
+  const usableSummary = finalSummary || liveSummary || null;
+  const actions = usableSummary?.actionItems || [];
+  const chapters = usableSummary?.chapters || [];
+  const overviewCards = usableSummary?.overviewCards || [];
+  const keyFacts = usableSummary?.keyFacts || [];
+  const detailedTopics = usableSummary?.detailedTopics || [];
+  const aiInsights = usableSummary?.aiInsights || [];
+  const speakerInsights = useMemo(
+    () => usableSummary?.speakerInsights || [],
+    [usableSummary?.speakerInsights],
+  );
+  const notableMoments = usableSummary?.notableMoments || [];
   const activeJob = meeting?.jobs?.filter((job) => job.status === "running").at(-1);
   const speakerStats = useMemo(() => {
     if (!meeting) return [];
@@ -389,7 +491,10 @@ export default function Home() {
     try {
       setNotice("");
       setConnectionStatus("正在连接百炼…");
-      const socket = new WebSocket(websocketBase);
+      const socketUrl = new URL(websocketBase);
+      socketUrl.searchParams.set("template", defaultSummaryTemplate);
+      socketUrl.searchParams.set("reportStyle", defaultReportStyle);
+      const socket = new WebSocket(socketUrl.toString());
       socket.binaryType = "arraybuffer";
       socketRef.current = socket;
 
@@ -417,6 +522,26 @@ export default function Home() {
           } else if (message.type === "segment.final") {
             setLiveText("");
             updateLiveSegment(message.segment, message.speakers);
+          } else if (message.type === "summary.preview.started") {
+            setConnectionStatus("MiniMax M3 正在整理实时草稿…");
+          } else if (message.type === "summary.preview.progress") {
+            const characters = Number(message.characters || 0);
+            setConnectionStatus(
+              characters > 0
+                ? `MiniMax M3 正在生成实时草稿 · ${characters} 字`
+                : "MiniMax M3 正在生成实时草稿…",
+            );
+          } else if (message.type === "summary.preview") {
+            setMeeting((current) => {
+              if (!current || current.id !== message.meetingId) return current;
+              return { ...current, liveSummary: message.summary };
+            });
+            setMeetings((items) => items.map((item) => (
+              item.id === message.meetingId ? { ...item, liveSummary: message.summary } : item
+            )));
+            setConnectionStatus("百炼转写 · 实时草稿已更新");
+          } else if (message.type === "summary.preview.error") {
+            setConnectionStatus("百炼转写 · 实时草稿稍后重试");
           } else if (message.type === "job.progress") {
             setProcessing(true);
             setMeeting((current) => {
@@ -543,18 +668,29 @@ export default function Home() {
     else await startRecording();
   }
 
-  async function renameSpeaker(speaker: Speaker) {
-    const name = window.prompt(`将“${speaker.displayName}”改为：`, speaker.displayName);
-    if (!name?.trim() || name.trim() === speaker.displayName) return;
+  function beginRenameSpeaker(speaker: Speaker) {
+    setRenamingSpeaker(speaker);
+    setSpeakerNameDraft(speaker.displayName);
+  }
+
+  async function saveSpeakerName() {
+    if (!renamingSpeaker) return;
+    const name = speakerNameDraft.trim();
+    if (!name) return;
+    if (name === renamingSpeaker.displayName) {
+      setRenamingSpeaker(null);
+      return;
+    }
     try {
-      const updated = await api<Speaker>(`/api/speakers/${speaker.id}`, {
+      const updated = await api<Speaker>(`/api/speakers/${renamingSpeaker.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ displayName: name.trim() }),
+        body: JSON.stringify({ displayName: name }),
       });
       setMeeting((current) => current
         ? { ...current, speakers: current.speakers.map((item) => item.id === updated.id ? updated : item) }
         : current);
-      setNotice(`已将 ${speaker.displayName} 重命名为 ${updated.displayName}`);
+      setNotice(`已将 ${renamingSpeaker.displayName} 重命名为 ${updated.displayName}`);
+      setRenamingSpeaker(null);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "重命名失败");
     }
@@ -579,6 +715,75 @@ export default function Home() {
     }
   }
 
+  async function rerunSummary() {
+    if (!meeting || ["recording", "correcting", "summarizing"].includes(meeting.status)) return;
+    await regenerateSummary(meeting.id);
+  }
+
+  async function regenerateSummary(meetingId: string) {
+    try {
+      await api(`/api/meetings/${meetingId}/summarize`, { method: "POST" });
+      setProcessing(true);
+      setConnectionStatus("正在重新生成 MiniMax M3 总结…");
+      setMeeting((current) => current?.id === meetingId ? { ...current, status: "summarizing", error: null } : current);
+      setNotice("已在后台重新生成 AI 总结");
+      const poll = window.setInterval(async () => {
+        const value = await loadMeeting(meetingId).catch(() => null);
+        if (value && (value.status === "completed" || value.status === "failed")) {
+          window.clearInterval(poll);
+          setProcessing(false);
+          setConnectionStatus(value.status === "completed" ? "总结已更新" : "总结生成失败");
+          setNotice(value.error || "AI 总结已重新生成");
+          mergeMeetingList(value);
+        }
+      }, 1500);
+    } catch (error) {
+      setProcessing(false);
+      setNotice(error instanceof Error ? error.message : "无法重新生成总结");
+    }
+  }
+
+  function openTemplateDialog() {
+    setTemplateDraft(meeting?.summaryTemplate || defaultSummaryTemplate);
+    setReportStyleDraft(meeting?.reportStyle || defaultReportStyle);
+    setTemplateDialogOpen(true);
+  }
+
+  async function applyTemplateSettings() {
+    window.localStorage.setItem("shiyin.summaryTemplate", templateDraft);
+    window.localStorage.setItem("shiyin.reportStyle", reportStyleDraft);
+    setDefaultSummaryTemplate(templateDraft);
+    setDefaultReportStyle(reportStyleDraft);
+
+    if (!meeting) {
+      setTemplateDialogOpen(false);
+      setNotice(`新听记将使用“${summaryTemplateName(templateDraft)}”与${reportStyleDraft === "visual" ? "图文纪要" : "深度纪要"}`);
+      return;
+    }
+
+    const templateChanged = meeting.summaryTemplate !== templateDraft;
+    try {
+      const updated = await api<Meeting>(`/api/meetings/${meeting.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          summaryTemplate: templateDraft,
+          reportStyle: reportStyleDraft,
+        }),
+      });
+      setMeeting(updated);
+      mergeMeetingList(updated);
+      setTemplateDialogOpen(false);
+      if (templateChanged) {
+        setView("summary");
+        await regenerateSummary(updated.id);
+      } else {
+        setNotice(`已切换为${reportStyleDraft === "visual" ? "图文纪要" : "深度纪要"}，无需重新调用 MiniMax`);
+      }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法保存总结模板");
+    }
+  }
+
   async function deleteMeeting() {
     if (!meeting || meeting.status === "recording") return;
     if (!window.confirm(`删除“${meeting.title}”及其本地录音？此操作无法撤销。`)) return;
@@ -593,9 +798,27 @@ export default function Home() {
     }
   }
 
+  function seekToAudio(milliseconds: number, autoplay = true) {
+    const audio = playbackRef.current;
+    if (!audio) {
+      setNotice("当前会议没有可播放的原始录音");
+      return;
+    }
+    const seek = () => {
+      audio.currentTime = Math.max(0, milliseconds / 1000);
+      if (autoplay) {
+        void audio.play().catch(() => setNotice("无法播放原始录音，请稍后重试"));
+      }
+    };
+    if (audio.readyState >= HTMLMediaElement.HAVE_METADATA) seek();
+    else audio.addEventListener("loadedmetadata", seek, { once: true });
+  }
+
   function jumpToEvidence(seq: number) {
     setView("transcript");
     setHighlightedSeq(seq);
+    const startMs = meeting?.segments.find((segment) => segment.seq === seq)?.startMs;
+    if (startMs !== undefined) seekToAudio(startMs, false);
     window.setTimeout(() => {
       document.getElementById(`segment-${seq}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
     }, 80);
@@ -604,8 +827,12 @@ export default function Home() {
 
   function exportNotes() {
     if (!meeting) return;
+    if (summaryFailed) {
+      setNotice("当前总结生成失败，请重新生成后再导出报告");
+      return;
+    }
     const names = new Map(meeting.speakers.map((speaker) => [speaker.id, speaker.displayName]));
-    const summary = meeting.summary;
+    const summary = usableSummary;
     const list = (items: string[]) =>
       items.length ? `<ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : "<p class=\"muted\">无</p>";
     const transcript = meeting.segments.map((segment) => `
@@ -734,6 +961,17 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             {audioWarning || (recording ? `正在使用：${activeDeviceLabel}` : "开始后可看到输入电平")}
           </small>
         </label>
+        <button className="template-quick-button" onClick={openTemplateDialog} disabled={recording || processing}>
+          <span className={`template-quick-icon ${(meeting?.summaryTemplate || defaultSummaryTemplate).replace("meeting-", "")}`}>
+            {summaryTemplateIcon(meeting?.summaryTemplate || defaultSummaryTemplate, 18)}
+          </span>
+          <span>
+            <small>总结模板</small>
+            <b>{summaryTemplateName(meeting?.summaryTemplate || defaultSummaryTemplate)}</b>
+            <em>{(meeting?.reportStyle || defaultReportStyle) === "visual" ? "图文纪要" : "深度纪要"}</em>
+          </span>
+          <ArrowRight size={15} />
+        </button>
         <div className="nav-label">会议记录</div>
         <div className="meeting-list">
           {meetings.map((item) => (
@@ -772,9 +1010,11 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             </p>
           </div>
           <div className="top-actions">
-            <button disabled={!meeting || meeting.status === "recording"} onClick={rerunCorrection}>↻ 重新校正</button>
-            <button className="primary" disabled={!meeting} onClick={exportNotes}>⇩ 导出报告</button>
-            <button className="more danger" disabled={!meeting || meeting.status === "recording"} onClick={deleteMeeting}>删除</button>
+            <button disabled={recording || processing} onClick={openTemplateDialog}><Compass size={15} /> 模板</button>
+            <button disabled={!meeting || processing || ["recording", "correcting", "summarizing"].includes(meeting.status)} onClick={rerunCorrection}>↻ 重新校正</button>
+            <button disabled={!meeting || processing || ["recording", "correcting", "summarizing"].includes(meeting.status)} onClick={rerunSummary}>✦ 重新总结</button>
+            <button className="primary" disabled={!meeting || summaryFailed || processing || meeting.status === "summarizing"} onClick={exportNotes}>⇩ 导出报告</button>
+            <button className="more danger" disabled={!meeting || processing || ["recording", "correcting", "summarizing"].includes(meeting.status)} onClick={deleteMeeting}>删除</button>
           </div>
         </header>
 
@@ -792,6 +1032,23 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
               </div>
             )}
             {liveText && <div className="live-caption"><span>实时</span>{liveText}</div>}
+            {meeting?.audioPath && (
+              <section className="audio-dock" aria-label="原始录音播放器">
+                <div className="audio-dock-label">
+                  <span><Waveform size={19} weight="duotone" /></span>
+                  <p><b>原始录音</b><small>{formatClock(meeting.durationMs)} · 本机保存 · 点击文字时间可回听</small></p>
+                </div>
+                <audio
+                  key={meeting.id}
+                  ref={playbackRef}
+                  controls
+                  preload="metadata"
+                  src={`${apiBase}/api/meetings/${encodeURIComponent(meeting.id)}/audio`}
+                >
+                  当前系统不支持音频播放。
+                </audio>
+              </section>
+            )}
             <div className="tabs">
               <button className={view === "transcript" ? "active" : ""} onClick={() => setView("transcript")}>完整记录</button>
               <button className={view === "summary" ? "active" : ""} onClick={() => setView("summary")}>AI 总结 <span>✦</span></button>
@@ -814,9 +1071,15 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                         <div>
                           <div className="speaker">
                             {speaker
-                              ? <button title="点击修改姓名" onClick={() => renameSpeaker(speaker)}>{name}<i>✎</i></button>
+                              ? <button title="点击修改姓名" onClick={() => beginRenameSpeaker(speaker)}>{name}<i>✎</i></button>
                               : <b>{name}</b>}
-                            <span>{formatClock(segment.startMs)}–{formatClock(segment.endMs)}</span>
+                            <button
+                              className="segment-time"
+                              title={`从 ${formatClock(segment.startMs)} 播放原声`}
+                              onClick={() => seekToAudio(segment.startMs)}
+                            >
+                              <Waveform size={12} />{formatClock(segment.startMs)}–{formatClock(segment.endMs)}
+                            </button>
                             {segment.source === "corrected" && <em>已校正</em>}
                           </div>
                           <p>{segment.text}</p>
@@ -841,22 +1104,160 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
 
             {view === "summary" && (
               <div className="summary-pane">
-                {meeting?.summary ? (
+                {usingLiveSummary && (
+                  <div className="live-summary-banner" role="status">
+                    <span className="live-summary-pulse" aria-hidden="true" />
+                    <div>
+                      <strong>实时草稿</strong>
+                      <p>会议进行中持续更新；结束后会自动生成更完整的正式报告。</p>
+                    </div>
+                    <time>
+                      {liveSummary?.generatedAt
+                        ? `更新于 ${new Date(liveSummary.generatedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`
+                        : "正在更新"}
+                    </time>
+                  </div>
+                )}
+                {summaryFailed ? (
+                  <div className="summary-error-state" role="alert">
+                    <WarningCircle size={34} weight="duotone" />
+                    <h2>AI 总结生成失败</h2>
+                    <p>{summaryFailureMessage}</p>
+                    <button disabled={processing} onClick={rerunSummary}>
+                      {processing ? "正在重新生成…" : "重新生成 AI 总结"}
+                    </button>
+                  </div>
+                ) : usableSummary ? (
+                  meeting.reportStyle === "visual" ? (
+                    <div className="visual-report">
+                      <header className="visual-report-hero">
+                        <div className="visual-hero-topline">
+                          <span><Sparkle size={13} weight="fill" /> MiniMax AI {usingLiveSummary ? "实时草稿" : "图文纪要"}</span>
+                          <button onClick={openTemplateDialog}>{summaryTemplateName(meeting.summaryTemplate)} · 更换模板</button>
+                        </div>
+                        <h2>{usableSummary.headline || meeting.title}</h2>
+                        <p>{usableSummary.overview}</p>
+                        <div className="visual-metrics">
+                          <article><Clock size={18} weight="duotone" /><span><strong>{formatClock(meeting.durationMs)}</strong><small>会议时长</small></span></article>
+                          <article><UsersThree size={19} weight="duotone" /><span><strong>{meeting.speakers.length}</strong><small>位发言人</small></span></article>
+                          <article><Target size={18} weight="duotone" /><span><strong>{usableSummary.decisions.length}</strong><small>项关键决策</small></span></article>
+                          <article><CheckCircle size={19} weight="duotone" /><span><strong>{actions.length}</strong><small>项行动任务</small></span></article>
+                        </div>
+                      </header>
+
+                      {!!overviewCards.length && (
+                        <section className="visual-section">
+                          <div className="visual-section-heading">
+                            <div><span>01</span><h3>会议全景</h3></div>
+                            <p>从讨论到落地，一屏掌握本次会议</p>
+                          </div>
+                          <div className="visual-overview-grid">
+                            {overviewCards.slice(0, 6).map((card, index) => (
+                              <article key={`${card.title}-${index}`}>
+                                <header>
+                                  <span className={`visual-card-icon tone-${index % 4}`}>
+                                    {index % 4 === 0 && <Compass size={18} weight="duotone" />}
+                                    {index % 4 === 1 && <Target size={18} weight="duotone" />}
+                                    {index % 4 === 2 && <ListChecks size={18} weight="duotone" />}
+                                    {index % 4 === 3 && <Brain size={18} weight="duotone" />}
+                                  </span>
+                                  <h4>{card.title}</h4>
+                                  <i>{String(index + 1).padStart(2, "0")}</i>
+                                </header>
+                                <p>{card.summary}</p>
+                                {!!card.points?.length && <ul>{card.points.slice(0, 3).map((point) => <li key={point}>{point}</li>)}</ul>}
+                                {!!card.evidenceSeqs?.length && (
+                                  <button onClick={() => jumpToEvidence(card.evidenceSeqs[0])}>查看原文 <ArrowRight size={12} /></button>
+                                )}
+                              </article>
+                            ))}
+                          </div>
+                        </section>
+                      )}
+
+                      {!!keyFacts.length && (
+                        <section className="visual-section visual-fact-section">
+                          <div className="visual-section-heading">
+                            <div><span>02</span><h3>关键事实</h3></div>
+                            <p>会议中值得记住的数字与条件</p>
+                          </div>
+                          <div className="visual-fact-grid">
+                            {keyFacts.slice(0, 5).map((fact, index) => (
+                              <button key={`${fact.label}-${index}`} onClick={() => fact.evidenceSeqs?.[0] !== undefined && jumpToEvidence(fact.evidenceSeqs[0])}>
+                                <strong>{fact.value}</strong>
+                                <span>{fact.label}</span>
+                                <small>{fact.context}</small>
+                              </button>
+                            ))}
+                          </div>
+                        </section>
+                      )}
+
+                      <section className="visual-section">
+                        <div className="visual-section-heading">
+                          <div><span>03</span><h3>结论与执行</h3></div>
+                          <p>把明确结果与下一步放在同一张看板</p>
+                        </div>
+                        <div className="visual-execution-grid">
+                          <article className="visual-decision-panel">
+                            <header><span><Target size={18} weight="duotone" /></span><div><h4>已形成决策</h4><p>{usableSummary.decisions.length} 项明确结论</p></div></header>
+                            {usableSummary.decisions.length ? (
+                              <ol>{usableSummary.decisions.slice(0, 6).map((item) => <li key={item}>{item}</li>)}</ol>
+                            ) : <p className="visual-empty">本次讨论尚未形成明确决策。</p>}
+                          </article>
+                          <article className="visual-action-panel">
+                            <header><span><CheckCircle size={18} weight="duotone" /></span><div><h4>行动任务</h4><p>责任人与时间要求</p></div></header>
+                            <div>
+                              {actions.slice(0, 6).map((item, index) => (
+                                <button key={`${item.task}-${index}`} onClick={() => item.evidenceSeqs?.[0] !== undefined && jumpToEvidence(item.evidenceSeqs[0])}>
+                                  <span>{item.owner.slice(0, 1)}</span>
+                                  <p><b>{item.task}</b><small>{item.owner} · {item.due || "待确定"}</small></p>
+                                  <i className={`priority ${item.priority || "中"}`}>{item.priority || "中"}</i>
+                                </button>
+                              ))}
+                              {!actions.length && <p className="visual-empty">未识别到明确行动项。</p>}
+                            </div>
+                          </article>
+                        </div>
+                      </section>
+
+                      <section className="visual-section visual-bottom-grid">
+                        <article className="visual-risk-panel">
+                          <header><WarningCircle size={19} weight="duotone" /><div><h3>风险与待确认</h3><p>需要继续追踪的信息缺口</p></div></header>
+                          {usableSummary.risks.length ? (
+                            <ul>{usableSummary.risks.slice(0, 6).map((item) => <li key={item}>{item}</li>)}</ul>
+                          ) : <p className="visual-empty">暂未识别到明显风险。</p>}
+                        </article>
+                        <article className="visual-chapter-panel">
+                          <header><PushPin size={19} weight="duotone" /><div><h3>会议章节</h3><p>点击时间可定位原声</p></div></header>
+                          <div>
+                            {chapters.slice(0, 6).map((chapter, index) => (
+                              <button key={`${chapter.title}-${index}`} onClick={() => seekToAudio(chapter.startMs)}>
+                                <time>{formatClock(chapter.startMs)}</time>
+                                <span><b>{chapter.title}</b><small>{chapter.summary}</small></span>
+                                <ArrowRight size={13} />
+                              </button>
+                            ))}
+                          </div>
+                        </article>
+                      </section>
+                    </div>
+                  ) : (
                   <div className="report-page">
                     <header className="report-hero">
-                      <div className="ai-label"><Sparkle size={14} weight="fill" /> MiniMax AI 深度纪要</div>
-                      <h2>{meeting.summary.headline || meeting.summary.overview}</h2>
-                      <p className="report-overview">{meeting.summary.overview}</p>
+                      <div className="ai-label"><Sparkle size={14} weight="fill" /> MiniMax AI {usingLiveSummary ? "实时草稿" : "深度纪要"}</div>
+                      <h2>{usableSummary.headline || usableSummary.overview}</h2>
+                      <p className="report-overview">{usableSummary.overview}</p>
                       <div className="report-meta">
                         <span><Clock size={14} />{formatClock(meeting.durationMs)}</span>
                         <span><UsersThree size={15} />{meeting.speakers.length} 位发言人</span>
                         <span><Quotes size={15} />{meeting.segments.length} 段有效发言</span>
                       </div>
                       <div className="report-stats">
-                        <div><strong>{chapters.length || meeting.summary.topics.length}</strong><span>讨论章节</span></div>
-                        <div><strong>{meeting.summary.decisions.length}</strong><span>关键决策</span></div>
+                        <div><strong>{chapters.length || usableSummary.topics.length}</strong><span>讨论章节</span></div>
+                        <div><strong>{usableSummary.decisions.length}</strong><span>关键决策</span></div>
                         <div><strong>{actions.length}</strong><span>行动任务</span></div>
-                        <div><strong>{meeting.summary.risks.length}</strong><span>风险待确认</span></div>
+                        <div><strong>{usableSummary.risks.length}</strong><span>风险待确认</span></div>
                       </div>
                     </header>
 
@@ -890,13 +1291,13 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                       </section>
                     )}
 
-                    {!!meeting.summary.meetingBackground && (
+                    {!!usableSummary.meetingBackground && (
                       <section className="report-section">
                         <div className="report-section-heading">
                           <span className="section-icon background"><Flag size={18} weight="duotone" /></span>
                           <div><h3>会议背景</h3><p>为什么召开，以及希望解决什么问题</p></div>
                         </div>
-                        <p className="meeting-background">{meeting.summary.meetingBackground}</p>
+                        <p className="meeting-background">{usableSummary.meetingBackground}</p>
                       </section>
                     )}
 
@@ -921,14 +1322,14 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                       </section>
                     )}
 
-                    {!!meeting.summary.decisions.length && (
+                    {!!usableSummary.decisions.length && (
                       <section className="report-section">
                         <div className="report-section-heading">
                           <span className="section-icon decision"><Target size={17} weight="duotone" /></span>
                           <div><h3>关键决策</h3><p>会议中已形成的明确结论</p></div>
                         </div>
                         <div className="decision-list">
-                          {meeting.summary.decisions.map((item, index) => (
+                          {usableSummary.decisions.map((item, index) => (
                             <article key={`${item}-${index}`}>
                               <span>{String(index + 1).padStart(2, "0")}</span>
                               <p>{item}</p>
@@ -1109,39 +1510,46 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                       </section>
                     )}
 
-                    {!!meeting.summary.risks.length && (
+                    {!!usableSummary.risks.length && (
                       <section className="report-section">
                         <div className="report-section-heading">
                           <span className="section-icon risks"><WarningCircle size={18} weight="duotone" /></span>
                           <div><h3>风险与待确认</h3><p>尚未闭环的问题和信息缺口</p></div>
                         </div>
                         <div className="risk-list">
-                          {meeting.summary.risks.map((item) => (
+                          {usableSummary.risks.map((item) => (
                             <article key={item}><WarningCircle size={17} /><p>{item}</p></article>
                           ))}
                         </div>
                       </section>
                     )}
 
-                    {!!meeting.summary.topics.length && (
+                    {!!usableSummary.topics.length && (
                       <section className="report-section report-topics">
                         <div className="report-section-heading">
                           <span className="section-icon topics"><Sparkle size={17} weight="duotone" /></span>
                           <div><h3>主题与关键词</h3><p>便于检索和后续归档</p></div>
                         </div>
                         <div className="topic-tags">
-                          {[...meeting.summary.topics, ...(meeting.summary.keywords || [])]
+                          {[...usableSummary.topics, ...(usableSummary.keywords || [])]
                             .filter((item, index, items) => items.indexOf(item) === index)
                             .map((topic) => <span key={topic}>{topic}</span>)}
                         </div>
                       </section>
                     )}
                   </div>
+                  )
                 ) : (
                   <div className="empty-summary">
                     <Sparkle size={28} weight="duotone" />
-                    <h2>尚未生成总结</h2>
-                    <p>结束听记后，会先在本地校正发言人，再用 MiniMax 生成完整会议报告。</p>
+                    <h2>{meeting?.status === "recording" ? "正在等待首份实时草稿" : "尚未生成总结"}</h2>
+                    <p>
+                      {meeting?.status === "recording"
+                        ? "录音约 30 秒后开始生成，并随会议内容持续更新。"
+                        : meeting?.status === "summarizing"
+                          ? "MiniMax M3 正在流式生成正式报告，请稍候。"
+                          : "结束听记后，会先在本地校正发言人，再用 MiniMax 生成完整会议报告。"}
+                    </p>
                   </div>
                 )}
               </div>
@@ -1172,19 +1580,22 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
           </article>
 
           <aside className="insight-card">
-            <div className="insight-title"><span>✦</span><div><h2>会议速览</h2><p>百炼转写 · MiniMax M2.7 总结</p></div><button onClick={rerunCorrection}>↻</button></div>
+            <div className="insight-title"><span>✦</span><div><h2>会议速览</h2><p>{usingLiveSummary ? "百炼转写 · MiniMax M3 实时草稿" : "百炼转写 · MiniMax M3 总结"}</p></div><button disabled={!meeting || processing || ["recording", "correcting", "summarizing"].includes(meeting.status)} onClick={rerunSummary} aria-label="重新生成总结">↻</button></div>
             <div className="metric-row">
               <div><strong>{Math.ceil((meeting?.durationMs || 0) / 60000)}<small>分钟</small></strong><span>会议时长</span></div>
               <div><strong>{meeting?.speakers.length || 0}<small>位</small></strong><span>识别发言人</span></div>
               <div><strong>{actions.length}<small>项</small></strong><span>行动任务</span></div>
             </div>
-            <div className="insight-section"><h3>一句话总结</h3><p>{meeting?.summary?.overview || "结束听记后自动生成。"}</p></div>
-            <div className="insight-section"><h3>讨论主题</h3><div className="tags">{(meeting?.summary?.topics || []).map((topic) => <span key={topic}>{topic}</span>)}{!meeting?.summary?.topics?.length && <span>等待总结</span>}</div></div>
+            <div className={`insight-section ${summaryFailed ? "summary-warning" : ""}`}>
+              <h3>{summaryFailed ? "总结状态" : "一句话总结"}</h3>
+              <p>{summaryFailed ? summaryFailureMessage : usableSummary?.overview || (meeting?.status === "recording" ? "录音约 30 秒后出现实时草稿。" : "结束听记后自动生成。")}</p>
+            </div>
+            <div className="insight-section"><h3>讨论主题</h3><div className="tags">{(usableSummary?.topics || []).map((topic) => <span key={topic}>{topic}</span>)}{!usableSummary?.topics?.length && <span>{summaryFailed ? "等待重新生成" : "等待总结"}</span>}</div></div>
             <div className="insight-section">
               <h3>发言人</h3>
               <div className="speaker-list">
                 {(meeting?.speakers || []).map((speaker) => (
-                  <button key={speaker.id} onClick={() => renameSpeaker(speaker)}>
+                  <button key={speaker.id} onClick={() => beginRenameSpeaker(speaker)}>
                     <i className={`avatar ${speaker.color}`}>{speaker.displayName.slice(0, 1)}</i>
                     <span>{speaker.displayName}<small>{speaker.manuallyNamed ? "已命名" : "点击重命名"}</small></span>
                   </button>
@@ -1192,10 +1603,148 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                 {!meeting?.speakers.length && <p>有效语音出现后自动编号</p>}
               </div>
             </div>
-            <button className="open-summary" onClick={() => setView("summary")}>查看完整 AI 总结 <span>→</span></button>
+            <button className="open-summary" onClick={() => summaryFailed ? rerunSummary() : setView("summary")}>
+              {summaryFailed ? "重新生成 AI 总结" : usingLiveSummary ? "查看实时草稿" : "查看完整 AI 总结"} <span>→</span>
+            </button>
           </aside>
         </div>
       </section>
+      {templateDialogOpen && (
+        <div
+          className="dialog-backdrop template-dialog-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.currentTarget === event.target) setTemplateDialogOpen(false);
+          }}
+        >
+          <section
+            className="template-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="template-dialog-title"
+            onKeyDown={(event) => {
+              if (event.key === "Escape") setTemplateDialogOpen(false);
+            }}
+          >
+            <header className="template-dialog-heading">
+              <div>
+                <span className="template-eyebrow"><Sparkle size={13} weight="fill" /> MiniMax M3 总结方式</span>
+                <h2 id="template-dialog-title">这次想怎么整理？</h2>
+                <p>{meeting ? "内容模板会影响 AI 的提炼重点；展示样式可随时切换。" : "设置会用于下一场听记，之后仍可重新选择。"}</p>
+              </div>
+              <button autoFocus className="template-close" onClick={() => setTemplateDialogOpen(false)} aria-label="关闭模板选择">
+                <X size={18} />
+              </button>
+            </header>
+
+            <div className="template-dialog-section">
+              <div className="template-section-title">
+                <div><h3>内容模板</h3><p>选择 MiniMax 分析会议时关注的重点</p></div>
+                <span>切换后重新生成</span>
+              </div>
+              <div className="template-card-grid">
+                {summaryTemplates.map((template) => {
+                  const selected = templateDraft === template.id;
+                  return (
+                    <button
+                      key={template.id}
+                      className={`template-card ${template.accent} ${selected ? "selected" : ""}`}
+                      aria-pressed={selected}
+                      onClick={() => setTemplateDraft(template.id)}
+                    >
+                      <span className="template-card-icon">{summaryTemplateIcon(template.id, 22)}</span>
+                      <span><b>{template.name}</b><small>{template.description}</small></span>
+                      {selected && <CheckCircle className="template-check" size={20} weight="fill" />}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="template-dialog-section">
+              <div className="template-section-title">
+                <div><h3>报告样式</h3><p>同一份结构化内容，用不同方式呈现</p></div>
+                <span>切换不消耗额度</span>
+              </div>
+              <div className="report-style-grid">
+                <button
+                  className={reportStyleDraft === "detailed" ? "selected" : ""}
+                  aria-pressed={reportStyleDraft === "detailed"}
+                  onClick={() => setReportStyleDraft("detailed")}
+                >
+                  <span className="style-preview detailed"><ListChecks size={28} weight="duotone" /></span>
+                  <span><b>深度纪要</b><small>完整展开议题、原文证据与时间轴</small></span>
+                  {reportStyleDraft === "detailed" && <CheckCircle size={20} weight="fill" />}
+                </button>
+                <button
+                  className={reportStyleDraft === "visual" ? "selected" : ""}
+                  aria-pressed={reportStyleDraft === "visual"}
+                  onClick={() => setReportStyleDraft("visual")}
+                >
+                  <span className="style-preview visual"><ChartBar size={28} weight="duotone" /></span>
+                  <span><b>图文纪要</b><small>看板化呈现重点、数据、任务与风险</small></span>
+                  {reportStyleDraft === "visual" && <CheckCircle size={20} weight="fill" />}
+                </button>
+              </div>
+            </div>
+
+            <footer className="template-dialog-footer">
+              <p>
+                {meeting && meeting.summaryTemplate !== templateDraft
+                  ? `将以“${summaryTemplateName(templateDraft)}”提示词重新调用 MiniMax M3`
+                  : "当前选择只改变展示，不会重复生成内容"}
+              </p>
+              <div>
+                <button onClick={() => setTemplateDialogOpen(false)}>取消</button>
+                <button className="primary" onClick={() => void applyTemplateSettings()}>
+                  {meeting && meeting.summaryTemplate !== templateDraft ? "应用并重新生成" : "保存设置"}
+                </button>
+              </div>
+            </footer>
+          </section>
+        </div>
+      )}
+      {renamingSpeaker && (
+        <div
+          className="dialog-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.currentTarget === event.target) setRenamingSpeaker(null);
+          }}
+        >
+          <form
+            className="rename-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="rename-speaker-title"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveSpeakerName();
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") setRenamingSpeaker(null);
+            }}
+          >
+            <div className="rename-dialog-heading">
+              <span><UsersThree size={20} weight="duotone" /></span>
+              <div><h2 id="rename-speaker-title">修改发言人姓名</h2><p>同一发言人的全部记录会一起更新。</p></div>
+            </div>
+            <label htmlFor="speaker-name">发言人姓名</label>
+            <input
+              id="speaker-name"
+              autoFocus
+              maxLength={32}
+              value={speakerNameDraft}
+              onChange={(event) => setSpeakerNameDraft(event.target.value)}
+              placeholder="例如：王工、产品负责人"
+            />
+            <div className="rename-dialog-actions">
+              <button type="button" onClick={() => setRenamingSpeaker(null)}>取消</button>
+              <button className="primary" type="submit" disabled={!speakerNameDraft.trim()}>保存名称</button>
+            </div>
+          </form>
+        </div>
+      )}
       {notice && <button className="toast" onClick={() => setNotice("")}>{notice}<i>×</i></button>}
     </main>
   );

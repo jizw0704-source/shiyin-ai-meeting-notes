@@ -2,6 +2,13 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import {
+  DEFAULT_REPORT_STYLE,
+  DEFAULT_SUMMARY_TEMPLATE,
+  SUMMARY_TEMPLATE_VERSION,
+  normalizeReportStyle,
+  normalizeSummaryTemplateId,
+} from "./summary-templates.mjs";
 
 export class MeetingStorage {
   constructor(dataRoot = path.resolve("data")) {
@@ -21,7 +28,11 @@ export class MeetingStorage {
         duration_ms INTEGER NOT NULL DEFAULT 0,
         audio_path TEXT,
         summary_json TEXT,
-        error TEXT
+        live_summary_json TEXT,
+        error TEXT,
+        summary_template TEXT NOT NULL DEFAULT 'meeting-minutes',
+        template_version INTEGER NOT NULL DEFAULT 1,
+        report_style TEXT NOT NULL DEFAULT 'detailed'
       );
       CREATE TABLE IF NOT EXISTS speakers (
         id TEXT PRIMARY KEY,
@@ -63,17 +74,38 @@ export class MeetingStorage {
       CREATE INDEX IF NOT EXISTS idx_speakers_meeting ON speakers(meeting_id);
       CREATE INDEX IF NOT EXISTS idx_jobs_meeting ON jobs(meeting_id);
     `);
+    const meetingColumns = new Set(
+      this.db.prepare("PRAGMA table_info(meetings)").all().map((column) => column.name),
+    );
+    if (!meetingColumns.has("summary_template")) {
+      this.db.exec("ALTER TABLE meetings ADD COLUMN summary_template TEXT NOT NULL DEFAULT 'meeting-minutes'");
+    }
+    if (!meetingColumns.has("template_version")) {
+      this.db.exec("ALTER TABLE meetings ADD COLUMN template_version INTEGER NOT NULL DEFAULT 1");
+    }
+    if (!meetingColumns.has("report_style")) {
+      this.db.exec("ALTER TABLE meetings ADD COLUMN report_style TEXT NOT NULL DEFAULT 'detailed'");
+    }
+    if (!meetingColumns.has("live_summary_json")) {
+      this.db.exec("ALTER TABLE meetings ADD COLUMN live_summary_json TEXT");
+    }
   }
 
-  createMeeting(title = "未命名会议") {
+  createMeeting(title = "未命名会议", options = {}) {
     const id = randomUUID();
     const now = new Date().toISOString();
+    const summaryTemplate = normalizeSummaryTemplateId(options.summaryTemplate);
+    const reportStyle = normalizeReportStyle(options.reportStyle);
+    const templateVersion = Number.isInteger(options.templateVersion)
+      ? options.templateVersion
+      : SUMMARY_TEMPLATE_VERSION;
     const directory = path.join(this.dataRoot, "meetings", id);
     mkdirSync(directory, { recursive: true });
     this.db.prepare(`
-      INSERT INTO meetings (id, title, status, created_at, started_at)
-      VALUES (?, ?, 'recording', ?, ?)
-    `).run(id, title, now, now);
+      INSERT INTO meetings
+      (id, title, status, created_at, started_at, summary_template, template_version, report_style)
+      VALUES (?, ?, 'recording', ?, ?, ?, ?, ?)
+    `).run(id, title, now, now, summaryTemplate, templateVersion, reportStyle);
     return this.getMeeting(id);
   }
 
@@ -99,7 +131,11 @@ export class MeetingStorage {
       durationMs: meeting.duration_ms,
       audioPath: meeting.audio_path,
       summary: meeting.summary_json ? JSON.parse(meeting.summary_json) : null,
+      liveSummary: meeting.live_summary_json ? JSON.parse(meeting.live_summary_json) : null,
       error: meeting.error,
+      summaryTemplate: normalizeSummaryTemplateId(meeting.summary_template || DEFAULT_SUMMARY_TEMPLATE),
+      templateVersion: Number(meeting.template_version || SUMMARY_TEMPLATE_VERSION),
+      reportStyle: normalizeReportStyle(meeting.report_style || DEFAULT_REPORT_STYLE),
     };
     if (!includeDetails) return value;
     value.speakers = this.listSpeakers(meeting.id);
@@ -116,6 +152,9 @@ export class MeetingStorage {
       durationMs: "duration_ms",
       audioPath: "audio_path",
       error: "error",
+      summaryTemplate: "summary_template",
+      templateVersion: "template_version",
+      reportStyle: "report_style",
     };
     const entries = Object.entries(patch).filter(([key]) => map[key]);
     if (entries.length) {
@@ -128,6 +167,11 @@ export class MeetingStorage {
   saveSummary(meetingId, summary) {
     this.db.prepare("UPDATE meetings SET summary_json = ? WHERE id = ?")
       .run(JSON.stringify(summary), meetingId);
+  }
+
+  saveLiveSummary(meetingId, summary) {
+    this.db.prepare("UPDATE meetings SET live_summary_json = ? WHERE id = ?")
+      .run(summary ? JSON.stringify(summary) : null, meetingId);
   }
 
   addSegment(meetingId, segment) {

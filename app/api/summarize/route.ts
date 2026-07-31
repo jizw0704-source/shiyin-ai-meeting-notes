@@ -15,7 +15,7 @@ export async function POST(request: Request) {
     method: "POST",
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: process.env.MINIMAX_MODEL || "MiniMax-M2.7",
+      model: process.env.MINIMAX_MODEL || "MiniMax-M3",
       temperature: 0.2,
       max_tokens: 1800,
       messages: [

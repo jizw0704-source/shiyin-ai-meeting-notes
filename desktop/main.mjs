@@ -12,11 +12,19 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+app.setName("拾音 AI");
+if (app.isPackaged) {
+  app.setPath("userData", path.join(app.getPath("appData"), "拾音 AI"));
+}
+
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const sourceRoot = path.resolve(directory, "..");
 const productionMode = app.isPackaged || process.argv.includes("--production");
 const appRoot = app.isPackaged ? app.getAppPath() : sourceRoot;
 const runtimeRoot = app.isPackaged ? app.getPath("userData") : sourceRoot;
+const packagedWebRoot = app.isPackaged
+  ? path.join(process.resourcesPath, "app.asar.unpacked")
+  : runtimeRoot;
 const nodeEnvironment = {
   ...process.env,
   ELECTRON_RUN_AS_NODE: "1",
@@ -32,7 +40,6 @@ let quitting = false;
 let powerBlockerId = null;
 const managedServices = [];
 
-app.setName("拾音 AI");
 if (process.platform === "win32") app.setAppUserModelId("com.phenosola.shiyin");
 const singleInstance = app.requestSingleInstanceLock();
 if (!singleInstance) app.quit();
@@ -62,9 +69,9 @@ async function waitUntilReady(url, timeoutMs = 60000) {
   return false;
 }
 
-function spawnNode(script, args = [], extraEnvironment = {}) {
+function spawnNode(script, args = [], extraEnvironment = {}, workingDirectory = runtimeRoot) {
   const child = spawn(process.execPath, [script, ...args], {
-    cwd: runtimeRoot,
+    cwd: workingDirectory,
     env: { ...nodeEnvironment, ...extraEnvironment },
     windowsHide: true,
     stdio: "ignore",
@@ -78,11 +85,20 @@ async function ensureServices() {
     spawnNode(path.join(appRoot, "server", "realtime-proxy.mjs"));
   }
   if (!await reachable("http://127.0.0.1:3000")) {
-    spawnNode(
-      path.join(appRoot, "node_modules", "vinext", "dist", "cli.js"),
-      [productionMode ? "start" : "dev", "--hostname", "127.0.0.1"],
-      { PORT: "3000" },
-    );
+    if (productionMode) {
+      spawnNode(
+        path.join(appRoot, "server", "web-server.mjs"),
+        [],
+        { PORT: "3000", HOST: "127.0.0.1" },
+        packagedWebRoot,
+      );
+    } else {
+      spawnNode(
+        path.join(appRoot, "node_modules", "vinext", "dist", "cli.js"),
+        ["dev", "--hostname", "127.0.0.1"],
+        { PORT: "3000" },
+      );
+    }
   }
   const [backendReady, webReady] = await Promise.all([
     waitUntilReady("http://127.0.0.1:8788/health"),

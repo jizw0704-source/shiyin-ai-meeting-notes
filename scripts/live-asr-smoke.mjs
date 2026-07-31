@@ -4,8 +4,10 @@ import { WebSocket } from "ws";
 
 const inputPath = process.argv[2];
 const endpoint = process.argv[3] || "ws://127.0.0.1:8788";
+const title = process.argv[4] || "自动语音链路测试";
+const sendIntervalMs = Math.max(10, Number(process.argv[5]) || 35);
 if (!inputPath) {
-  console.error("用法：node scripts/live-asr-smoke.mjs <16k单声道PCM WAV>");
+  console.error("用法：node scripts/live-asr-smoke.mjs <16k单声道PCM WAV> [WebSocket地址] [会议标题] [每100ms音频的发送间隔ms]");
   process.exit(1);
 }
 
@@ -30,26 +32,30 @@ function extractPcm(wav) {
 }
 
 const pcm = extractPcm(readFileSync(inputPath));
-const socket = new WebSocket(`${endpoint}?title=${encodeURIComponent("自动语音链路测试")}`);
+const durationMs = pcm.length / 32;
+const expectedSendMs = durationMs / 100 * sendIntervalMs;
+const timeoutMs = Math.max(90000, Math.ceil(expectedSendMs + 180000));
+const socket = new WebSocket(`${endpoint}?title=${encodeURIComponent(title)}`);
 let finalSegments = 0;
 let completed = false;
 
 const timeout = setTimeout(() => {
-  console.error("实时识别测试超时");
+  console.error(`实时识别测试超时（${Math.round(timeoutMs / 1000)} 秒）`);
   socket.close();
   process.exitCode = 2;
-}, 90000);
+}, timeoutMs);
 
 socket.on("message", async (raw) => {
   const message = JSON.parse(raw.toString());
   if (message.type === "session.started") {
     console.log(`会议已创建：${message.meeting.id}`);
+    console.log(`输入时长：${(durationMs / 1000).toFixed(1)} 秒；预计发送：${(expectedSendMs / 1000).toFixed(1)} 秒`);
     for (let offset = 0; offset < pcm.length; offset += 3200) {
       socket.send(pcm.subarray(offset, Math.min(pcm.length, offset + 3200)));
-      await new Promise((resolve) => setTimeout(resolve, 35));
+      await new Promise((resolve) => setTimeout(resolve, sendIntervalMs));
     }
     socket.send(JSON.stringify({ type: "session.stop" }));
-  } else if (message.type === "asr.partial" && message.text) {
+  } else if (message.type === "asr.partial" && message.text && process.env.LIVE_ASR_PARTIALS === "1") {
     console.log(`实时：${message.text}`);
   } else if (message.type === "segment.final") {
     finalSegments += 1;

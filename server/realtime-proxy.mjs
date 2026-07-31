@@ -6,11 +6,17 @@ import path from "node:path";
 import process from "node:process";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { WebSocket, WebSocketServer } from "ws";
+import { streamMeetingAudio } from "./audio-stream.mjs";
 import { AudioSession } from "./audio-session.mjs";
 import { correctMeetingSpeakers } from "./correction.mjs";
 import { SpeakerEngine } from "./speaker-engine.mjs";
 import { MeetingStorage } from "./storage.mjs";
-import { summarizeMeeting } from "./summarizer.mjs";
+import { summarizeMeeting, summarizeMeetingPreview } from "./summarizer.mjs";
+import {
+  SUMMARY_TEMPLATE_VERSION,
+  normalizeReportStyle,
+  normalizeSummaryTemplateId,
+} from "./summary-templates.mjs";
 
 for (const file of [".env.local", ".env"]) {
   try { process.loadEnvFile?.(file); } catch { /* optional local env file */ }
@@ -19,9 +25,11 @@ for (const file of [".env.local", ".env"]) {
 const port = Number(process.env.ASR_PROXY_PORT || 8788);
 const apiKey = process.env.DASHSCOPE_API_KEY;
 const miniMaxApiKey = process.env.MINIMAX_API_KEY;
-const miniMaxModel = process.env.MINIMAX_MODEL || "MiniMax-M2.7";
+const miniMaxModel = process.env.MINIMAX_MODEL || "MiniMax-M3";
 const workspaceId = process.env.DASHSCOPE_WORKSPACE_ID;
 const dataRoot = path.resolve(process.env.SHIYIN_DATA_ROOT || "data");
+const liveSummaryStartMs = Math.max(15000, Number(process.env.LIVE_SUMMARY_START_MS) || 30000);
+const liveSummaryIntervalMs = Math.max(10000, Number(process.env.LIVE_SUMMARY_INTERVAL_MS) || 20000);
 const modelPath = path.resolve(process.env.SHIYIN_MODEL_PATH || path.join("models", "speaker", "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"));
 const storage = new MeetingStorage(dataRoot);
 const speakerEngine = new SpeakerEngine({ modelPath, maxSpeakers: 6, threshold: 0.62 });
@@ -85,6 +93,55 @@ function meetingTitle() {
   }).format(new Date())}`;
 }
 
+async function runSummary(meetingId, client = null) {
+  const summaryJob = storage.createJob(meetingId, "summary");
+  storage.updateMeeting(meetingId, { status: "summarizing", error: null });
+  storage.updateJob(summaryJob.id, { status: "running", progress: 10 });
+  sendJson(client, { type: "job.progress", meetingId, job: storage.getJob(summaryJob.id) });
+  try {
+    let lastProgress = 10;
+    let lastProgressSentAt = 0;
+    const summary = await summarizeMeeting(storage.getMeeting(meetingId), miniMaxApiKey, miniMaxModel, {
+      stream: true,
+      onProgress(event) {
+        const now = Date.now();
+        const extractionProgress = event.phase === "extracting"
+          ? 12 + Math.round(((event.chunk - 1) / Math.max(1, event.totalChunks)) * 30)
+          : 45;
+        const streamedProgress = Math.min(48, Math.floor(((event.characters || 0) + (event.events || 0) * 8) / 120));
+        const progress = Math.min(96, Math.max(lastProgress, extractionProgress + streamedProgress));
+        if (progress <= lastProgress && now - lastProgressSentAt < 1000) return;
+        lastProgress = progress;
+        lastProgressSentAt = now;
+        storage.updateJob(summaryJob.id, { status: "running", progress });
+        sendJson(client, { type: "job.progress", meetingId, job: storage.getJob(summaryJob.id) });
+      },
+    });
+    storage.saveSummary(meetingId, summary);
+    storage.updateJob(summaryJob.id, { status: "completed", progress: 100 });
+    storage.updateMeeting(meetingId, { status: "completed", error: null });
+  } catch (error) {
+    const meeting = storage.getMeeting(meetingId);
+    const fallbackAvailable = Boolean(meeting?.summary || meeting?.liveSummary);
+    const fallbackLabel = meeting?.summary ? "上次正式报告" : "实时草稿";
+    storage.updateJob(summaryJob.id, { status: "failed", error: error.message });
+    storage.updateMeeting(meetingId, {
+      status: fallbackAvailable ? "completed" : "failed",
+      error: fallbackAvailable
+        ? `最终定稿失败：${error.message}；当前保留${fallbackLabel}`
+        : `总结失败：${error.message}`,
+    });
+    sendJson(client, {
+      type: "error",
+      recoverable: true,
+      message: fallbackAvailable
+        ? `最终定稿暂未完成，已保留${fallbackLabel}：${error.message}`
+        : `总结失败：${error.message}`,
+    });
+  }
+  return storage.getMeeting(meetingId);
+}
+
 async function runCorrectionAndSummary(meetingId, client = null) {
   const correctionJob = storage.createJob(meetingId, "speaker-correction");
   storage.updateMeeting(meetingId, { status: "correcting", error: null });
@@ -110,20 +167,7 @@ async function runCorrectionAndSummary(meetingId, client = null) {
     sendJson(client, { type: "error", recoverable: true, message: `说话人校正失败：${error.message}` });
   }
 
-  const summaryJob = storage.createJob(meetingId, "summary");
-  storage.updateMeeting(meetingId, { status: "summarizing" });
-  storage.updateJob(summaryJob.id, { status: "running", progress: 10 });
-  sendJson(client, { type: "job.progress", meetingId, job: storage.getJob(summaryJob.id) });
-  try {
-    const summary = await summarizeMeeting(storage.getMeeting(meetingId), miniMaxApiKey, miniMaxModel);
-    storage.saveSummary(meetingId, summary);
-    storage.updateJob(summaryJob.id, { status: "completed", progress: 100 });
-    storage.updateMeeting(meetingId, { status: "completed", error: null });
-  } catch (error) {
-    storage.updateJob(summaryJob.id, { status: "failed", error: error.message });
-    storage.updateMeeting(meetingId, { status: "completed", error: `总结失败：${error.message}` });
-  }
-  const meeting = storage.getMeeting(meetingId);
+  const meeting = await runSummary(meetingId, client);
   sendJson(client, { type: "session.completed", meeting });
   return meeting;
 }
@@ -139,10 +183,18 @@ const httpServer = createServer(async (request, response) => {
         miniMaxConfigured: Boolean(miniMaxApiKey),
         speakerModelAvailable: speakerEngine.available,
         activeMeetings: activeSessions.size,
+        liveSummaryStartMs,
+        liveSummaryIntervalMs,
       });
     }
     if (request.method === "GET" && url.pathname === "/api/meetings") {
       return jsonResponse(response, 200, { meetings: storage.listMeetings() });
+    }
+    const audioMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/audio$/);
+    if ((request.method === "GET" || request.method === "HEAD") && audioMatch) {
+      const meeting = storage.getMeeting(audioMatch[1]);
+      if (!meeting) return jsonResponse(response, 404, { error: "会议不存在" });
+      return streamMeetingAudio(request, response, { meeting, dataRoot });
     }
     const meetingMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)$/);
     if (request.method === "GET" && meetingMatch) {
@@ -151,7 +203,14 @@ const httpServer = createServer(async (request, response) => {
     }
     if (request.method === "PATCH" && meetingMatch) {
       const body = await readJson(request);
-      const meeting = storage.updateMeeting(meetingMatch[1], { title: String(body.title || "").trim().slice(0, 80) });
+      const patch = {};
+      if (Object.hasOwn(body, "title")) patch.title = String(body.title || "").trim().slice(0, 80);
+      if (Object.hasOwn(body, "summaryTemplate")) {
+        patch.summaryTemplate = normalizeSummaryTemplateId(body.summaryTemplate);
+        patch.templateVersion = SUMMARY_TEMPLATE_VERSION;
+      }
+      if (Object.hasOwn(body, "reportStyle")) patch.reportStyle = normalizeReportStyle(body.reportStyle);
+      const meeting = storage.updateMeeting(meetingMatch[1], patch);
       return jsonResponse(response, meeting ? 200 : 404, meeting || { error: "会议不存在" });
     }
     if (request.method === "DELETE" && meetingMatch) {
@@ -174,15 +233,17 @@ const httpServer = createServer(async (request, response) => {
     const actionMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/(correct|summarize)$/);
     if (request.method === "POST" && actionMatch) {
       const meetingId = actionMatch[1];
-      if (!storage.getMeeting(meetingId)) return jsonResponse(response, 404, { error: "会议不存在" });
+      const currentMeeting = storage.getMeeting(meetingId);
+      if (!currentMeeting) return jsonResponse(response, 404, { error: "会议不存在" });
+      if (["recording", "correcting", "summarizing"].includes(currentMeeting.status)) {
+        return jsonResponse(response, 409, { error: "会议仍在处理中，请稍后再试" });
+      }
       if (actionMatch[2] === "correct") {
         runCorrectionAndSummary(meetingId).catch(() => undefined);
       } else {
-        const meeting = storage.getMeeting(meetingId);
-        summarizeMeeting(meeting, miniMaxApiKey, miniMaxModel).then((summary) => {
-          storage.saveSummary(meetingId, summary);
-          storage.updateMeeting(meetingId, { status: "completed", error: null });
-        }).catch((error) => storage.updateMeeting(meetingId, { error: `总结失败：${error.message}` }));
+        runSummary(meetingId).catch((error) => {
+          storage.updateMeeting(meetingId, { status: "failed", error: `总结失败：${error.message}` });
+        });
       }
       return jsonResponse(response, 202, { accepted: true });
     }
@@ -202,7 +263,10 @@ websocketServer.on("connection", (client, request) => {
   }
 
   const requestUrl = new URL(request.url, "http://127.0.0.1");
-  const meeting = storage.createMeeting(requestUrl.searchParams.get("title") || meetingTitle());
+  const meeting = storage.createMeeting(requestUrl.searchParams.get("title") || meetingTitle(), {
+    summaryTemplate: requestUrl.searchParams.get("template"),
+    reportStyle: requestUrl.searchParams.get("reportStyle"),
+  });
   const meetingId = meeting.id;
   const audio = new AudioSession(dataRoot, meetingId);
   const taskId = randomUUID();
@@ -212,14 +276,95 @@ websocketServer.on("connection", (client, request) => {
   let sequence = 0;
   let previousSegment = null;
   let lastSpeakerId = null;
+  let liveSummaryRunning = false;
+  let liveSummaryTimer = null;
+  let lastLiveSummaryAt = 0;
+  let lastLiveSummarySeq = -1;
   const headers = { Authorization: `Bearer ${apiKey}`, "user-agent": "shiyin-ai/0.2" };
   if (workspaceId) headers["X-DashScope-WorkSpace"] = workspaceId;
   const upstream = new WebSocket(upstreamUrl, { headers, agent: proxyAgent });
   activeSessions.set(meetingId, { client, upstream, audio });
 
+  async function runLiveSummary() {
+    if (liveSummaryRunning || finishing || finalized || !miniMaxApiKey) return;
+    const meetingSnapshot = storage.getMeeting(meetingId);
+    if (!meetingSnapshot || !meetingSnapshot.segments.length) return;
+    const throughSeq = meetingSnapshot.segments.at(-1)?.seq ?? -1;
+    if (throughSeq <= lastLiveSummarySeq) return;
+
+    liveSummaryRunning = true;
+    lastLiveSummaryAt = Date.now();
+    sendJson(client, {
+      type: "summary.preview.started",
+      meetingId,
+      throughSeq,
+    });
+    let lastProgressSentAt = 0;
+    try {
+      const summary = await summarizeMeetingPreview({
+        ...meetingSnapshot,
+        durationMs: audio.durationMs,
+      }, miniMaxApiKey, miniMaxModel, {
+        stream: true,
+        onProgress(progress) {
+          const now = Date.now();
+          if (now - lastProgressSentAt < 750) return;
+          lastProgressSentAt = now;
+          sendJson(client, {
+            type: "summary.preview.progress",
+            meetingId,
+            characters: progress.characters || 0,
+            events: progress.events || 0,
+          });
+        },
+      });
+      if (summary) {
+        storage.saveLiveSummary(meetingId, summary);
+        lastLiveSummarySeq = throughSeq;
+        sendJson(client, {
+          type: "summary.preview",
+          meetingId,
+          summary,
+          throughSeq,
+        });
+      }
+    } catch (error) {
+      sendJson(client, {
+        type: "summary.preview.error",
+        meetingId,
+        message: error.message,
+      });
+    } finally {
+      liveSummaryRunning = false;
+      if (!finishing && sequence - 1 > lastLiveSummarySeq) scheduleLiveSummary();
+    }
+  }
+
+  function scheduleLiveSummary() {
+    if (
+      liveSummaryTimer
+      || liveSummaryRunning
+      || finishing
+      || finalized
+      || !miniMaxApiKey
+      || audio.durationMs < liveSummaryStartMs
+      || sequence < 4
+    ) return;
+    const waitMs = Math.max(0, liveSummaryIntervalMs - (Date.now() - lastLiveSummaryAt));
+    liveSummaryTimer = setTimeout(() => {
+      liveSummaryTimer = null;
+      runLiveSummary().catch(() => undefined);
+    }, waitMs);
+    liveSummaryTimer.unref?.();
+  }
+
   async function finalizeSession(asrError = null) {
     if (finalized) return;
     finalized = true;
+    if (liveSummaryTimer) {
+      clearTimeout(liveSummaryTimer);
+      liveSummaryTimer = null;
+    }
     try {
       const wavPath = await audio.finalize();
       storage.updateMeeting(meetingId, {
@@ -315,6 +460,7 @@ websocketServer.on("connection", (client, request) => {
           speaker: speakerId ? storage.getSpeaker(speakerId) : null,
           speakers: storage.listSpeakers(meetingId),
         });
+        scheduleLiveSummary();
       } else if (eventName === "task-finished") {
         finalizeSession().catch(() => undefined);
       } else if (eventName === "task-failed") {

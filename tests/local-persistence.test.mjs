@@ -3,16 +3,30 @@ import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { parseByteRange } from "../server/audio-stream.mjs";
 import { AudioSession } from "../server/audio-session.mjs";
 import { splitLongSegment } from "../server/correction.mjs";
 import { MeetingStorage } from "../server/storage.mjs";
-import { normalizeMeetingSummary, parseJsonContent, summarizeMeeting } from "../server/summarizer.mjs";
+import {
+  normalizeMeetingSummary,
+  parseJsonContent,
+  summarizeMeeting,
+  summarizeMeetingPreview,
+} from "../server/summarizer.mjs";
+import {
+  normalizeReportStyle,
+  normalizeSummaryTemplateId,
+  summaryTemplatePrompt,
+} from "../server/summary-templates.mjs";
 
 test("persists meetings, speakers, timestamps, pauses, and manual names", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-storage-"));
   const storage = new MeetingStorage(root);
   try {
-    const meeting = storage.createMeeting("测试会议");
+    const meeting = storage.createMeeting("测试会议", {
+      summaryTemplate: "project-sync",
+      reportStyle: "visual",
+    });
     const speaker = storage.ensureSpeaker(meeting.id, "发言人1", new Float32Array([1, 0, 0]));
     const first = storage.addSegment(meeting.id, {
       seq: 0,
@@ -32,19 +46,44 @@ test("persists meetings, speakers, timestamps, pauses, and manual names", () => 
       source: "realtime",
     });
     const renamed = storage.renameSpeaker(speaker.id, "王工");
+    storage.saveLiveSummary(meeting.id, {
+      headline: "实时草稿",
+      overview: "已讨论两项内容",
+      decisions: [],
+      topics: ["测试"],
+      risks: [],
+      actionItems: [],
+      isLiveDraft: true,
+      generatedAt: "2026-07-27T12:00:00.000Z",
+      throughSeq: 1,
+    });
     storage.updateMeeting(meeting.id, { status: "completed", durationMs: 4800 });
 
     const saved = storage.getMeeting(meeting.id);
     assert.equal(saved.title, "测试会议");
     assert.equal(saved.status, "completed");
+    assert.equal(saved.summaryTemplate, "project-sync");
+    assert.equal(saved.templateVersion, 1);
+    assert.equal(saved.reportStyle, "visual");
     assert.equal(saved.segments.length, 2);
     assert.equal(saved.segments[0].pauseAfterMs, 1450);
+    assert.equal(saved.liveSummary.headline, "实时草稿");
+    assert.equal(saved.liveSummary.throughSeq, 1);
     assert.equal(renamed.displayName, "王工");
     assert.equal(renamed.manuallyNamed, true);
   } finally {
     storage.close();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("normalizes template and report settings", () => {
+  assert.equal(normalizeSummaryTemplateId("brainstorm"), "brainstorm");
+  assert.equal(normalizeSummaryTemplateId("unknown"), "meeting-minutes");
+  assert.equal(normalizeReportStyle("visual"), "visual");
+  assert.equal(normalizeReportStyle("poster"), "detailed");
+  assert.match(summaryTemplatePrompt("daily-log"), /日常记录/);
+  assert.match(summaryTemplatePrompt("project-sync"), /项目进度/);
 });
 
 test("writes recoverable PCM and a valid mono 16 kHz WAV", async () => {
@@ -71,6 +110,15 @@ test("writes recoverable PCM and a valid mono 16 kHz WAV", async () => {
   }
 });
 
+test("parses full and partial byte ranges for original recording playback", () => {
+  assert.deepEqual(parseByteRange(undefined, 1000), { start: 0, end: 999, partial: false });
+  assert.deepEqual(parseByteRange("bytes=100-249", 1000), { start: 100, end: 249, partial: true });
+  assert.deepEqual(parseByteRange("bytes=900-", 1000), { start: 900, end: 999, partial: true });
+  assert.deepEqual(parseByteRange("bytes=-200", 1000), { start: 800, end: 999, partial: true });
+  assert.equal(parseByteRange("bytes=1000-", 1000), null);
+  assert.equal(parseByteRange("bytes=300-200", 1000), null);
+});
+
 test("extracts MiniMax JSON even when reasoning text surrounds it", () => {
   const parsed = parseJsonContent(`<think>internal reasoning</think>
   \`\`\`json
@@ -78,6 +126,170 @@ test("extracts MiniMax JSON even when reasoning text surrounds it", () => {
   \`\`\``);
   assert.equal(parsed.overview, "完成接口联调");
   assert.deepEqual(parsed.decisions, ["周五交付"]);
+});
+
+test("repairs unescaped quotes in MiniMax JSON strings", () => {
+  const parsed = parseJsonContent(`\`\`\`json
+  {"headline":"物业改进会","overview":"会议采用"逐个问题逐个解决"的方法推进","topics":["车辆管理"],"actionItems":[]}
+  \`\`\``);
+  assert.equal(parsed.headline, "物业改进会");
+  assert.equal(parsed.overview, "会议采用\"逐个问题逐个解决\"的方法推进");
+  assert.deepEqual(parsed.topics, ["车辆管理"]);
+});
+
+test("rejects non-JSON summary output instead of displaying it as overview", () => {
+  assert.throws(
+    () => parseJsonContent("这不是JSON，也不能作为结构化会议总结"),
+    /不是有效 JSON/,
+  );
+});
+
+test("asks MiniMax to repair invalid JSON once before accepting the summary", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    const content = calls === 1
+      ? "invalid-json"
+      : JSON.stringify({
+        headline: "车辆管理专题会",
+        overview: "会议讨论了小区车辆登记和外来车辆通行管理。",
+        topics: ["车辆管理"],
+        actionItems: [],
+      });
+    return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+  try {
+    const summary = await summarizeMeeting({
+      title: "测试会议",
+      durationMs: 1000,
+      speakers: [{ id: "speaker-1", displayName: "发言人1" }],
+      segments: [{
+        seq: 0,
+        speakerId: "speaker-1",
+        startMs: 0,
+        endMs: 1000,
+        pauseAfterMs: 0,
+        text: "讨论车辆登记和外来车辆管理。",
+      }],
+    }, "test-key");
+    assert.equal(calls, 2);
+    assert.equal(summary.headline, "车辆管理专题会");
+    assert.deepEqual(summary.topics, ["车辆管理"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("uses a distinct MiniMax system prompt for the selected content template", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestBody;
+  globalThis.fetch = async (_url, init) => {
+    requestBody = JSON.parse(init.body);
+    return new Response(JSON.stringify({
+      choices: [{
+        message: {
+          content: JSON.stringify({
+            headline: "头脑风暴形成三个候选方向",
+            overview: "团队归纳了三个候选方向，并约定通过小规模实验验证关键假设。",
+            topics: ["候选方向"],
+            actionItems: [],
+          }),
+        },
+      }],
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+  try {
+    await summarizeMeeting({
+      title: "创意讨论",
+      summaryTemplate: "brainstorm",
+      durationMs: 1000,
+      speakers: [{ id: "speaker-1", displayName: "发言人1" }],
+      segments: [{
+        seq: 0,
+        speakerId: "speaker-1",
+        startMs: 0,
+        endMs: 1000,
+        pauseAfterMs: 0,
+        text: "先提出三个方向，再分别验证关键假设。",
+      }],
+    }, "test-key");
+    assert.match(requestBody.messages[0].content, /当前内容模板：头脑风暴/);
+    assert.match(requestBody.messages[0].content, /候选方向、优缺点、关键假设/);
+    assert.match(requestBody.messages[1].content, /"summaryTemplate":"brainstorm"/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("streams a live MiniMax draft and reports incremental progress", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestBody;
+  const progress = [];
+  globalThis.fetch = async (_url, init) => {
+    requestBody = JSON.parse(init.body);
+    const content = JSON.stringify({
+      headline: "实时整理项目进展",
+      overview: "团队正在核对当前进度和下一步任务。",
+      overviewCards: [{
+        title: "当前进度",
+        summary: "已经完成接口联调。",
+        points: ["下一步进行回归测试"],
+        evidenceSeqs: [0],
+      }],
+      decisions: [],
+      topics: ["项目进度"],
+      risks: ["发布时间待确认"],
+      actionItems: [{
+        owner: "王工",
+        task: "完成回归测试",
+        due: "待确认",
+        priority: "中",
+        evidenceSeqs: [0],
+      }],
+      keywords: ["联调"],
+    });
+    const event = JSON.stringify({ choices: [{ delta: { content } }] });
+    return new Response(`data: ${event}\n\ndata: [DONE]\n\n`, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  };
+  try {
+    const summary = await summarizeMeetingPreview({
+      title: "项目周会",
+      summaryTemplate: "project-sync",
+      durationMs: 35000,
+      liveSummary: null,
+      speakers: [{ id: "speaker-1", displayName: "王工" }],
+      segments: [{
+        seq: 0,
+        speakerId: "speaker-1",
+        startMs: 0,
+        endMs: 35000,
+        pauseAfterMs: 0,
+        text: "接口联调完成，下一步做回归测试。",
+      }],
+    }, "test-key", "MiniMax-M3", {
+      stream: true,
+      onProgress(value) {
+        progress.push(value.characters);
+      },
+    });
+    assert.equal(requestBody.stream, true);
+    assert.equal(summary.isLiveDraft, true);
+    assert.equal(summary.throughSeq, 0);
+    assert.equal(summary.headline, "实时整理项目进展");
+    assert.ok(progress.some((characters) => characters > 0));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("returns a useful local result when no speech was recognized", async () => {

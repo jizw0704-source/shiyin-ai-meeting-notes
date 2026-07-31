@@ -1,6 +1,9 @@
 {
   "name": "shiyin-minimax-meeting-notes",
   "version": "0.1.0",
+  "description": "基于百炼实时转写、CAM++ 本地声纹识别与 MiniMax M3 的 Windows AI 会议听记工具",
+  "author": "LightningFlashEvE",
+  "license": "UNLICENSED",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
@@ -16,18 +19,18 @@
     "build": "vinext build",
     "start": "vinext start",
     "test": "npm run build && node --test tests/rendered-html.test.mjs tests/local-persistence.test.mjs",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern release --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",
     "drizzle-orm": "0.45.2",
     "https-proxy-agent": "7.0.6",
-    "next": "16.2.6",
-    "react": "19.2.6",
-    "react-dom": "19.2.6",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "sherpa-onnx-node": "1.13.4",
-    "ws": "8.18.3"
+    "vinext": "^0.0.50",
+    "ws": "^8.21.1"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",
@@ -43,11 +46,11 @@
     "electron-builder": "26.15.3",
     "eslint": "9.39.4",
     "eslint-config-next": "16.2.6",
-    "react-server-dom-webpack": "19.2.6",
+    "next": "^16.2.12",
+    "react-server-dom-webpack": "^19.2.8",
     "tailwindcss": "4.2.1",
     "typescript": "5.9.3",
-    "vinext": "0.0.50",
-    "vite": "8.0.13",
+    "vite": "^8.2.0",
     "wait-on": "9.0.3",
     "wrangler": "4.92.0"
   },
@@ -55,6 +58,12 @@
   "build": {
     "appId": "com.phenosola.shiyin",
     "productName": "拾音 AI",
+    "directories": {
+      "output": "release"
+    },
+    "asarUnpack": [
+      "dist/**/*"
+    ],
     "files": [
       "desktop/**/*",
       "build/icon.ico",
@@ -81,6 +90,9 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
     }
+  },
+  "overrides": {
+    "postcss": "^8.5.25"
   },
   "type": "module"
 }
