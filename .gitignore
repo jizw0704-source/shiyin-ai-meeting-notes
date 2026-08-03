@@ -48,5 +48,6 @@ next-env.d.ts
 /outputs/
 /work/
 /data/
+/models/asr/
 /.openai/
 /build/icon.png

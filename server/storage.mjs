@@ -9,6 +9,7 @@ import {
   normalizeReportStyle,
   normalizeSummaryTemplateId,
 } from "./summary-templates.mjs";
+import { cleanTranscriptText, replaceTranscriptText } from "./transcript-cleaning.mjs";
 
 export class MeetingStorage {
   constructor(dataRoot = path.resolve("data")) {
@@ -32,7 +33,9 @@ export class MeetingStorage {
         error TEXT,
         summary_template TEXT NOT NULL DEFAULT 'meeting-minutes',
         template_version INTEGER NOT NULL DEFAULT 1,
-        report_style TEXT NOT NULL DEFAULT 'detailed'
+        report_style TEXT NOT NULL DEFAULT 'detailed',
+        filler_filter_enabled INTEGER NOT NULL DEFAULT 0,
+        summary_stale INTEGER NOT NULL DEFAULT 0
       );
       CREATE TABLE IF NOT EXISTS speakers (
         id TEXT PRIMARY KEY,
@@ -57,6 +60,7 @@ export class MeetingStorage {
         source TEXT NOT NULL,
         confidence REAL,
         words_json TEXT,
+        edited_text TEXT,
         created_at TEXT NOT NULL,
         UNIQUE(meeting_id, seq)
       );
@@ -70,9 +74,19 @@ export class MeetingStorage {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS transcript_edits (
+        id TEXT PRIMARY KEY,
+        meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+        find_text TEXT NOT NULL,
+        replacement_text TEXT NOT NULL,
+        changes_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        undone_at TEXT
+      );
       CREATE INDEX IF NOT EXISTS idx_segments_meeting_seq ON segments(meeting_id, seq);
       CREATE INDEX IF NOT EXISTS idx_speakers_meeting ON speakers(meeting_id);
       CREATE INDEX IF NOT EXISTS idx_jobs_meeting ON jobs(meeting_id);
+      CREATE INDEX IF NOT EXISTS idx_transcript_edits_meeting ON transcript_edits(meeting_id, created_at);
     `);
     const meetingColumns = new Set(
       this.db.prepare("PRAGMA table_info(meetings)").all().map((column) => column.name),
@@ -88,6 +102,18 @@ export class MeetingStorage {
     }
     if (!meetingColumns.has("live_summary_json")) {
       this.db.exec("ALTER TABLE meetings ADD COLUMN live_summary_json TEXT");
+    }
+    if (!meetingColumns.has("filler_filter_enabled")) {
+      this.db.exec("ALTER TABLE meetings ADD COLUMN filler_filter_enabled INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!meetingColumns.has("summary_stale")) {
+      this.db.exec("ALTER TABLE meetings ADD COLUMN summary_stale INTEGER NOT NULL DEFAULT 0");
+    }
+    const segmentColumns = new Set(
+      this.db.prepare("PRAGMA table_info(segments)").all().map((column) => column.name),
+    );
+    if (!segmentColumns.has("edited_text")) {
+      this.db.exec("ALTER TABLE segments ADD COLUMN edited_text TEXT");
     }
   }
 
@@ -136,11 +162,17 @@ export class MeetingStorage {
       summaryTemplate: normalizeSummaryTemplateId(meeting.summary_template || DEFAULT_SUMMARY_TEMPLATE),
       templateVersion: Number(meeting.template_version || SUMMARY_TEMPLATE_VERSION),
       reportStyle: normalizeReportStyle(meeting.report_style || DEFAULT_REPORT_STYLE),
+      fillerFilterEnabled: Boolean(meeting.filler_filter_enabled),
+      summaryStale: Boolean(meeting.summary_stale),
     };
     if (!includeDetails) return value;
     value.speakers = this.listSpeakers(meeting.id);
-    value.segments = this.listSegments(meeting.id);
+    value.segments = this.listSegments(meeting.id).map((segment) => ({
+      ...segment,
+      cleanedText: value.fillerFilterEnabled ? cleanTranscriptText(segment.text) : segment.text,
+    }));
     value.jobs = this.listJobs(meeting.id);
+    value.canUndoTranscriptEdit = Boolean(this.latestTranscriptEdit(meeting.id));
     return value;
   }
 
@@ -165,7 +197,7 @@ export class MeetingStorage {
   }
 
   saveSummary(meetingId, summary) {
-    this.db.prepare("UPDATE meetings SET summary_json = ? WHERE id = ?")
+    this.db.prepare("UPDATE meetings SET summary_json = ?, summary_stale = 0 WHERE id = ?")
       .run(JSON.stringify(summary), meetingId);
   }
 
@@ -216,7 +248,10 @@ export class MeetingStorage {
       startMs: row.start_ms,
       endMs: row.end_ms,
       pauseAfterMs: row.pause_after_ms,
-      text: row.text,
+      text: row.edited_text ?? row.text,
+      originalText: row.text,
+      editedText: row.edited_text,
+      cleanedText: row.edited_text ?? row.text,
       speakerId: row.speaker_id,
       source: row.source,
       confidence: row.confidence,
@@ -233,12 +268,82 @@ export class MeetingStorage {
     this.db.exec("BEGIN");
     try {
       this.db.prepare("DELETE FROM segments WHERE meeting_id = ?").run(meetingId);
+      this.db.prepare("DELETE FROM transcript_edits WHERE meeting_id = ?").run(meetingId);
       for (const segment of segments) this.addSegment(meetingId, { ...segment, source: "corrected" });
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  setFillerFilterEnabled(meetingId, enabled) {
+    this.db.prepare("UPDATE meetings SET filler_filter_enabled = ?, summary_stale = 1 WHERE id = ?")
+      .run(enabled ? 1 : 0, meetingId);
+    return this.getMeeting(meetingId);
+  }
+
+  latestTranscriptEdit(meetingId) {
+    return this.db.prepare(`
+      SELECT * FROM transcript_edits
+      WHERE meeting_id = ? AND undone_at IS NULL
+      ORDER BY rowid DESC LIMIT 1
+    `).get(meetingId) || null;
+  }
+
+  replaceTranscriptText(meetingId, search, replacement, options = {}) {
+    const segments = this.listSegments(meetingId);
+    const changes = [];
+    let count = 0;
+    for (const segment of segments) {
+      const result = replaceTranscriptText(segment.text, search, replacement, options);
+      if (!result.count) continue;
+      count += result.count;
+      changes.push({
+        id: segment.id,
+        before: segment.editedText,
+        after: result.text === segment.originalText ? null : result.text,
+      });
+    }
+    if (!changes.length) return { meeting: this.getMeeting(meetingId), count: 0 };
+
+    const editId = randomUUID();
+    const now = new Date().toISOString();
+    this.db.exec("BEGIN");
+    try {
+      const update = this.db.prepare("UPDATE segments SET edited_text = ? WHERE id = ? AND meeting_id = ?");
+      for (const change of changes) update.run(change.after, change.id, meetingId);
+      this.db.prepare(`
+        INSERT INTO transcript_edits
+        (id, meeting_id, find_text, replacement_text, changes_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(editId, meetingId, search, replacement, JSON.stringify(changes), now);
+      this.db.prepare("UPDATE meetings SET summary_stale = 1 WHERE id = ?").run(meetingId);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return { meeting: this.getMeeting(meetingId), count, editId };
+  }
+
+  undoLastTranscriptEdit(meetingId) {
+    const edit = this.latestTranscriptEdit(meetingId);
+    if (!edit) return { meeting: this.getMeeting(meetingId), restored: 0 };
+    const changes = JSON.parse(edit.changes_json);
+    const now = new Date().toISOString();
+    this.db.exec("BEGIN");
+    try {
+      const update = this.db.prepare("UPDATE segments SET edited_text = ? WHERE id = ? AND meeting_id = ?");
+      for (const change of changes) update.run(change.before ?? null, change.id, meetingId);
+      this.db.prepare("UPDATE transcript_edits SET undone_at = ? WHERE id = ?").run(now, edit.id);
+      this.db.prepare("UPDATE meetings SET summary_stale = 1 WHERE id = ?").run(meetingId);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return { meeting: this.getMeeting(meetingId), restored: changes.length };
   }
 
   ensureSpeaker(meetingId, label, centroid = null) {

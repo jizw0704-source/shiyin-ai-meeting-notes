@@ -8,6 +8,14 @@ export class SummaryFormatError extends Error {
   }
 }
 
+class SummaryTruncatedError extends Error {
+  constructor(message = "MiniMax 生成内容达到长度上限") {
+    super(message);
+    this.name = "SummaryTruncatedError";
+    this.code = "SUMMARY_TRUNCATED";
+  }
+}
+
 function text(value, fallback = "") {
   const normalized = typeof value === "string" ? value.trim() : "";
   return normalized || fallback;
@@ -32,16 +40,62 @@ function evidence(value, validSeqs) {
   return [...new Set(result)].slice(0, 12);
 }
 
-function jsonCandidate(content) {
-  const cleaned = String(content || "").trim()
+function cleanModelContent(content) {
+  return String(content || "").trim()
     .replace(/<think>[\s\S]*?<\/think>/gi, "")
     .replace(/^\uFEFF/, "")
+    .trim();
+}
+
+function balancedJsonObjects(content) {
+  const objects = [];
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < content.length; index += 1) {
+    const character = content[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === "\"") inString = false;
+      continue;
+    }
+    if (character === "\"") {
+      inString = true;
+      continue;
+    }
+    if (character === "{") {
+      if (depth === 0) start = index;
+      depth += 1;
+    } else if (character === "}" && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        objects.push(content.slice(start, index + 1));
+        start = -1;
+      }
+    }
+  }
+  return objects;
+}
+
+function jsonCandidates(content) {
+  const withoutFence = cleanModelContent(content)
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```$/, "")
     .trim();
-  const start = cleaned.indexOf("{");
-  const end = cleaned.lastIndexOf("}");
-  return start >= 0 && end > start ? cleaned.slice(start, end + 1) : cleaned;
+  const objects = balancedJsonObjects(withoutFence);
+  const start = withoutFence.indexOf("{");
+  const end = withoutFence.lastIndexOf("}");
+  const broadCandidate = start >= 0 && end > start
+    ? withoutFence.slice(start, end + 1)
+    : withoutFence;
+  return [...new Set([
+    ...objects.reverse(),
+    broadCandidate,
+    withoutFence,
+  ].filter(Boolean))];
 }
 
 function repairJsonStringCharacters(candidate) {
@@ -91,8 +145,10 @@ function repairJsonStringCharacters(candidate) {
 }
 
 export function parseJsonContent(content) {
-  const candidate = jsonCandidate(content);
-  const attempts = [...new Set([candidate, repairJsonStringCharacters(candidate)])];
+  const attempts = [...new Set(jsonCandidates(content).flatMap((candidate) => [
+    candidate,
+    repairJsonStringCharacters(candidate),
+  ]))];
   for (const attempt of attempts) {
     try {
       const parsed = JSON.parse(attempt);
@@ -192,7 +248,7 @@ function transcriptRows(meeting) {
     start_ms: segment.startMs,
     end_ms: segment.endMs,
     pause_after_ms: segment.pauseAfterMs,
-    text: segment.text,
+    text: meeting.fillerFilterEnabled ? (segment.cleanedText || segment.text) : segment.text,
   }));
 }
 
@@ -222,6 +278,34 @@ async function readMiniMaxStream(response, { idleTimeoutMs, onProgress }) {
   let buffer = "";
   let content = "";
   let eventCount = 0;
+  let finishReason = null;
+
+  const processLine = (line) => {
+    const value = line.trim();
+    if (!value.startsWith("data:")) return;
+    const data = value.slice(5).trim();
+    if (!data || data === "[DONE]") return;
+    let event;
+    try {
+      event = JSON.parse(data);
+    } catch {
+      return;
+    }
+    if (event.base_resp?.status_code) {
+      throw new Error(event.base_resp.status_msg || "MiniMax 流式总结失败");
+    }
+    const choice = event.choices?.[0];
+    if (choice?.finish_reason) finishReason = choice.finish_reason;
+    const deltaContent = choice?.delta?.content;
+    const messageContent = choice?.message?.content;
+    if (typeof deltaContent === "string") {
+      content += deltaContent;
+    } else if (typeof messageContent === "string") {
+      content = messageContent.startsWith(content) ? messageContent : content + messageContent;
+    }
+    eventCount += 1;
+    onProgress?.({ characters: content.length, events: eventCount });
+  };
 
   try {
     while (true) {
@@ -241,29 +325,11 @@ async function readMiniMaxStream(response, { idleTimeoutMs, onProgress }) {
       buffer += decoder.decode(result.value, { stream: true });
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() || "";
-      for (const line of lines) {
-        const value = line.trim();
-        if (!value.startsWith("data:")) continue;
-        const data = value.slice(5).trim();
-        if (!data || data === "[DONE]") continue;
-        let event;
-        try {
-          event = JSON.parse(data);
-        } catch {
-          continue;
-        }
-        if (event.base_resp?.status_code) {
-          throw new Error(event.base_resp.status_msg || "MiniMax 流式总结失败");
-        }
-        const delta = event.choices?.[0]?.delta;
-        const piece = delta?.content ?? event.choices?.[0]?.message?.content ?? "";
-        if (typeof piece === "string") content += piece;
-        eventCount += 1;
-        onProgress?.({ characters: content.length, events: eventCount });
-      }
+      for (const line of lines) processLine(line);
     }
     const tail = decoder.decode();
     if (tail) buffer += tail;
+    if (buffer.trim()) processLine(buffer);
   } catch (error) {
     await reader.cancel(error.message).catch(() => undefined);
     throw error;
@@ -271,6 +337,7 @@ async function readMiniMaxStream(response, { idleTimeoutMs, onProgress }) {
     if (idleTimer) clearTimeout(idleTimer);
     reader.releaseLock();
   }
+  if (finishReason === "length") throw new SummaryTruncatedError();
   return content.trim();
 }
 
@@ -303,6 +370,7 @@ async function requestMiniMax({
         model,
         temperature: 0.15,
         max_completion_tokens: maxTokens,
+        reasoning_split: true,
         stream,
         messages: [
           { role: "system", content: system },
@@ -334,7 +402,21 @@ async function requestMiniMax({
   if (!response.ok || data.base_resp?.status_code) {
     throw new Error(data.base_resp?.status_msg || data.error?.message || "MiniMax总结失败");
   }
+  if (data.choices?.[0]?.finish_reason === "length") throw new SummaryTruncatedError();
   return String(data.choices?.[0]?.message?.content || "").trim();
+}
+
+async function requestMiniMaxWithTruncationRetry(options) {
+  try {
+    return await requestMiniMax(options);
+  } catch (error) {
+    if (!(error instanceof SummaryTruncatedError)) throw error;
+    const nextMaxTokens = Math.min(Math.max(options.maxTokens * 2, 8000), 48000);
+    if (nextMaxTokens <= options.maxTokens) {
+      throw new SummaryTruncatedError("MiniMax 两次生成均达到长度上限，请缩短逐字稿后重试");
+    }
+    return requestMiniMax({ ...options, maxTokens: nextMaxTokens });
+  }
 }
 
 const JSON_REPAIR_PROMPT = `你是JSON格式修复器。输入是另一模型生成的中文会议总结，内容可能被Markdown代码围栏包裹、字符串内部引号未转义、存在尾逗号或缺失字段。
@@ -351,7 +433,7 @@ async function callMiniMax({
   onProgress,
   timeoutMs,
 }) {
-  const content = await requestMiniMax({
+  const content = await requestMiniMaxWithTruncationRetry({
     apiKey,
     model,
     system,
@@ -364,7 +446,7 @@ async function callMiniMax({
   try {
     return parseJsonContent(content);
   } catch {
-    const repaired = await requestMiniMax({
+    const repaired = await requestMiniMaxWithTruncationRetry({
       apiKey,
       model,
       system: JSON_REPAIR_PROMPT,
@@ -461,7 +543,7 @@ async function extractLongMeeting(transcript, apiKey, model, options = {}) {
         totalChunks: chunks.length,
         transcript: rows,
       },
-      maxTokens: 3200,
+      maxTokens: 12000,
       stream: options.stream,
       timeoutMs: options.timeoutMs,
       onProgress(progress) {
@@ -477,7 +559,7 @@ async function extractLongMeeting(transcript, apiKey, model, options = {}) {
   return digests;
 }
 
-export async function summarizeMeetingPreview(meeting, apiKey, model = "MiniMax-M3", options = {}) {
+export async function summarizeMeetingPreview(meeting, apiKey, model = "MiniMax-M2.7", options = {}) {
   if (!meeting.segments.length) return null;
   if (!apiKey) throw new Error("尚未配置 MINIMAX_API_KEY");
   const summaryTemplate = normalizeSummaryTemplateId(meeting.summaryTemplate);
@@ -494,7 +576,7 @@ export async function summarizeMeetingPreview(meeting, apiKey, model = "MiniMax-
       previousDraft: meeting.liveSummary || null,
       transcript,
     },
-    maxTokens: 1800,
+    maxTokens: 6000,
     stream: options.stream ?? true,
     timeoutMs: options.timeoutMs,
     onProgress: options.onProgress,
@@ -508,7 +590,7 @@ export async function summarizeMeetingPreview(meeting, apiKey, model = "MiniMax-
   };
 }
 
-export async function summarizeMeeting(meeting, apiKey, model = "MiniMax-M3", options = {}) {
+export async function summarizeMeeting(meeting, apiKey, model = "MiniMax-M2.7", options = {}) {
   if (!meeting.segments.length) {
     return normalizeMeetingSummary({
       headline: "本次会议未识别到有效内容",
@@ -546,7 +628,7 @@ export async function summarizeMeeting(meeting, apiKey, model = "MiniMax-M3", op
     model,
     system: `${FINAL_PROMPT}\n\n${summaryTemplatePrompt(summaryTemplate)}`,
     payload: source,
-    maxTokens: 8000,
+    maxTokens: 16000,
     stream: options.stream,
     timeoutMs: options.timeoutMs,
     onProgress(progress) {

@@ -9,6 +9,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { streamMeetingAudio } from "./audio-stream.mjs";
 import { AudioSession } from "./audio-session.mjs";
 import { correctMeetingSpeakers } from "./correction.mjs";
+import { LocalAsrEngine } from "./local-asr-engine.mjs";
 import { SpeakerEngine } from "./speaker-engine.mjs";
 import { MeetingStorage } from "./storage.mjs";
 import { summarizeMeeting, summarizeMeetingPreview } from "./summarizer.mjs";
@@ -23,16 +24,25 @@ for (const file of [".env.local", ".env"]) {
 }
 
 const port = Number(process.env.ASR_PROXY_PORT || 8788);
+const bindHost = process.env.SHIYIN_BIND_HOST || "127.0.0.1";
+const appOrigin = process.env.SHIYIN_APP_ORIGIN || "http://127.0.0.1:3000";
 const apiKey = process.env.DASHSCOPE_API_KEY;
+const requestedAsrMode = String(process.env.SHIYIN_ASR_MODE || "auto").trim().toLowerCase();
 const miniMaxApiKey = process.env.MINIMAX_API_KEY;
-const miniMaxModel = process.env.MINIMAX_MODEL || "MiniMax-M3";
+const miniMaxModel = process.env.MINIMAX_MODEL || "MiniMax-M2.7";
 const workspaceId = process.env.DASHSCOPE_WORKSPACE_ID;
 const dataRoot = path.resolve(process.env.SHIYIN_DATA_ROOT || "data");
 const liveSummaryStartMs = Math.max(15000, Number(process.env.LIVE_SUMMARY_START_MS) || 30000);
 const liveSummaryIntervalMs = Math.max(10000, Number(process.env.LIVE_SUMMARY_INTERVAL_MS) || 20000);
 const modelPath = path.resolve(process.env.SHIYIN_MODEL_PATH || path.join("models", "speaker", "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"));
+const localAsrModelDir = path.resolve(process.env.SHIYIN_LOCAL_ASR_MODEL_DIR || path.join("models", "asr"));
 const storage = new MeetingStorage(dataRoot);
 const speakerEngine = new SpeakerEngine({ modelPath, maxSpeakers: 6, threshold: 0.62 });
+const localAsrEngine = new LocalAsrEngine({
+  modelDir: localAsrModelDir,
+  trailingSilenceMs: process.env.SHIYIN_LOCAL_ASR_SILENCE_MS,
+  numThreads: process.env.SHIYIN_LOCAL_ASR_THREADS,
+});
 const activeSessions = new Map();
 const upstreamUrl = process.env.DASHSCOPE_WEBSOCKET_URL || (
   workspaceId
@@ -66,6 +76,16 @@ function getProxyUrl() {
 const proxyUrl = getProxyUrl();
 const proxyAgent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : undefined;
 
+function resolveAsrMode() {
+  if (requestedAsrMode === "local") return localAsrEngine.available ? "local" : null;
+  if (requestedAsrMode === "dashscope") return apiKey ? "dashscope" : null;
+  if (localAsrEngine.available) return "local";
+  if (apiKey) return "dashscope";
+  return null;
+}
+
+const asrMode = resolveAsrMode();
+
 function sendJson(socket, value) {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(value));
 }
@@ -73,7 +93,7 @@ function sendJson(socket, value) {
 function jsonResponse(response, status, value) {
   response.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
-    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Origin": appOrigin,
     "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
   });
@@ -167,19 +187,33 @@ async function runCorrectionAndSummary(meetingId, client = null) {
     sendJson(client, { type: "error", recoverable: true, message: `说话人校正失败：${error.message}` });
   }
 
+  if (!miniMaxApiKey) {
+    storage.updateMeeting(meetingId, { status: "completed", error: null });
+    const meeting = storage.getMeeting(meetingId);
+    sendJson(client, { type: "session.completed", meeting, summarySkipped: true });
+    return meeting;
+  }
+
   const meeting = await runSummary(meetingId, client);
   sendJson(client, { type: "session.completed", meeting });
   return meeting;
 }
 
 const httpServer = createServer(async (request, response) => {
+  const requestOrigin = request.headers.origin;
+  if (requestOrigin && requestOrigin !== appOrigin) {
+    return jsonResponse(response, 403, { error: "请求来源不受信任" });
+  }
   if (request.method === "OPTIONS") return jsonResponse(response, 204, {});
   const url = new URL(request.url, `http://${request.headers.host || "127.0.0.1"}`);
   try {
     if (request.method === "GET" && url.pathname === "/health") {
       return jsonResponse(response, 200, {
         ok: true,
-        asrConfigured: Boolean(apiKey),
+        asrConfigured: Boolean(asrMode),
+        asrMode,
+        localAsrAvailable: localAsrEngine.available,
+        dashScopeConfigured: Boolean(apiKey),
         miniMaxConfigured: Boolean(miniMaxApiKey),
         speakerModelAvailable: speakerEngine.available,
         activeMeetings: activeSessions.size,
@@ -194,7 +228,7 @@ const httpServer = createServer(async (request, response) => {
     if ((request.method === "GET" || request.method === "HEAD") && audioMatch) {
       const meeting = storage.getMeeting(audioMatch[1]);
       if (!meeting) return jsonResponse(response, 404, { error: "会议不存在" });
-      return streamMeetingAudio(request, response, { meeting, dataRoot });
+      return streamMeetingAudio(request, response, { meeting, dataRoot, appOrigin });
     }
     const meetingMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)$/);
     if (request.method === "GET" && meetingMatch) {
@@ -210,7 +244,13 @@ const httpServer = createServer(async (request, response) => {
         patch.templateVersion = SUMMARY_TEMPLATE_VERSION;
       }
       if (Object.hasOwn(body, "reportStyle")) patch.reportStyle = normalizeReportStyle(body.reportStyle);
-      const meeting = storage.updateMeeting(meetingMatch[1], patch);
+      let meeting = storage.updateMeeting(meetingMatch[1], patch);
+      if (meeting && Object.hasOwn(body, "fillerFilterEnabled")) {
+        if (["recording", "correcting", "summarizing"].includes(meeting.status)) {
+          return jsonResponse(response, 409, { error: "会议仍在处理中，请稍后再整理逐字稿" });
+        }
+        meeting = storage.setFillerFilterEnabled(meeting.id, Boolean(body.fillerFilterEnabled));
+      }
       return jsonResponse(response, meeting ? 200 : 404, meeting || { error: "会议不存在" });
     }
     if (request.method === "DELETE" && meetingMatch) {
@@ -223,6 +263,34 @@ const httpServer = createServer(async (request, response) => {
       storage.deleteMeeting(meetingId);
       if (existsSync(directory)) rmSync(directory, { recursive: true, force: true });
       return jsonResponse(response, 200, { ok: true });
+    }
+    const transcriptActionMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/transcript\/(replace|undo)$/);
+    if (request.method === "POST" && transcriptActionMatch) {
+      const meetingId = transcriptActionMatch[1];
+      const currentMeeting = storage.getMeeting(meetingId);
+      if (!currentMeeting) return jsonResponse(response, 404, { error: "会议不存在" });
+      if (["recording", "correcting", "summarizing"].includes(currentMeeting.status)) {
+        return jsonResponse(response, 409, { error: "会议仍在处理中，请稍后再整理逐字稿" });
+      }
+      if (transcriptActionMatch[2] === "undo") {
+        return jsonResponse(response, 200, storage.undoLastTranscriptEdit(meetingId));
+      }
+      const body = await readJson(request);
+      const search = String(body.find || "").trim();
+      const replacement = String(body.replace ?? "");
+      if (!search) return jsonResponse(response, 400, { error: "请输入要查找的词语" });
+      if (search.length > 120 || replacement.length > 240) {
+        return jsonResponse(response, 400, { error: "查找或替换内容过长" });
+      }
+      return jsonResponse(response, 200, storage.replaceTranscriptText(
+        meetingId,
+        search,
+        replacement,
+        {
+          caseSensitive: Boolean(body.caseSensitive),
+          wholeWord: Boolean(body.wholeWord),
+        },
+      ));
     }
     const speakerMatch = url.pathname.match(/^\/api\/speakers\/([^/]+)$/);
     if (request.method === "PATCH" && speakerMatch) {
@@ -237,6 +305,9 @@ const httpServer = createServer(async (request, response) => {
       if (!currentMeeting) return jsonResponse(response, 404, { error: "会议不存在" });
       if (["recording", "correcting", "summarizing"].includes(currentMeeting.status)) {
         return jsonResponse(response, 409, { error: "会议仍在处理中，请稍后再试" });
+      }
+      if (actionMatch[2] === "summarize" && !miniMaxApiKey) {
+        return jsonResponse(response, 400, { error: "请先在本机配置 MINIMAX_API_KEY" });
       }
       if (actionMatch[2] === "correct") {
         runCorrectionAndSummary(meetingId).catch(() => undefined);
@@ -256,9 +327,17 @@ const httpServer = createServer(async (request, response) => {
 const websocketServer = new WebSocketServer({ server: httpServer });
 
 websocketServer.on("connection", (client, request) => {
-  if (!apiKey) {
-    sendJson(client, { type: "error", message: "后台尚未配置 DASHSCOPE_API_KEY" });
-    client.close(1011, "missing api key");
+  const requestOrigin = request.headers.origin;
+  if (requestOrigin && requestOrigin !== appOrigin) {
+    client.close(1008, "Origin not allowed");
+    return;
+  }
+  if (!asrMode) {
+    const message = requestedAsrMode === "dashscope"
+      ? "当前选择了百炼转写，但后台尚未配置 DASHSCOPE_API_KEY"
+      : `本地转写模型不可用：${localAsrModelDir}`;
+    sendJson(client, { type: "error", message });
+    client.close(1011, "asr unavailable");
     return;
   }
 
@@ -282,8 +361,66 @@ websocketServer.on("connection", (client, request) => {
   let lastLiveSummarySeq = -1;
   const headers = { Authorization: `Bearer ${apiKey}`, "user-agent": "shiyin-ai/0.2" };
   if (workspaceId) headers["X-DashScope-WorkSpace"] = workspaceId;
-  const upstream = new WebSocket(upstreamUrl, { headers, agent: proxyAgent });
+  const upstream = asrMode === "dashscope"
+    ? new WebSocket(upstreamUrl, { headers, agent: proxyAgent })
+    : null;
+  let localAsrSession = null;
   activeSessions.set(meetingId, { client, upstream, audio });
+
+  function announceStarted() {
+    started = true;
+    sendJson(client, {
+      type: "session.started",
+      taskId,
+      asrMode,
+      asrLabel: asrMode === "local" ? "本地实时转写" : "百炼实时转写",
+      meeting: storage.getMeeting(meetingId),
+      speakerModelAvailable: speakerEngine.available,
+    });
+  }
+
+  function publishPartial(result) {
+    sendJson(client, {
+      type: "asr.partial",
+      meetingId,
+      text: result.text || "",
+      startMs: result.startMs ?? null,
+      words: result.words || [],
+    });
+  }
+
+  function publishFinal(result) {
+    const text = String(result.text || "").trim();
+    if (!text) return;
+    const startMs = Math.max(0, Number(result.startMs) || 0);
+    const endMs = Math.max(startMs, Number(result.endMs) || audio.durationMs);
+    const pcm = audio.readRange(startMs, endMs);
+    const assignment = speakerEngine.classifySegment(meetingId, pcm, storage);
+    const speakerId = assignment?.speaker?.id || lastSpeakerId;
+    if (speakerId) lastSpeakerId = speakerId;
+    if (previousSegment && previousSegment.endMs !== null) {
+      storage.setPauseAfter(previousSegment.id, Math.max(0, startMs - previousSegment.endMs));
+    }
+    const segment = storage.addSegment(meetingId, {
+      seq: sequence++,
+      startMs,
+      endMs,
+      text,
+      speakerId,
+      source: asrMode === "local" ? "local-realtime" : "realtime",
+      confidence: assignment?.score ?? null,
+      words: result.words || [],
+    });
+    previousSegment = segment;
+    sendJson(client, {
+      type: "segment.final",
+      meetingId,
+      segment,
+      speaker: speakerId ? storage.getSpeaker(speakerId) : null,
+      speakers: storage.listSpeakers(meetingId),
+    });
+    scheduleLiveSummary();
+  }
 
   async function runLiveSummary() {
     if (liveSummaryRunning || finishing || finalized || !miniMaxApiKey) return;
@@ -383,110 +520,100 @@ websocketServer.on("connection", (client, request) => {
     }
   }
 
-  upstream.on("open", () => {
-    upstream.send(JSON.stringify({
-      header: { action: "run-task", task_id: taskId, streaming: "duplex" },
-      payload: {
-        task_group: "audio",
-        task: "asr",
-        function: "recognition",
-        model: "paraformer-realtime-v2",
-        parameters: {
-          format: "pcm",
-          sample_rate: 16000,
-          language_hints: ["zh", "en"],
-          semantic_punctuation_enabled: false,
-          max_sentence_silence: 800,
-          multi_threshold_mode_enabled: true,
-          punctuation_prediction_enabled: true,
-          inverse_text_normalization_enabled: true,
-          heartbeat: true,
-        },
-        input: {},
-      },
-    }));
-  });
-
-  upstream.on("message", (raw, isBinary) => {
-    if (isBinary) return;
+  if (asrMode === "local") {
     try {
-      const event = JSON.parse(raw.toString());
-      const eventName = event.header?.event;
-      if (eventName === "task-started") {
-        started = true;
-        sendJson(client, {
-          type: "session.started",
-          taskId,
-          meeting: storage.getMeeting(meetingId),
-          speakerModelAvailable: speakerEngine.available,
-        });
-      } else if (eventName === "result-generated") {
-        const sentence = event.payload?.output?.sentence;
-        if (!sentence || sentence.heartbeat) return;
-        if (!sentence.sentence_end) {
-          sendJson(client, {
-            type: "asr.partial",
-            meetingId,
+      localAsrSession = localAsrEngine.createSession({
+        onPartial: publishPartial,
+        onFinal: publishFinal,
+      });
+      setImmediate(announceStarted);
+    } catch (error) {
+      sendJson(client, { type: "error", message: `本地转写启动失败：${error.message}` });
+      client.close(1011, "local asr failed");
+    }
+  } else {
+    upstream.on("open", () => {
+      upstream.send(JSON.stringify({
+        header: { action: "run-task", task_id: taskId, streaming: "duplex" },
+        payload: {
+          task_group: "audio",
+          task: "asr",
+          function: "recognition",
+          model: "paraformer-realtime-v2",
+          parameters: {
+            format: "pcm",
+            sample_rate: 16000,
+            language_hints: ["zh", "en"],
+            semantic_punctuation_enabled: false,
+            max_sentence_silence: 800,
+            multi_threshold_mode_enabled: true,
+            punctuation_prediction_enabled: true,
+            inverse_text_normalization_enabled: true,
+            heartbeat: true,
+          },
+          input: {},
+        },
+      }));
+    });
+
+    upstream.on("message", (raw, isBinary) => {
+      if (isBinary) return;
+      try {
+        const event = JSON.parse(raw.toString());
+        const eventName = event.header?.event;
+        if (eventName === "task-started") {
+          announceStarted();
+        } else if (eventName === "result-generated") {
+          const sentence = event.payload?.output?.sentence;
+          if (!sentence || sentence.heartbeat) return;
+          if (!sentence.sentence_end) {
+            publishPartial({
+              text: sentence.text || "",
+              startMs: sentence.begin_time ?? null,
+              words: sentence.words || [],
+            });
+            return;
+          }
+          publishFinal({
             text: sentence.text || "",
-            startMs: sentence.begin_time ?? null,
+            startMs: sentence.begin_time ?? Math.max(0, audio.durationMs - 1000),
+            endMs: sentence.end_time ?? audio.durationMs,
             words: sentence.words || [],
           });
-          return;
+        } else if (eventName === "task-finished") {
+          finalizeSession().catch(() => undefined);
+        } else if (eventName === "task-failed") {
+          const message = event.header?.error_message || "百炼识别任务失败";
+          sendJson(client, { type: "error", recoverable: true, message });
+          finalizeSession(`实时识别失败：${message}`).catch(() => undefined);
         }
-        const startMs = sentence.begin_time ?? Math.max(0, audio.durationMs - 1000);
-        const endMs = sentence.end_time ?? audio.durationMs;
-        const pcm = audio.readRange(startMs, endMs);
-        const assignment = speakerEngine.classifySegment(meetingId, pcm, storage);
-        const speakerId = assignment?.speaker?.id || lastSpeakerId;
-        if (speakerId) lastSpeakerId = speakerId;
-        if (previousSegment && previousSegment.endMs !== null) {
-          storage.setPauseAfter(previousSegment.id, Math.max(0, startMs - previousSegment.endMs));
-        }
-        const segment = storage.addSegment(meetingId, {
-          seq: sequence++,
-          startMs,
-          endMs,
-          text: sentence.text || "",
-          speakerId,
-          source: "realtime",
-          confidence: assignment?.score ?? null,
-          words: sentence.words || [],
-        });
-        previousSegment = segment;
-        sendJson(client, {
-          type: "segment.final",
-          meetingId,
-          segment,
-          speaker: speakerId ? storage.getSpeaker(speakerId) : null,
-          speakers: storage.listSpeakers(meetingId),
-        });
-        scheduleLiveSummary();
-      } else if (eventName === "task-finished") {
-        finalizeSession().catch(() => undefined);
-      } else if (eventName === "task-failed") {
-        const message = event.header?.error_message || "百炼识别任务失败";
-        sendJson(client, { type: "error", recoverable: true, message });
-        finalizeSession(`实时识别失败：${message}`).catch(() => undefined);
+      } catch (error) {
+        sendJson(client, { type: "error", recoverable: true, message: `无法解析百炼结果：${error.message}` });
       }
-    } catch (error) {
-      sendJson(client, { type: "error", recoverable: true, message: `无法解析百炼结果：${error.message}` });
-    }
-  });
+    });
 
-  upstream.on("error", (error) => {
-    sendJson(client, { type: "error", recoverable: true, message: `百炼连接失败，录音仍会保存：${error.message}` });
-  });
+    upstream.on("error", (error) => {
+      sendJson(client, { type: "error", recoverable: true, message: `百炼连接失败，录音仍会保存：${error.message}` });
+    });
 
-  upstream.on("close", (code) => {
-    if (!finishing && code !== 1000) {
-      sendJson(client, { type: "error", recoverable: true, message: `百炼连接已断开（${code}），录音仍会保存` });
-    }
-  });
+    upstream.on("close", (code) => {
+      if (!finishing && code !== 1000) {
+        sendJson(client, { type: "error", recoverable: true, message: `百炼连接已断开（${code}），录音仍会保存` });
+      }
+    });
+  }
 
   function finish() {
     if (finishing) return;
     finishing = true;
-    if (started && upstream.readyState === WebSocket.OPEN) {
+    if (asrMode === "local") {
+      try {
+        localAsrSession?.finish();
+        finalizeSession().catch(() => undefined);
+      } catch (error) {
+        finalizeSession(`本地实时识别失败：${error.message}`).catch(() => undefined);
+      }
+    } else if (started && upstream.readyState === WebSocket.OPEN) {
       upstream.send(JSON.stringify({
         header: { action: "finish-task", task_id: taskId, streaming: "duplex" },
         payload: { input: {} },
@@ -500,7 +627,19 @@ websocketServer.on("connection", (client, request) => {
   client.on("message", (data, isBinary) => {
     if (isBinary) {
       audio.append(data);
-      if (started && !finishing && upstream.readyState === WebSocket.OPEN) upstream.send(data, { binary: true });
+      if (started && !finishing && asrMode === "local") {
+        try {
+          localAsrSession?.acceptPcm(data);
+        } catch (error) {
+          sendJson(client, {
+            type: "error",
+            recoverable: true,
+            message: `本地实时识别失败，录音仍会保存：${error.message}`,
+          });
+        }
+      } else if (started && !finishing && upstream?.readyState === WebSocket.OPEN) {
+        upstream.send(data, { binary: true });
+      }
       return;
     }
     try {
@@ -512,8 +651,9 @@ websocketServer.on("connection", (client, request) => {
   client.on("close", finish);
 });
 
-httpServer.listen(port, "0.0.0.0", () => {
+httpServer.listen(port, bindHost, () => {
   console.log(`拾音后台已启动：http://127.0.0.1:${port}`);
+  console.log(`实时转写：${asrMode === "local" ? "本地 Sherpa-ONNX" : asrMode === "dashscope" ? "百炼" : "不可用"}`);
   console.log(`本地声纹模型：${speakerEngine.available ? "可用" : "不可用"}`);
   if (proxyUrl) console.log("百炼连接将使用系统网络代理");
 });

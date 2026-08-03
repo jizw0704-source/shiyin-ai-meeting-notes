@@ -1,7 +1,7 @@
 {
   "name": "shiyin-minimax-meeting-notes",
-  "version": "0.1.0",
-  "description": "基于百炼实时转写、CAM++ 本地声纹识别与 MiniMax M3 的 Windows AI 会议听记工具",
+  "version": "0.2.1",
+  "description": "基于 Sherpa-ONNX 本地实时转写、CAM++ 本地声纹识别与 MiniMax 的 AI 会议听记工具",
   "author": "LightningFlashEvE",
   "license": "UNLICENSED",
   "private": true,
@@ -9,7 +9,7 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "dev": "concurrently -k -n web,asr \"vinext dev\" \"node server/realtime-proxy.mjs\"",
+    "dev": "node scripts/dev.mjs",
     "desktop:dev": "electron desktop/main.mjs",
     "desktop:start": "electron desktop/main.mjs --production",
     "desktop:pack": "npm run build && electron-builder --dir",
@@ -20,6 +20,7 @@
     "start": "vinext start",
     "test": "npm run build && node --test tests/rendered-html.test.mjs tests/local-persistence.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern release --ignore-pattern .next",
+    "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
@@ -67,6 +68,7 @@
     "files": [
       "desktop/**/*",
       "build/icon.ico",
+      "build/icon.icns",
       "server/**/*",
       "dist/**/*",
       "public/**/*",
@@ -85,6 +87,22 @@
     "win": {
       "icon": "build/icon.ico",
       "target": "nsis"
+    },
+    "mac": {
+      "icon": "build/icon.icns",
+      "category": "public.app-category.productivity",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "拾音 AI 需要访问麦克风来记录会议发言。",
+        "NSAudioCaptureUsageDescription": "拾音 AI 需要访问电脑声音来记录线上会议。"
+      }
     },
     "nsis": {
       "oneClick": false,

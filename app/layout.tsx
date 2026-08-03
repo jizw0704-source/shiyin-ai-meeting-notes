@@ -9,7 +9,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="zh-CN">
+    <html lang="zh-CN" suppressHydrationWarning>
       <head><link rel="icon" href="/favicon.svg" type="image/svg+xml" /></head>
       <body>{children}</body>
     </html>

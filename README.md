@@ -1,48 +1,57 @@
 # 拾音 AI｜本地会议听记
 
-Windows 本地会议听记原型：百炼 `paraformer-realtime-v2` 做实时转写，本地 CAM++ 声纹模型区分 2–6 位发言人；录音约 30 秒后由 MiniMax M3 生成首份实时草稿，此后随会议内容滚动更新，结束后自动校正发言人并流式生成正式报告。原始录音保存在本机，可在会议记录中回听并按时间定位。
+本地会议听记应用：Sherpa-ONNX Paraformer 在本机完成中英双语实时转写，CAM++ 本地声纹模型区分 2–6 位发言人；录音约 30 秒后由 MiniMax 生成首份实时草稿，此后随会议内容滚动更新，结束后自动校正发言人并流式生成正式报告。转写不需要百炼密钥，也没有云端转写时长额度；原始录音保存在本机，可在会议记录中回听并按时间定位。
 
 ## 已实现
 
-- 麦克风实时转写，显示每段发言的起止时间。
+- Sherpa-ONNX 本地实时转写，显示每段发言的起止时间。
+- 桌面版可选择“仅麦克风”“仅电脑声音”或“电脑声音 + 麦克风”，用于现场或线上会议。
+- macOS 会按“现场 / 线上 / 混合”呈现录音来源，显示系统音频权限状态，并可一键打开对应的隐私设置与重新检测。
 - 会议中实时生成 AI 草稿，默认 30 秒启动、每 20 秒检查新内容。
 - 正式报告使用 MiniMax SSE 流式响应，仅在连续一段时间没有返回数据时超时；定稿失败仍保留实时草稿。
 - 超过 1 秒的语音间隔显示为停顿。
 - 本地 CAM++ 声纹嵌入与增量聚类，发言人自动编号。
 - 点击发言人姓名手动重命名；会后重新聚类时尽量保留人工姓名。
+- 逐字稿提供“整理稿/原始记录”切换，可保守过滤“嗯、啊、呃”等口语词。
+- 支持术语查找、全局替换、替换前预览与逐次撤销，原始识别文本不会被覆盖。
+- 报告可导出网页或 Markdown，也可直接复制 Markdown 交给其他 AI Agent。
 - 录音保存为 `data/meetings/<会议ID>/audio.wav`，记录保存在本地 SQLite。
 - 结束会议后，本地后台先校正发言人，再调用 MiniMax 生成总结。
 - Electron 托盘常驻；关闭窗口只是隐藏，录音和后台任务会继续运行。
+- macOS 使用原生内嵌标题栏与系统材质，窗口会按 MacBook 和外接屏工作区自动选择尺寸，并跟随系统浅色/深色与辅助功能设置。
 - 可选择“登录 Windows 后自动启动”。
 
 ## 运行
 
-1. 复制 `.env.example` 为 `.env.local`，填写百炼和 MiniMax API Key。
-2. 安装依赖：`npm install`
-3. 桌面开发模式：`npm run desktop:dev`
-4. 生产构建后运行：`npm run build`，再执行 `npm run desktop:start`
+1. 从 [Sherpa-ONNX 官方发布页](https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models) 下载 `sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2`，将其中 `encoder.int8.onnx`、`decoder.int8.onnx` 和 `tokens.txt` 放进 `models/asr`。
+2. 复制 `.env.example` 为 `.env.local`，只需填写你自己的 `MINIMAX_API_KEY`；它用于生成总结，不参与语音转写。
+3. 安装依赖：`npm install`
+4. 桌面开发模式：`npm run desktop:dev`
+5. 生产构建后运行：`npm run build`，再执行 `npm run desktop:start`
 
 仅运行网页可使用 `npm run dev`，访问 `http://127.0.0.1:3000`。
+
+在 macOS 15 或更高版本首次使用电脑声音录制时，应用会显示权限状态；点击开始后，系统会要求选择共享屏幕并授权“屏幕与系统音频录制”。请选择会议所在屏幕并开启系统音频。应用只读取其中的声音，共享画面不会保存或上传；使用“声音 + 麦克风”时建议佩戴耳机，避免扬声器声音被麦克风重复录入。Windows 桌面版使用系统回环音频，普通浏览器模式只提供麦克风录音。
 
 ## Windows 安装版
 
 1. 从 GitHub Releases 下载 `拾音 AI Setup 0.1.0.exe` 并完成安装。
-2. 安装包不包含任何 API Key。首次使用前，在 `%APPDATA%\拾音 AI\.env` 创建本机配置：
-
-   ```env
-   DASHSCOPE_API_KEY=你的百炼APIKey
-   MINIMAX_API_KEY=你的MiniMaxAPIKey
-   MINIMAX_MODEL=MiniMax-M3
-   ```
-
-3. 完全退出托盘中的“拾音 AI”后重新打开。
+2. 安装包不包含任何 API Key。打开应用左下角的“MiniMax 设置”，输入密钥并保存；应用会自动重启。
 
 安装版的录音、逐字稿、总结和声纹数据默认保存在 `%APPDATA%\拾音 AI\data`。当前公开安装包未进行商业代码签名，Windows SmartScreen 可能显示“未知发布者”；请只从本仓库的 Releases 页面下载并核对 SHA-256。
 
+## macOS 安装版与更新
+
+1. 在 Apple Silicon Mac 上运行 `npm run desktop:dist`，安装包会生成到 `release/`。
+2. 打开生成的 DMG，把“拾音 AI”拖入“应用程序”；首次运行若被拦截，请在 Finder 中右键应用并选择“打开”。
+3. 打开应用左下角的“MiniMax 设置”，输入密钥并保存。密钥由 macOS 加密后保存在个人应用数据目录，不会进入 App 或安装包。
+
+以后增加功能时继续修改同一份源码，完成测试后更新 `package.json` 中的版本号，再执行 `npm run desktop:dist`。用新版本覆盖“应用程序”中的旧版本即可；会议记录和 MiniMax 配置位于 `~/Library/Application Support/拾音 AI/`，不会被覆盖安装删除。
+
 ## 数据与隐私
 
-API Key 只由本地 Node 后台读取，不会发给浏览器。原始录音、声纹向量、逐字稿和总结保存在本机 `data` 目录；语音流会发送给百炼完成识别，校正后的文本会发送给 MiniMax 完成总结。
+API Key 只由本地 Node 后台读取，不会发给浏览器。语音转写、声纹识别、原始录音和逐字稿都留在本机；只有整理后的文本会发送给 MiniMax 生成总结。人工替换和口语过滤使用独立整理层，原始识别文本始终保留。若不配置 MiniMax，录音和逐字稿仍会正常保存，之后可补充密钥再生成总结。
 
 ## 当前边界
 
-说话人识别按完整 ASR 句段分配，不能可靠拆分两人同时说话的重叠语音。短于约 1.2 秒的片段会继承相邻发言人；安静环境、让每人至少连续说几句话，会明显提高区分效果。
+说话人识别按完整 ASR 句段分配，不能可靠拆分两人同时说话的重叠语音。短于约 1.2 秒的片段会继承相邻发言人；安静环境、让每人至少连续说几句话，会明显提高区分效果。当前本地 Paraformer 模型不提供逐词时间戳，句段时间由实时音频位置估算。

@@ -7,6 +7,7 @@ import { parseByteRange } from "../server/audio-stream.mjs";
 import { AudioSession } from "../server/audio-session.mjs";
 import { splitLongSegment } from "../server/correction.mjs";
 import { MeetingStorage } from "../server/storage.mjs";
+import { cleanTranscriptText, replaceTranscriptText } from "../server/transcript-cleaning.mjs";
 import {
   normalizeMeetingSummary,
   parseJsonContent,
@@ -77,6 +78,52 @@ test("persists meetings, speakers, timestamps, pauses, and manual names", () => 
   }
 });
 
+test("keeps original transcript while filtering, replacing, and undoing organized text", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-transcript-edit-"));
+  const storage = new MeetingStorage(root);
+  try {
+    const meeting = storage.createMeeting("术语整理测试");
+    const speaker = storage.ensureSpeaker(meeting.id, "发言人1");
+    storage.addSegment(meeting.id, {
+      seq: 0,
+      startMs: 0,
+      endMs: 2000,
+      text: "呃大家确认 POS 平台，嗯后续继续开发。",
+      speakerId: speaker.id,
+      source: "corrected",
+    });
+    storage.updateMeeting(meeting.id, { status: "completed" });
+    storage.saveSummary(meeting.id, { overview: "旧总结" });
+
+    const filtered = storage.setFillerFilterEnabled(meeting.id, true);
+    assert.equal(filtered.segments[0].originalText, "呃大家确认 POS 平台，嗯后续继续开发。");
+    assert.equal(filtered.segments[0].cleanedText, "大家确认 POS 平台，后续继续开发。");
+    assert.equal(filtered.summaryStale, true);
+
+    const replaced = storage.replaceTranscriptText(meeting.id, "POS", "PhenoSola OS", { wholeWord: true });
+    assert.equal(replaced.count, 1);
+    assert.match(replaced.meeting.segments[0].text, /PhenoSola OS/);
+    assert.match(replaced.meeting.segments[0].originalText, /POS 平台/);
+    assert.equal(replaced.meeting.canUndoTranscriptEdit, true);
+
+    const undone = storage.undoLastTranscriptEdit(meeting.id);
+    assert.equal(undone.restored, 1);
+    assert.match(undone.meeting.segments[0].text, /POS 平台/);
+    assert.equal(undone.meeting.canUndoTranscriptEdit, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("conservatively keeps affirmative fillers and supports whole-word replacement", () => {
+  assert.equal(cleanTranscriptText("嗯"), "嗯");
+  assert.equal(cleanTranscriptText("呃我们开始，啊下一项。"), "我们开始，下一项。");
+  assert.deepEqual(
+    replaceTranscriptText("POS 和 POSIX", "POS", "平台", { wholeWord: true }),
+    { text: "平台 和 POSIX", count: 1 },
+  );
+});
+
 test("normalizes template and report settings", () => {
   assert.equal(normalizeSummaryTemplateId("brainstorm"), "brainstorm");
   assert.equal(normalizeSummaryTemplateId("unknown"), "meeting-minutes");
@@ -135,6 +182,12 @@ test("repairs unescaped quotes in MiniMax JSON strings", () => {
   assert.equal(parsed.headline, "物业改进会");
   assert.equal(parsed.overview, "会议采用\"逐个问题逐个解决\"的方法推进");
   assert.deepEqual(parsed.topics, ["车辆管理"]);
+});
+
+test("uses the final complete JSON object when MiniMax repeats a draft", () => {
+  const parsed = parseJsonContent(`草稿：{"headline":"旧版本"}\n最终：{"headline":"新版本","overview":"采用最终结果"}`);
+  assert.equal(parsed.headline, "新版本");
+  assert.equal(parsed.overview, "采用最终结果");
 });
 
 test("rejects non-JSON summary output instead of displaying it as overview", () => {
@@ -223,6 +276,8 @@ test("uses a distinct MiniMax system prompt for the selected content template", 
     assert.match(requestBody.messages[0].content, /当前内容模板：头脑风暴/);
     assert.match(requestBody.messages[0].content, /候选方向、优缺点、关键假设/);
     assert.match(requestBody.messages[1].content, /"summaryTemplate":"brainstorm"/);
+    assert.equal(requestBody.reasoning_split, true);
+    assert.equal(requestBody.max_completion_tokens, 16000);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -256,7 +311,7 @@ test("streams a live MiniMax draft and reports incremental progress", async () =
       keywords: ["联调"],
     });
     const event = JSON.stringify({ choices: [{ delta: { content } }] });
-    return new Response(`data: ${event}\n\ndata: [DONE]\n\n`, {
+    return new Response(`data: ${event}`, {
       status: 200,
       headers: { "Content-Type": "text/event-stream" },
     });
@@ -276,7 +331,7 @@ test("streams a live MiniMax draft and reports incremental progress", async () =
         pauseAfterMs: 0,
         text: "接口联调完成，下一步做回归测试。",
       }],
-    }, "test-key", "MiniMax-M3", {
+    }, "test-key", "MiniMax-M2.7", {
       stream: true,
       onProgress(value) {
         progress.push(value.characters);
@@ -287,6 +342,51 @@ test("streams a live MiniMax draft and reports incremental progress", async () =
     assert.equal(summary.throughSeq, 0);
     assert.equal(summary.headline, "实时整理项目进展");
     assert.ok(progress.some((characters) => characters > 0));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("retries once with a larger budget when MiniMax reports truncation", async () => {
+  const originalFetch = globalThis.fetch;
+  const budgets = [];
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    budgets.push(body.max_completion_tokens);
+    if (budgets.length === 1) {
+      return new Response(JSON.stringify({
+        choices: [{ finish_reason: "length", message: { content: "{\"headline\":\"未完成" } }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(JSON.stringify({
+      choices: [{
+        finish_reason: "stop",
+        message: {
+          content: JSON.stringify({
+            headline: "扩容后完成总结",
+            overview: "第二次生成获得了完整的结构化结果。",
+            topics: ["稳定性"],
+          }),
+        },
+      }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    const summary = await summarizeMeeting({
+      title: "截断重试测试",
+      durationMs: 1000,
+      speakers: [{ id: "speaker-1", displayName: "发言人1" }],
+      segments: [{
+        seq: 0,
+        speakerId: "speaker-1",
+        startMs: 0,
+        endMs: 1000,
+        pauseAfterMs: 0,
+        text: "需要保证长会议总结稳定完成。",
+      }],
+    }, "test-key");
+    assert.deepEqual(budgets, [16000, 32000]);
+    assert.equal(summary.headline, "扩容后完成总结");
   } finally {
     globalThis.fetch = originalFetch;
   }

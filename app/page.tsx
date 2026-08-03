@@ -9,6 +9,8 @@ import {
   Clock,
   Compass,
   Flag,
+  GearSix,
+  Key,
   ListChecks,
   PushPin,
   Quotes,
@@ -24,6 +26,22 @@ type View = "transcript" | "summary" | "actions";
 type MeetingStatus = "recording" | "correcting" | "summarizing" | "completed" | "failed";
 type SummaryTemplateId = "meeting-minutes" | "daily-log" | "project-sync" | "brainstorm";
 type ReportStyle = "detailed" | "visual";
+type AudioSourceMode = "microphone" | "system" | "mixed";
+type TranscriptMode = "organized" | "original";
+type AudioCaptureCapabilities = {
+  platform: string;
+  macOSVersion: string;
+  nativeSystemAudioPicker: boolean;
+  systemAudioSupported: boolean;
+  microphonePermission: string;
+  screenPermission: string;
+};
+type MiniMaxSettings = {
+  configured: boolean;
+  model: string;
+  managedByApp: boolean;
+  storageLocation: string;
+};
 type Speaker = {
   id: string;
   meetingId: string;
@@ -40,8 +58,11 @@ type Segment = {
   endMs: number | null;
   pauseAfterMs: number | null;
   text: string;
+  originalText: string;
+  editedText: string | null;
+  cleanedText: string;
   speakerId: string | null;
-  source: "realtime" | "corrected";
+  source: "realtime" | "local-realtime" | "corrected";
   confidence: number | null;
 };
 type Summary = {
@@ -132,16 +153,24 @@ type MeetingBrief = {
   summaryTemplate: SummaryTemplateId;
   templateVersion: number;
   reportStyle: ReportStyle;
+  fillerFilterEnabled: boolean;
+  summaryStale: boolean;
 };
 type Meeting = MeetingBrief & {
   speakers: Speaker[];
   segments: Segment[];
   jobs: Job[];
+  canUndoTranscriptEdit: boolean;
 };
 
 declare global {
   interface Window {
     shiyinDesktop?: {
+      getAudioCaptureCapabilities: () => Promise<AudioCaptureCapabilities>;
+      openAudioPrivacySettings: (kind: "microphone" | "screen") => Promise<boolean>;
+      relaunch: () => void;
+      getMiniMaxSettings: () => Promise<MiniMaxSettings>;
+      saveMiniMaxSettings: (settings: { apiKey: string; model: string }) => Promise<MiniMaxSettings>;
       onCommand: (callback: (command: string) => void) => () => void;
       setRecording: (active: boolean) => void;
     };
@@ -228,8 +257,10 @@ function summaryLooksInvalid(summary: Summary | null | undefined) {
 function microphoneScore(input: AudioInput) {
   const label = input.label.toLowerCase();
   let score = 0;
-  if (/nahimic|vad|virtual|stereo mix|立体声混音|cable/.test(label)) score -= 1000;
+  if (/nahimic|vad|virtual|stereo mix|立体声混音|cable|blackhole|soundflower|loopback|aggregate|multi-output|多输出/.test(label)) score -= 1000;
+  if (/macbook.*microphone|macbook.*麦克风|built-in microphone|内建麦克风/.test(label)) score += 140;
   if (/realtek|麦克风阵列|microphone array/.test(label)) score += 120;
+  if (/airpods|studio display|iphone.*microphone|iphone.*麦克风/.test(label)) score += 70;
   if (/maxhub/.test(label)) score += 80;
   if (/麦克风|microphone|mic/.test(label)) score += 20;
   if (input.deviceId === "default" || input.deviceId === "communications") score -= 10;
@@ -251,6 +282,47 @@ function escapeHtml(value: unknown) {
     .replaceAll("'", "&#039;");
 }
 
+function markdownCell(value: unknown) {
+  return String(value ?? "").replaceAll("|", "\\|").replace(/\s*\n\s*/g, " ").trim();
+}
+
+function safeFilename(value: string) {
+  return value.replace(/[\\/:*?"<>|]/g, "-");
+}
+
+function displayedSegmentText(segment: Segment, mode: TranscriptMode) {
+  return mode === "original" ? segment.originalText : segment.cleanedText;
+}
+
+function replacementPattern(term: string, caseSensitive: boolean, wholeWord: boolean) {
+  const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const useWordBoundary = wholeWord && /^[\p{L}\p{N}_]+$/u.test(term);
+  const pattern = useWordBoundary
+    ? `(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`
+    : escaped;
+  return new RegExp(pattern, `gu${caseSensitive ? "" : "i"}`);
+}
+
+function previewReplacement(text: string, term: string, replacement: string, caseSensitive: boolean, wholeWord: boolean) {
+  if (!term) return { text, count: 0 };
+  let count = 0;
+  const next = text.replace(replacementPattern(term, caseSensitive, wholeWord), () => {
+    count += 1;
+    return replacement;
+  });
+  return { text: next, count };
+}
+
+function downloadText(content: string, filename: string, type: string) {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBase}${path}`, {
     ...init,
@@ -270,11 +342,24 @@ export default function Home() {
   const [processing, setProcessing] = useState(false);
   const [seconds, setSeconds] = useState(0);
   const [query, setQuery] = useState("");
+  const [transcriptMode, setTranscriptMode] = useState<TranscriptMode>("organized");
+  const [replaceDialogOpen, setReplaceDialogOpen] = useState(false);
+  const [replaceFind, setReplaceFind] = useState("");
+  const [replaceWith, setReplaceWith] = useState("");
+  const [replaceCaseSensitive, setReplaceCaseSensitive] = useState(false);
+  const [replaceWholeWord, setReplaceWholeWord] = useState(false);
+  const [transcriptSaving, setTranscriptSaving] = useState(false);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [notice, setNotice] = useState("");
   const [liveText, setLiveText] = useState("");
-  const [connectionStatus, setConnectionStatus] = useState("百炼实时 ASR");
+  const [connectionStatus, setConnectionStatus] = useState("本地实时 ASR");
   const [loading, setLoading] = useState(true);
   const [completedActions, setCompletedActions] = useState<Set<number>>(new Set());
+  const [audioSourceMode, setAudioSourceMode] = useState<AudioSourceMode>("microphone");
+  const [systemAudioAvailable, setSystemAudioAvailable] = useState(false);
+  const [audioCaptureCapabilities, setAudioCaptureCapabilities] = useState<AudioCaptureCapabilities | null>(null);
+  const [sourceWarning, setSourceWarning] = useState("");
+  const [captureSettingsOpened, setCaptureSettingsOpened] = useState(false);
   const [audioInputs, setAudioInputs] = useState<AudioInput[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
   const [activeDeviceLabel, setActiveDeviceLabel] = useState("自动选择麦克风");
@@ -288,15 +373,46 @@ export default function Home() {
   const [defaultReportStyle, setDefaultReportStyle] = useState<ReportStyle>(DEFAULT_REPORT_STYLE);
   const [templateDraft, setTemplateDraft] = useState<SummaryTemplateId>(DEFAULT_SUMMARY_TEMPLATE);
   const [reportStyleDraft, setReportStyleDraft] = useState<ReportStyle>(DEFAULT_REPORT_STYLE);
+  const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
+  const [miniMaxSettings, setMiniMaxSettings] = useState<MiniMaxSettings | null>(null);
+  const [miniMaxKeyDraft, setMiniMaxKeyDraft] = useState("");
+  const [miniMaxModelDraft, setMiniMaxModelDraft] = useState("MiniMax-M2.7");
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsError, setSettingsError] = useState("");
   const socketRef = useRef<WebSocket | null>(null);
   const playbackRef = useRef<HTMLAudioElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const mediaStreamsRef = useRef<MediaStream[]>([]);
   const recordingRef = useRef(false);
   const sessionPeakRef = useRef(0);
   const captureStartedAtRef = useRef(0);
   const lastLevelUpdateRef = useRef(0);
   const silenceWarningShownRef = useRef(false);
+
+  const refreshCaptureCapabilities = useCallback(async () => {
+    const desktop = window.shiyinDesktop;
+    if (!desktop) {
+      setSystemAudioAvailable(false);
+      setAudioCaptureCapabilities(null);
+      return null;
+    }
+    const capabilities = await desktop.getAudioCaptureCapabilities();
+    setAudioCaptureCapabilities(capabilities);
+    setSystemAudioAvailable(capabilities.systemAudioSupported);
+    const savedMode = window.localStorage.getItem("shiyin.audioSourceMode") as AudioSourceMode | null;
+    if (savedMode === "microphone") {
+      setAudioSourceMode(savedMode);
+    } else if (
+      capabilities.systemAudioSupported
+      && (savedMode === "system" || savedMode === "mixed")
+    ) {
+      setAudioSourceMode(savedMode);
+    } else if (!capabilities.systemAudioSupported && savedMode) {
+      setAudioSourceMode("microphone");
+      window.localStorage.setItem("shiyin.audioSourceMode", "microphone");
+    }
+    return capabilities;
+  }, []);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -311,6 +427,33 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    let active = true;
+    const desktop = window.shiyinDesktop;
+    if (!desktop) return () => { active = false; };
+    const capabilityTimer = window.setTimeout(() => {
+      refreshCaptureCapabilities().catch(() => undefined);
+    }, 0);
+    desktop.getMiniMaxSettings()
+      .then((settings) => {
+        if (active) setMiniMaxSettings(settings);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+      window.clearTimeout(capabilityTimer);
+    };
+  }, [refreshCaptureCapabilities]);
+
+  useEffect(() => {
+    if (!window.shiyinDesktop) return;
+    const refreshOnFocus = () => {
+      refreshCaptureCapabilities().catch(() => undefined);
+    };
+    window.addEventListener("focus", refreshOnFocus);
+    return () => window.removeEventListener("focus", refreshOnFocus);
+  }, [refreshCaptureCapabilities]);
+
+  useEffect(() => {
     if (!templateDialogOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") setTemplateDialogOpen(false);
@@ -318,6 +461,46 @@ export default function Home() {
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
   }, [templateDialogOpen]);
+
+  const openSettingsDialog = useCallback(async () => {
+    const desktop = window.shiyinDesktop;
+    if (!desktop) {
+      setNotice("MiniMax 密钥由桌面版管理");
+      return;
+    }
+    try {
+      const settings = await desktop.getMiniMaxSettings();
+      setMiniMaxSettings(settings);
+      setMiniMaxModelDraft(settings.model);
+      setMiniMaxKeyDraft("");
+      setSettingsError("");
+      setSettingsDialogOpen(true);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法读取 MiniMax 配置");
+    }
+  }, []);
+
+  const saveSettings = useCallback(async () => {
+    const desktop = window.shiyinDesktop;
+    if (!desktop) return;
+    if (!miniMaxSettings?.configured && !miniMaxKeyDraft.trim()) {
+      setSettingsError("请输入 MiniMax API Key");
+      return;
+    }
+    setSettingsSaving(true);
+    setSettingsError("");
+    try {
+      await desktop.saveMiniMaxSettings({
+        apiKey: miniMaxKeyDraft,
+        model: miniMaxModelDraft,
+      });
+      setSettingsDialogOpen(false);
+      setNotice("配置已安全保存，应用正在重新启动…");
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : "保存失败，请重试");
+      setSettingsSaving(false);
+    }
+  }, [miniMaxKeyDraft, miniMaxModelDraft, miniMaxSettings?.configured]);
 
   const refreshAudioInputs = useCallback(async () => {
     const devices = (await navigator.mediaDevices.enumerateDevices())
@@ -383,8 +566,10 @@ export default function Home() {
   }, [recording]);
 
   const stopAudioCapture = useCallback(async () => {
-    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
-    mediaStreamRef.current = null;
+    for (const stream of mediaStreamsRef.current) {
+      stream.getTracks().forEach((track) => track.stop());
+    }
+    mediaStreamsRef.current = [];
     await audioContextRef.current?.close().catch(() => undefined);
     audioContextRef.current = null;
   }, []);
@@ -405,9 +590,10 @@ export default function Home() {
   useEffect(() => {
     const unsubscribe = window.shiyinDesktop?.onCommand((command) => {
       if (command === "stop-recording") stopRecording();
+      if (command === "open-settings") void openSettingsDialog();
     });
     return () => unsubscribe?.();
-  }, [stopRecording]);
+  }, [openSettingsDialog, stopRecording]);
 
   const filteredSegments = useMemo(() => {
     const segments = meeting?.segments || [];
@@ -415,8 +601,26 @@ export default function Home() {
     const speakers = new Map(meeting?.speakers.map((speaker) => [speaker.id, speaker.displayName]));
     const term = query.toLowerCase();
     return segments.filter((segment) =>
-      `${speakers.get(segment.speakerId || "") || ""}${segment.text}`.toLowerCase().includes(term));
-  }, [meeting, query]);
+      `${speakers.get(segment.speakerId || "") || ""}${displayedSegmentText(segment, transcriptMode)}`.toLowerCase().includes(term));
+  }, [meeting, query, transcriptMode]);
+
+  const replacementPreview = useMemo(() => {
+    if (!meeting || !replaceFind.trim()) return { count: 0, segments: [] as Array<{ segment: Segment; count: number; next: string }> };
+    const segments = meeting.segments.flatMap((segment) => {
+      const result = previewReplacement(
+        segment.text,
+        replaceFind,
+        replaceWith,
+        replaceCaseSensitive,
+        replaceWholeWord,
+      );
+      return result.count ? [{ segment, count: result.count, next: result.text }] : [];
+    });
+    return {
+      count: segments.reduce((total, item) => total + item.count, 0),
+      segments,
+    };
+  }, [meeting, replaceCaseSensitive, replaceFind, replaceWholeWord, replaceWith]);
 
   const speakerMap = useMemo(
     () => new Map(meeting?.speakers.map((speaker) => [speaker.id, speaker]) || []),
@@ -487,10 +691,121 @@ export default function Home() {
     });
   }
 
+  function selectAudioSource(mode: AudioSourceMode) {
+    setAudioSourceMode(mode);
+    window.localStorage.setItem("shiyin.audioSourceMode", mode);
+    setAudioWarning("");
+    setSourceWarning("");
+  }
+
+  async function openAudioPrivacySettings(kind: "microphone" | "screen") {
+    const opened = await window.shiyinDesktop?.openAudioPrivacySettings(kind);
+    if (!opened) return;
+    if (kind === "screen") setCaptureSettingsOpened(true);
+    setNotice(
+      kind === "screen"
+        ? "已打开“屏幕与系统音频录制”，请允许拾音 AI 后返回应用"
+        : "已打开“麦克风”权限设置，请允许拾音 AI 后返回应用",
+    );
+  }
+
   async function startRecording() {
     try {
       setNotice("");
-      setConnectionStatus("正在连接百炼…");
+      setSourceWarning("");
+      const captureMode = audioSourceMode;
+      const needsMicrophone = captureMode === "microphone" || captureMode === "mixed";
+      const needsSystemAudio = captureMode === "system" || captureMode === "mixed";
+      if (needsSystemAudio && !systemAudioAvailable) {
+        throw new Error("电脑声音录制仅在拾音 AI 桌面版中可用");
+      }
+      let currentCaptureCapabilities = audioCaptureCapabilities;
+      if (needsSystemAudio && window.shiyinDesktop) {
+        currentCaptureCapabilities = await refreshCaptureCapabilities();
+        if (
+          currentCaptureCapabilities?.platform === "darwin"
+          && !currentCaptureCapabilities.nativeSystemAudioPicker
+        ) {
+          throw new Error("Mac 电脑声音录制需要 macOS 15 或更高版本；当前仍可使用麦克风录制");
+        }
+        if (
+          currentCaptureCapabilities?.platform === "darwin"
+          && ["denied", "restricted"].includes(currentCaptureCapabilities.screenPermission)
+        ) {
+          throw new Error("请先在“系统设置 → 隐私与安全性 → 屏幕与系统音频录制”中允许拾音 AI");
+        }
+      }
+
+      const audioConstraints = (deviceId = ""): MediaStreamConstraints => ({
+        audio: {
+          ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+          channelCount: 1,
+          sampleRate: 16000,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      const captureStreams: MediaStream[] = [];
+      let microphoneStream: MediaStream | null = null;
+      let systemStream: MediaStream | null = null;
+      let microphoneLabel = "当前麦克风";
+
+      if (needsMicrophone) {
+        setConnectionStatus("正在连接麦克风…");
+        microphoneStream = await navigator.mediaDevices.getUserMedia(audioConstraints(selectedDeviceId));
+        const refreshed = await refreshAudioInputs();
+        const savedInput = refreshed.devices.find((input) => input.deviceId === selectedDeviceId);
+        const targetInput = savedInput || refreshed.preferred;
+        const currentDeviceId = microphoneStream.getAudioTracks()[0]?.getSettings().deviceId;
+        if (targetInput && currentDeviceId !== targetInput.deviceId) {
+          microphoneStream.getTracks().forEach((track) => track.stop());
+          microphoneStream = await navigator.mediaDevices.getUserMedia(audioConstraints(targetInput.deviceId));
+        }
+        const microphoneTrack = microphoneStream.getAudioTracks()[0];
+        const finalDeviceId = microphoneTrack?.getSettings().deviceId || targetInput?.deviceId || "";
+        microphoneLabel = microphoneTrack?.label || targetInput?.label || "当前麦克风";
+        setSelectedDeviceId(finalDeviceId);
+        if (finalDeviceId) window.localStorage.setItem("shiyin.microphoneId", finalDeviceId);
+        captureStreams.push(microphoneStream);
+        mediaStreamsRef.current = [...captureStreams];
+      }
+
+      if (needsSystemAudio) {
+        setConnectionStatus(
+          currentCaptureCapabilities?.platform === "darwin"
+            ? "请在 macOS 共享面板中选择屏幕，并开启系统音频…"
+            : "请选择要共享的屏幕，并开启系统音频…",
+        );
+        systemStream = await navigator.mediaDevices.getDisplayMedia({
+          audio: true,
+          video: {
+            frameRate: { ideal: 1, max: 5 },
+            width: { max: 640 },
+            height: { max: 360 },
+          },
+          systemAudio: "include",
+          selfBrowserSurface: "exclude",
+          surfaceSwitching: "exclude",
+        } as DisplayMediaStreamOptions);
+        if (!systemStream.getAudioTracks().length) {
+          systemStream.getTracks().forEach((track) => track.stop());
+          throw new Error(
+            currentCaptureCapabilities?.platform === "darwin"
+              ? "已选择屏幕，但没有收到 Mac 声音；请重新开始并在共享面板中开启“系统音频”"
+              : "没有收到电脑声音，请重新选择屏幕并开启“共享系统音频”",
+          );
+        }
+        captureStreams.push(systemStream);
+        mediaStreamsRef.current = [...captureStreams];
+      }
+
+      const captureLabel = captureMode === "mixed"
+        ? `电脑声音 + ${microphoneLabel}`
+        : captureMode === "system" ? "电脑声音" : microphoneLabel;
+      setActiveDeviceLabel(captureLabel);
+      setConnectionStatus("正在启动本地转写…");
+      let sessionAsrLabel = "实时转写";
       const socketUrl = new URL(websocketBase);
       socketUrl.searchParams.set("template", defaultSummaryTemplate);
       socketUrl.searchParams.set("reportStyle", defaultReportStyle);
@@ -500,7 +815,7 @@ export default function Home() {
 
       await new Promise<void>((resolve, reject) => {
         let ready = false;
-        const timeout = window.setTimeout(() => reject(new Error("连接百炼代理超时")), 12000);
+        const timeout = window.setTimeout(() => reject(new Error("连接听记后台超时")), 12000);
         socket.onerror = () => {
           if (!ready) reject(new Error("无法连接拾音后台，请先启动本地服务"));
         };
@@ -508,13 +823,16 @@ export default function Home() {
           const message = JSON.parse(event.data);
           if (message.type === "session.started") {
             ready = true;
+            sessionAsrLabel = message.asrLabel || "实时转写";
             window.clearTimeout(timeout);
             const value = message.meeting as Meeting;
             setMeeting(value);
             setSelectedId(value.id);
             mergeMeetingList(value);
             setConnectionStatus(
-              message.speakerModelAvailable ? "百炼转写 · 本地声纹分离" : "百炼转写 · 声纹模型不可用",
+              message.speakerModelAvailable
+                ? `${sessionAsrLabel} · 本地声纹分离`
+                : `${sessionAsrLabel} · 声纹模型不可用`,
             );
             resolve();
           } else if (message.type === "asr.partial") {
@@ -523,13 +841,13 @@ export default function Home() {
             setLiveText("");
             updateLiveSegment(message.segment, message.speakers);
           } else if (message.type === "summary.preview.started") {
-            setConnectionStatus("MiniMax M3 正在整理实时草稿…");
+            setConnectionStatus("MiniMax 正在整理实时草稿…");
           } else if (message.type === "summary.preview.progress") {
             const characters = Number(message.characters || 0);
             setConnectionStatus(
               characters > 0
-                ? `MiniMax M3 正在生成实时草稿 · ${characters} 字`
-                : "MiniMax M3 正在生成实时草稿…",
+                ? `MiniMax 正在生成实时草稿 · ${characters} 字`
+                : "MiniMax 正在生成实时草稿…",
             );
           } else if (message.type === "summary.preview") {
             setMeeting((current) => {
@@ -539,9 +857,9 @@ export default function Home() {
             setMeetings((items) => items.map((item) => (
               item.id === message.meetingId ? { ...item, liveSummary: message.summary } : item
             )));
-            setConnectionStatus("百炼转写 · 实时草稿已更新");
+            setConnectionStatus(`${sessionAsrLabel} · 实时草稿已更新`);
           } else if (message.type === "summary.preview.error") {
-            setConnectionStatus("百炼转写 · 实时草稿稍后重试");
+            setConnectionStatus(`${sessionAsrLabel} · 实时草稿稍后重试`);
           } else if (message.type === "job.progress") {
             setProcessing(true);
             setMeeting((current) => {
@@ -566,7 +884,9 @@ export default function Home() {
             mergeMeetingList(value);
             setProcessing(false);
             setConnectionStatus("处理完成");
-            setNotice(value.error || "会议已保存，发言人校正和 AI 总结已完成");
+            setNotice(message.summarySkipped
+              ? "会议和逐字稿已保存；配置 MiniMax 密钥后可生成 AI 总结"
+              : value.error || "会议已保存，发言人校正和 AI 总结已完成");
             window.shiyinDesktop?.setRecording(false);
             socket.close();
             socketRef.current = null;
@@ -577,36 +897,40 @@ export default function Home() {
         };
       });
 
-      const audioConstraints = (deviceId = ""): MediaStreamConstraints => ({
-        audio: {
-          ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
-          channelCount: 1,
-          sampleRate: 16000,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
-      let stream = await navigator.mediaDevices.getUserMedia(audioConstraints(selectedDeviceId));
-      const refreshed = await refreshAudioInputs();
-      const savedInput = refreshed.devices.find((input) => input.deviceId === selectedDeviceId);
-      const targetInput = savedInput || refreshed.preferred;
-      const currentDeviceId = stream.getAudioTracks()[0]?.getSettings().deviceId;
-      if (targetInput && currentDeviceId !== targetInput.deviceId) {
-        stream.getTracks().forEach((track) => track.stop());
-        stream = await navigator.mediaDevices.getUserMedia(audioConstraints(targetInput.deviceId));
-      }
-      const track = stream.getAudioTracks()[0];
-      const finalDeviceId = track?.getSettings().deviceId || targetInput?.deviceId || "";
-      const finalLabel = track?.label || targetInput?.label || "当前麦克风";
-      setSelectedDeviceId(finalDeviceId);
-      setActiveDeviceLabel(finalLabel);
-      if (finalDeviceId) window.localStorage.setItem("shiyin.microphoneId", finalDeviceId);
-      mediaStreamRef.current = stream;
       const audioContext = new AudioContext({ sampleRate: 16000 });
       audioContextRef.current = audioContext;
       await audioContext.audioWorklet.addModule("/pcm-worklet.js");
-      const source = audioContext.createMediaStreamSource(stream);
+      const mixer = audioContext.createGain();
+      const compressor = audioContext.createDynamicsCompressor();
+      compressor.threshold.value = -12;
+      compressor.knee.value = 12;
+      compressor.ratio.value = 4;
+      compressor.attack.value = 0.003;
+      compressor.release.value = 0.25;
+      if (microphoneStream) {
+        const microphoneSource = audioContext.createMediaStreamSource(microphoneStream);
+        const microphoneGain = audioContext.createGain();
+        microphoneGain.gain.value = captureMode === "mixed" ? 0.9 : 1;
+        microphoneSource.connect(microphoneGain).connect(mixer);
+      }
+      if (systemStream) {
+        const systemSource = audioContext.createMediaStreamSource(systemStream);
+        const systemGain = audioContext.createGain();
+        systemGain.gain.value = captureMode === "mixed" ? 0.85 : 1;
+        systemSource.connect(systemGain).connect(mixer);
+        for (const track of systemStream.getAudioTracks()) {
+          track.addEventListener("ended", () => {
+            if (!recordingRef.current) return;
+            if (captureMode === "system") {
+              setNotice("电脑声音共享已停止，正在结束本次听记");
+              stopRecording().catch(() => undefined);
+            } else {
+              setActiveDeviceLabel(microphoneLabel);
+              setSourceWarning("Mac 声音共享已停止，当前继续录制麦克风");
+            }
+          });
+        }
+      }
       const capture = new AudioWorkletNode(audioContext, "pcm-capture");
       const silentGain = audioContext.createGain();
       // Keep the graph active in Chromium while remaining effectively inaudible.
@@ -635,17 +959,22 @@ export default function Home() {
           && !silenceWarningShownRef.current
         ) {
           silenceWarningShownRef.current = true;
-          setAudioWarning(`“${finalLabel}”没有检测到声音，请切换输入设备`);
-          setConnectionStatus("麦克风没有输入");
-          setNotice(`当前“${finalLabel}”录到的是静音，请在左侧切换麦克风`);
+          if (captureMode === "microphone") {
+            setAudioWarning(`“${captureLabel}”没有检测到声音，请检查当前录音来源`);
+          } else {
+            setSourceWarning(`“${captureLabel}”没有检测到声音，请确认会议正在播放声音`);
+          }
+          setConnectionStatus("当前录音来源没有输入");
+          setNotice(`当前“${captureLabel}”录到的是静音，请检查左侧录音来源`);
         } else if (framePeak >= 64 && silenceWarningShownRef.current) {
           silenceWarningShownRef.current = false;
           setAudioWarning("");
-          setConnectionStatus("百炼转写 · 本地声纹分离");
+          setSourceWarning("");
+          setConnectionStatus(`${sessionAsrLabel} · 本地声纹分离`);
         }
         if (socket.readyState === WebSocket.OPEN) socket.send(event.data);
       };
-      source.connect(capture).connect(silentGain).connect(audioContext.destination);
+      mixer.connect(compressor).connect(capture).connect(silentGain).connect(audioContext.destination);
       setSeconds(0);
       setRecording(true);
       recordingRef.current = true;
@@ -658,8 +987,22 @@ export default function Home() {
       recordingRef.current = false;
       window.shiyinDesktop?.setRecording(false);
       setProcessing(false);
-      setConnectionStatus("百炼实时 ASR");
-      setNotice(error instanceof Error ? error.message : "无法启动实时听记，请检查麦克风权限");
+      setConnectionStatus("本地实时 ASR");
+      const message = error instanceof Error ? error.message : "无法启动实时听记";
+      let userMessage = message;
+      if (error instanceof DOMException && error.name === "NotAllowedError") {
+        if (audioSourceMode === "microphone") {
+          userMessage = "麦克风权限未开启，请在“系统设置 → 隐私与安全性 → 麦克风”中允许拾音 AI";
+          setAudioWarning(userMessage);
+        } else {
+          const latestCapabilities = await refreshCaptureCapabilities().catch(() => null);
+          userMessage = ["denied", "restricted"].includes(latestCapabilities?.screenPermission || "")
+            ? "Mac 系统音频权限未开启，请在“屏幕与系统音频录制”中允许拾音 AI"
+            : "已取消 Mac 声音共享；重新开始后请选择会议所在屏幕并开启系统音频";
+        }
+      }
+      if (audioSourceMode !== "microphone") setSourceWarning(userMessage);
+      setNotice(userMessage);
     }
   }
 
@@ -724,7 +1067,7 @@ export default function Home() {
     try {
       await api(`/api/meetings/${meetingId}/summarize`, { method: "POST" });
       setProcessing(true);
-      setConnectionStatus("正在重新生成 MiniMax M3 总结…");
+      setConnectionStatus("正在重新生成 MiniMax 总结…");
       setMeeting((current) => current?.id === meetingId ? { ...current, status: "summarizing", error: null } : current);
       setNotice("已在后台重新生成 AI 总结");
       const poll = window.setInterval(async () => {
@@ -825,7 +1168,188 @@ export default function Home() {
     window.setTimeout(() => setHighlightedSeq(null), 2600);
   }
 
-  function exportNotes() {
+  function openReplaceDialog() {
+    setReplaceFind(query.trim());
+    setReplaceWith("");
+    setReplaceCaseSensitive(false);
+    setReplaceWholeWord(false);
+    setReplaceDialogOpen(true);
+  }
+
+  async function applyTranscriptReplacement() {
+    if (!meeting || !replaceFind.trim() || !replacementPreview.count) return;
+    setTranscriptSaving(true);
+    try {
+      const result = await api<{ meeting: Meeting; count: number }>(
+        `/api/meetings/${meeting.id}/transcript/replace`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            find: replaceFind,
+            replace: replaceWith,
+            caseSensitive: replaceCaseSensitive,
+            wholeWord: replaceWholeWord,
+          }),
+        },
+      );
+      setMeeting(result.meeting);
+      mergeMeetingList(result.meeting);
+      setTranscriptMode("organized");
+      setQuery(replaceWith || replaceFind);
+      setReplaceDialogOpen(false);
+      setNotice(`已替换 ${result.count} 处；原始记录已保留，建议重新生成 AI 总结`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "替换失败");
+    } finally {
+      setTranscriptSaving(false);
+    }
+  }
+
+  async function undoTranscriptReplacement() {
+    if (!meeting?.canUndoTranscriptEdit) return;
+    setTranscriptSaving(true);
+    try {
+      const result = await api<{ meeting: Meeting; restored: number }>(
+        `/api/meetings/${meeting.id}/transcript/undo`,
+        { method: "POST" },
+      );
+      setMeeting(result.meeting);
+      mergeMeetingList(result.meeting);
+      setNotice(`已撤销上一次批量替换，恢复 ${result.restored} 段记录`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "撤销失败");
+    } finally {
+      setTranscriptSaving(false);
+    }
+  }
+
+  async function toggleFillerFilter() {
+    if (!meeting) return;
+    setTranscriptSaving(true);
+    try {
+      const value = await api<Meeting>(`/api/meetings/${meeting.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ fillerFilterEnabled: !meeting.fillerFilterEnabled }),
+      });
+      setMeeting(value);
+      mergeMeetingList(value);
+      setTranscriptMode("organized");
+      setNotice(value.fillerFilterEnabled
+        ? "已启用保守口语过滤；原始记录仍可随时查看"
+        : "已关闭口语过滤；人工术语替换仍然保留");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法更新口语过滤设置");
+    } finally {
+      setTranscriptSaving(false);
+    }
+  }
+
+  function buildMarkdownReport() {
+    if (!meeting) return "";
+    const summary = usableSummary;
+    const names = new Map(meeting.speakers.map((speaker) => [speaker.id, speaker.displayName]));
+    const lines: string[] = [
+      `# ${meeting.title}`,
+      "",
+      `> 拾音 AI 会议报告 · ${formatMeetingDate(meeting.startedAt)} · ${formatClock(meeting.durationMs)} · ${meeting.speakers.length} 位发言人`,
+      "",
+      "## 会议概述",
+      "",
+      summary?.overview || "尚未生成总结",
+    ];
+    const addList = (title: string, items: string[] | undefined) => {
+      if (!items?.length) return;
+      lines.push("", `## ${title}`, "", ...items.map((item) => `- ${item}`));
+    };
+
+    if (summary?.meetingBackground) lines.push("", "## 会议背景", "", summary.meetingBackground);
+    if (summary?.overviewCards?.length) {
+      lines.push("", "## 会议总览");
+      for (const card of summary.overviewCards) {
+        lines.push("", `### ${card.title}`, "", card.summary);
+        lines.push(...(card.points || []).map((point) => `- ${point}`));
+      }
+    }
+    if (summary?.keyFacts?.length) {
+      lines.push("", "## 关键事实", "", "| 数值/名词 | 含义 | 上下文 |", "|---|---|---|");
+      for (const fact of summary.keyFacts) {
+        lines.push(`| ${markdownCell(fact.value)} | ${markdownCell(fact.label)} | ${markdownCell(fact.context)} |`);
+      }
+    }
+    addList("关键决策", summary?.decisions);
+    if (summary?.detailedTopics?.length) {
+      lines.push("", "## 详细议题");
+      for (const topic of summary.detailedTopics) {
+        lines.push("", `### ${topic.title}`, "", topic.summary);
+        lines.push(...(topic.points || []).map((point) => `- ${point}`));
+        if (topic.conclusion) lines.push("", `**结论：** ${topic.conclusion}`);
+      }
+    }
+    if (summary?.aiInsights?.length) {
+      lines.push("", "## AI 洞察");
+      for (const insight of summary.aiInsights) {
+        lines.push("", `### ${insight.title}`, "", insight.insight);
+        if (insight.basis) lines.push("", `- 判断依据：${insight.basis}`);
+        lines.push(`- 可信度：${insight.confidence}`);
+      }
+    }
+    if (summary?.actionItems?.length) {
+      lines.push("", "## 行动项", "", "| 负责人 | 任务 | 截止时间 | 优先级 |", "|---|---|---|---|");
+      for (const item of summary.actionItems) {
+        lines.push(`| ${markdownCell(item.owner)} | ${markdownCell(item.task)} | ${markdownCell(item.due)} | ${markdownCell(item.priority || "中")} |`);
+      }
+    }
+    if (summary?.speakerInsights?.length) {
+      lines.push("", "## 发言人贡献");
+      for (const speaker of summary.speakerInsights) {
+        lines.push("", `### ${speaker.speaker}`, "", speaker.contribution);
+        lines.push(...(speaker.keyPoints || []).map((point) => `- ${point}`));
+      }
+    }
+    if (summary?.chapters?.length) {
+      lines.push("", "## 章节时间轴");
+      for (const chapter of summary.chapters) {
+        lines.push("", `### ${formatClock(chapter.startMs)}–${formatClock(chapter.endMs)} ${chapter.title}`, "", chapter.summary);
+        lines.push(...(chapter.highlights || []).map((point) => `- ${point}`));
+      }
+    }
+    addList("风险与待确认", summary?.risks);
+    const topics = [...(summary?.topics || []), ...(summary?.keywords || [])]
+      .filter((item, index, items) => items.indexOf(item) === index);
+    if (topics.length) lines.push("", "## 主题与关键词", "", topics.map((item) => `\`${item}\``).join(" "));
+
+    lines.push("", "## 完整逐字稿（整理稿）");
+    if (meeting.fillerFilterEnabled) lines.push("", "> 已应用保守口语过滤；原始识别文本仍保存在拾音 AI 中。");
+    for (const segment of meeting.segments) {
+      const name = names.get(segment.speakerId || "") || "待确认发言人";
+      lines.push("", `### ${formatClock(segment.startMs)}–${formatClock(segment.endMs)} ${name}`, "", segment.cleanedText);
+    }
+    return `${lines.join("\n").trim()}\n`;
+  }
+
+  function downloadMarkdownReport() {
+    if (!meeting) return;
+    downloadText(
+      buildMarkdownReport(),
+      `${safeFilename(meeting.title)}-AI会议报告.md`,
+      "text/markdown;charset=utf-8",
+    );
+    setExportMenuOpen(false);
+    setNotice("Markdown 报告已下载，可直接交给其他 AI Agent");
+  }
+
+  async function copyMarkdownReport() {
+    if (!meeting) return;
+    try {
+      await navigator.clipboard.writeText(buildMarkdownReport());
+      setNotice("Markdown 报告已复制到剪贴板");
+    } catch {
+      setNotice("无法访问剪贴板，请改用下载 Markdown");
+    }
+    setExportMenuOpen(false);
+  }
+
+  function exportHtmlReport() {
     if (!meeting) return;
     if (summaryFailed) {
       setNotice("当前总结生成失败，请重新生成后再导出报告");
@@ -838,7 +1362,7 @@ export default function Home() {
     const transcript = meeting.segments.map((segment) => `
       <div class="transcript-row">
         <time>${formatClock(segment.startMs)}–${formatClock(segment.endMs)}</time>
-        <div><b>${escapeHtml(names.get(segment.speakerId || "") || "待确认发言人")}</b><p>${escapeHtml(segment.text)}</p></div>
+        <div><b>${escapeHtml(names.get(segment.speakerId || "") || "待确认发言人")}</b><p>${escapeHtml(segment.cleanedText)}</p></div>
       </div>`).join("");
     const overviewMapHtml = (summary?.overviewCards || []).map((card, index) => `
       <article class="map-card">
@@ -910,14 +1434,32 @@ ${chapterHtml ? `<section><h2>章节时间轴</h2>${chapterHtml}</section>` : ""
 ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></section>` : ""}
 <section><h2>完整记录</h2>${transcript}</section>
 </main></body></html>`;
-    const blob = new Blob([report], { type: "text/html;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `${meeting.title.replace(/[\\/:*?"<>|]/g, "-")}-AI会议报告.html`;
-    anchor.click();
-    URL.revokeObjectURL(url);
+    downloadText(report, `${safeFilename(meeting.title)}-AI会议报告.html`, "text/html;charset=utf-8");
+    setExportMenuOpen(false);
   }
+
+  const isMacDesktop = audioCaptureCapabilities?.platform === "darwin";
+  const macScreenPermission = audioCaptureCapabilities?.screenPermission || "unknown";
+  const macMicrophonePermission = audioCaptureCapabilities?.microphonePermission || "unknown";
+  const macScreenPermissionBlocked = ["denied", "restricted"].includes(macScreenPermission);
+  const macMicrophonePermissionBlocked = ["denied", "restricted"].includes(macMicrophonePermission);
+  const macSystemMode = audioSourceMode === "system" || audioSourceMode === "mixed";
+  const macCaptureState = sourceWarning
+    ? "warning"
+    : macScreenPermissionBlocked
+      ? "blocked"
+      : macScreenPermission === "granted" ? "ready" : "pending";
+  const macCaptureTitle = sourceWarning
+    || (macScreenPermissionBlocked
+      ? "需要开启 Mac 系统音频权限"
+      : macScreenPermission === "granted" ? "Mac 系统音频已就绪" : "首次使用需要系统确认");
+  const macCaptureDetail = macScreenPermissionBlocked
+    ? "在系统设置的“屏幕与系统音频录制”中允许拾音 AI。"
+    : macScreenPermission === "granted"
+      ? audioSourceMode === "mixed"
+        ? "开始后选择会议所在屏幕；建议佩戴耳机，避免声音被重复录入。"
+        : "开始后选择会议所在屏幕，并确认共享系统音频。"
+      : "点击开始后，macOS 会弹出共享面板，请选择会议所在屏幕并开启系统音频。";
 
   return (
     <main className="app-shell">
@@ -938,11 +1480,85 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
           <span>{recording ? "■" : "●"}</span>{recording ? "结束听记" : "开始新听记"}
         </button>
         <div className="local-storage-note"><b>本机存储</b><span>录音与记录仅保存在这台电脑</span></div>
-        <label className="microphone-picker">
-          <span>输入设备</span>
+        {isMacDesktop ? (
+          <section className="mac-audio-source-picker" aria-labelledby="mac-audio-source-title">
+            <div className="mac-source-heading">
+              <span id="mac-audio-source-title">录音来源</span>
+              <em>macOS</em>
+            </div>
+            <div className="mac-source-options" role="radiogroup" aria-label="选择录音来源">
+              <button
+                type="button"
+                className={audioSourceMode === "microphone" ? "active" : ""}
+                aria-pressed={audioSourceMode === "microphone"}
+                disabled={recording}
+                onClick={() => selectAudioSource("microphone")}
+              >
+                <b>现场</b><small>麦克风</small>
+              </button>
+              <button
+                type="button"
+                className={audioSourceMode === "system" ? "active" : ""}
+                aria-pressed={audioSourceMode === "system"}
+                disabled={recording || !systemAudioAvailable}
+                onClick={() => selectAudioSource("system")}
+              >
+                <b>线上</b><small>Mac 声音</small>
+              </button>
+              <button
+                type="button"
+                className={audioSourceMode === "mixed" ? "active" : ""}
+                aria-pressed={audioSourceMode === "mixed"}
+                disabled={recording || !systemAudioAvailable}
+                onClick={() => selectAudioSource("mixed")}
+              >
+                <b>混合</b><small>声音 + 麦克风</small>
+              </button>
+            </div>
+            {!systemAudioAvailable && (
+              <p className="mac-version-note">Mac 电脑声音需要 macOS 15 或更高版本</p>
+            )}
+            {macSystemMode && systemAudioAvailable && (
+              <div className={`mac-capture-status ${macCaptureState}`}>
+                <div><i /><span><b>{macCaptureTitle}</b><small>{macCaptureDetail}</small></span></div>
+                <p>只读取系统声音；共享画面不会保存，也不会上传。</p>
+                <div className="mac-permission-actions">
+                  {macScreenPermissionBlocked && (
+                    <button type="button" onClick={() => openAudioPrivacySettings("screen")}>打开系统设置</button>
+                  )}
+                  <button type="button" onClick={() => refreshCaptureCapabilities()}>重新检测</button>
+                  {captureSettingsOpened && macScreenPermission === "granted" && (
+                    <button type="button" onClick={() => window.shiyinDesktop?.relaunch()}>重启应用</button>
+                  )}
+                </div>
+              </div>
+            )}
+          </section>
+        ) : (
+          <label className="audio-source-picker">
+            <span>录音来源</span>
+            <select
+              value={audioSourceMode}
+              disabled={recording}
+              onChange={(event) => selectAudioSource(event.target.value as AudioSourceMode)}
+            >
+              <option value="microphone">仅麦克风</option>
+              <option value="system" disabled={!systemAudioAvailable}>仅电脑声音</option>
+              <option value="mixed" disabled={!systemAudioAvailable}>电脑声音 + 麦克风</option>
+            </select>
+            <small>
+              {systemAudioAvailable
+                ? "电脑声音模式开始时会让你选择共享屏幕"
+                : "电脑声音录制仅在桌面版可用"}
+            </small>
+          </label>
+        )}
+        <div className={`microphone-picker ${audioSourceMode === "system" ? "is-unused" : ""}`}>
+          <span>麦克风设备</span>
           <select
+            aria-label="麦克风设备"
             value={selectedDeviceId}
-            disabled={recording}
+            disabled={recording || audioSourceMode === "system"}
             onChange={(event) => {
               const deviceId = event.target.value;
               const input = audioInputs.find((item) => item.deviceId === deviceId);
@@ -958,9 +1574,23 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
           </select>
           <div className="mic-level"><i style={{ width: `${inputLevel}%` }} /></div>
           <small className={audioWarning ? "warning" : ""}>
-            {audioWarning || (recording ? `正在使用：${activeDeviceLabel}` : "开始后可看到输入电平")}
+            {audioWarning || (isMacDesktop && macMicrophonePermissionBlocked && audioSourceMode !== "system"
+              ? "需要在系统设置中允许麦克风"
+              : recording
+              ? `正在使用：${activeDeviceLabel}`
+              : audioSourceMode === "system" ? "仅录 Mac 声音，不启用麦克风" : "开始后可看到输入电平")}
           </small>
-        </label>
+          {isMacDesktop && macMicrophonePermissionBlocked && audioSourceMode !== "system" && (
+            <button
+              type="button"
+              className="microphone-permission-button"
+              disabled={recording}
+              onClick={() => openAudioPrivacySettings("microphone")}
+            >
+              打开麦克风权限
+            </button>
+          )}
+        </div>
         <button className="template-quick-button" onClick={openTemplateDialog} disabled={recording || processing}>
           <span className={`template-quick-icon ${(meeting?.summaryTemplate || defaultSummaryTemplate).replace("meeting-", "")}`}>
             {summaryTemplateIcon(meeting?.summaryTemplate || defaultSummaryTemplate, 18)}
@@ -991,6 +1621,10 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
         </div>
         <div className="sidebar-bottom">
           <div className="privacy-state"><span>●</span> 本地后台已连接</div>
+          <button className="settings-button" disabled={recording || processing} onClick={() => void openSettingsDialog()}>
+            <GearSix size={17} weight="duotone" />
+            <span><b>MiniMax 设置</b><small>{miniMaxSettings?.configured ? "密钥已配置" : "配置密钥与模型"}</small></span>
+          </button>
           <div className="profile"><span>本</span><p><b>本机工作区</b><small>2–6 人会议模式</small></p></div>
         </div>
       </aside>
@@ -1006,14 +1640,28 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             <p>
               {meeting
                 ? `${meeting.speakers.length || "待识别"} 位发言人 · ${formatClock(meeting.durationMs || seconds * 1000)}`
-                : "百炼实时转写 · 本地发言人识别 · MiniMax 总结"}
+                : "本地实时转写 · 本地发言人识别 · MiniMax 总结"}
             </p>
           </div>
           <div className="top-actions">
             <button disabled={recording || processing} onClick={openTemplateDialog}><Compass size={15} /> 模板</button>
             <button disabled={!meeting || processing || ["recording", "correcting", "summarizing"].includes(meeting.status)} onClick={rerunCorrection}>↻ 重新校正</button>
             <button disabled={!meeting || processing || ["recording", "correcting", "summarizing"].includes(meeting.status)} onClick={rerunSummary}>✦ 重新总结</button>
-            <button className="primary" disabled={!meeting || summaryFailed || processing || meeting.status === "summarizing"} onClick={exportNotes}>⇩ 导出报告</button>
+            <div className="export-control">
+              <button
+                className="primary"
+                disabled={!meeting || summaryFailed || processing || meeting.status === "summarizing"}
+                onClick={() => setExportMenuOpen((open) => !open)}
+                aria-expanded={exportMenuOpen}
+              >⇩ 导出报告</button>
+              {exportMenuOpen && (
+                <div className="export-menu" role="menu">
+                  <button onClick={exportHtmlReport}><b>网页报告</b><span>适合浏览与打印</span></button>
+                  <button onClick={downloadMarkdownReport}><b>Markdown 文件</b><span>适合 AI Agent 分析</span></button>
+                  <button onClick={() => void copyMarkdownReport()}><b>复制 Markdown</b><span>直接粘贴给其他 AI</span></button>
+                </div>
+              )}
+            </div>
             <button className="more danger" disabled={!meeting || processing || ["recording", "correcting", "summarizing"].includes(meeting.status)} onClick={deleteMeeting}>删除</button>
           </div>
         </header>
@@ -1057,7 +1705,28 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             </div>
 
             {view === "transcript" && (
-              <div className="transcript">
+              <>
+                <div className="transcript-toolbar">
+                  <div className="transcript-mode-toggle" aria-label="逐字稿版本">
+                    <button className={transcriptMode === "organized" ? "active" : ""} onClick={() => setTranscriptMode("organized")}>整理稿</button>
+                    <button className={transcriptMode === "original" ? "active" : ""} onClick={() => setTranscriptMode("original")}>原始记录</button>
+                  </div>
+                  <label className="filler-filter-toggle">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(meeting?.fillerFilterEnabled)}
+                      disabled={!meeting || transcriptSaving || processing || recording}
+                      onChange={() => void toggleFillerFilter()}
+                    />
+                    <span>过滤“嗯、啊、呃”</span>
+                  </label>
+                  <button className="replace-trigger" disabled={!meeting || transcriptSaving || processing || recording} onClick={openReplaceDialog}>⌕ 查找与替换</button>
+                  {meeting?.canUndoTranscriptEdit && (
+                    <button className="undo-replace" disabled={transcriptSaving} onClick={() => void undoTranscriptReplacement()}>↶ 撤销上次替换</button>
+                  )}
+                  {meeting?.summaryStale && <span className="summary-stale-badge">逐字稿已更新 · 建议重新总结</span>}
+                </div>
+                <div className="transcript">
                 {filteredSegments.map((segment) => {
                   const speaker = segment.speakerId ? speakerMap.get(segment.speakerId) : null;
                   const name = speaker?.displayName || "待确认发言人";
@@ -1082,7 +1751,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                             </button>
                             {segment.source === "corrected" && <em>已校正</em>}
                           </div>
-                          <p>{segment.text}</p>
+                          <p>{displayedSegmentText(segment, transcriptMode)}</p>
                         </div>
                       </div>
                       {(segment.pauseAfterMs || 0) >= 1000 && (
@@ -1099,11 +1768,18 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                     {!meeting && <button onClick={startRecording}>开始新听记</button>}
                   </div>
                 )}
-              </div>
+                </div>
+              </>
             )}
 
             {view === "summary" && (
               <div className="summary-pane">
+                {meeting?.summaryStale && (
+                  <div className="summary-stale-banner" role="status">
+                    <span>逐字稿已更新，当前总结仍基于修改前的内容。</span>
+                    <button disabled={processing} onClick={rerunSummary}>重新生成总结</button>
+                  </div>
+                )}
                 {usingLiveSummary && (
                   <div className="live-summary-banner" role="status">
                     <span className="live-summary-pulse" aria-hidden="true" />
@@ -1128,18 +1804,18 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                     </button>
                   </div>
                 ) : usableSummary ? (
-                  meeting.reportStyle === "visual" ? (
+                  meeting?.reportStyle === "visual" ? (
                     <div className="visual-report">
                       <header className="visual-report-hero">
                         <div className="visual-hero-topline">
                           <span><Sparkle size={13} weight="fill" /> MiniMax AI {usingLiveSummary ? "实时草稿" : "图文纪要"}</span>
-                          <button onClick={openTemplateDialog}>{summaryTemplateName(meeting.summaryTemplate)} · 更换模板</button>
+                          <button onClick={openTemplateDialog}>{summaryTemplateName(meeting?.summaryTemplate || "meeting-minutes")} · 更换模板</button>
                         </div>
-                        <h2>{usableSummary.headline || meeting.title}</h2>
+                        <h2>{usableSummary.headline || meeting?.title}</h2>
                         <p>{usableSummary.overview}</p>
                         <div className="visual-metrics">
-                          <article><Clock size={18} weight="duotone" /><span><strong>{formatClock(meeting.durationMs)}</strong><small>会议时长</small></span></article>
-                          <article><UsersThree size={19} weight="duotone" /><span><strong>{meeting.speakers.length}</strong><small>位发言人</small></span></article>
+                          <article><Clock size={18} weight="duotone" /><span><strong>{formatClock(meeting?.durationMs || 0)}</strong><small>会议时长</small></span></article>
+                          <article><UsersThree size={19} weight="duotone" /><span><strong>{meeting?.speakers.length || 0}</strong><small>位发言人</small></span></article>
                           <article><Target size={18} weight="duotone" /><span><strong>{usableSummary.decisions.length}</strong><small>项关键决策</small></span></article>
                           <article><CheckCircle size={19} weight="duotone" /><span><strong>{actions.length}</strong><small>项行动任务</small></span></article>
                         </div>
@@ -1249,9 +1925,9 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                       <h2>{usableSummary.headline || usableSummary.overview}</h2>
                       <p className="report-overview">{usableSummary.overview}</p>
                       <div className="report-meta">
-                        <span><Clock size={14} />{formatClock(meeting.durationMs)}</span>
-                        <span><UsersThree size={15} />{meeting.speakers.length} 位发言人</span>
-                        <span><Quotes size={15} />{meeting.segments.length} 段有效发言</span>
+                        <span><Clock size={14} />{formatClock(meeting?.durationMs || 0)}</span>
+                        <span><UsersThree size={15} />{meeting?.speakers.length || 0} 位发言人</span>
+                        <span><Quotes size={15} />{meeting?.segments.length || 0} 段有效发言</span>
                       </div>
                       <div className="report-stats">
                         <div><strong>{chapters.length || usableSummary.topics.length}</strong><span>讨论章节</span></div>
@@ -1547,7 +2223,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                       {meeting?.status === "recording"
                         ? "录音约 30 秒后开始生成，并随会议内容持续更新。"
                         : meeting?.status === "summarizing"
-                          ? "MiniMax M3 正在流式生成正式报告，请稍候。"
+                          ? "MiniMax 正在流式生成正式报告，请稍候。"
                           : "结束听记后，会先在本地校正发言人，再用 MiniMax 生成完整会议报告。"}
                     </p>
                   </div>
@@ -1580,7 +2256,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
           </article>
 
           <aside className="insight-card">
-            <div className="insight-title"><span>✦</span><div><h2>会议速览</h2><p>{usingLiveSummary ? "百炼转写 · MiniMax M3 实时草稿" : "百炼转写 · MiniMax M3 总结"}</p></div><button disabled={!meeting || processing || ["recording", "correcting", "summarizing"].includes(meeting.status)} onClick={rerunSummary} aria-label="重新生成总结">↻</button></div>
+            <div className="insight-title"><span>✦</span><div><h2>会议速览</h2><p>{usingLiveSummary ? "本地转写 · MiniMax 实时草稿" : "本地转写 · MiniMax 总结"}</p></div><button disabled={!meeting || processing || ["recording", "correcting", "summarizing"].includes(meeting.status)} onClick={rerunSummary} aria-label="重新生成总结">↻</button></div>
             <div className="metric-row">
               <div><strong>{Math.ceil((meeting?.durationMs || 0) / 60000)}<small>分钟</small></strong><span>会议时长</span></div>
               <div><strong>{meeting?.speakers.length || 0}<small>位</small></strong><span>识别发言人</span></div>
@@ -1609,6 +2285,75 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
           </aside>
         </div>
       </section>
+      {settingsDialogOpen && (
+        <div
+          className="dialog-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.currentTarget === event.target && !settingsSaving) setSettingsDialogOpen(false);
+          }}
+        >
+          <form
+            className="settings-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="settings-dialog-title"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveSettings();
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && !settingsSaving) setSettingsDialogOpen(false);
+            }}
+          >
+            <div className="settings-dialog-heading">
+              <span><Key size={21} weight="duotone" /></span>
+              <div>
+                <h2 id="settings-dialog-title">MiniMax 设置</h2>
+                <p>密钥只保存在当前电脑，不会写进安装包。</p>
+              </div>
+              <button type="button" onClick={() => setSettingsDialogOpen(false)} disabled={settingsSaving} aria-label="关闭设置">
+                <X size={17} />
+              </button>
+            </div>
+            <label htmlFor="minimax-api-key">MiniMax API Key</label>
+            <input
+              id="minimax-api-key"
+              type="password"
+              autoFocus
+              autoComplete="off"
+              value={miniMaxKeyDraft}
+              disabled={!miniMaxSettings?.managedByApp || settingsSaving}
+              onChange={(event) => setMiniMaxKeyDraft(event.target.value)}
+              placeholder={miniMaxSettings?.configured ? "留空可保留当前密钥" : "请输入你的 MiniMax API Key"}
+            />
+            <label htmlFor="minimax-model">模型</label>
+            <input
+              id="minimax-model"
+              value={miniMaxModelDraft}
+              disabled={!miniMaxSettings?.managedByApp || settingsSaving}
+              onChange={(event) => setMiniMaxModelDraft(event.target.value)}
+              placeholder="MiniMax-M2.7"
+            />
+            {settingsError && <p className="settings-error"><WarningCircle size={14} />{settingsError}</p>}
+            <div className="settings-security-note">
+              <CheckCircle size={17} weight="fill" />
+              <p>
+                <b>{miniMaxSettings?.configured ? "密钥已配置" : "等待配置密钥"}</b>
+                <span>{miniMaxSettings?.managedByApp
+                  ? "保存后由 macOS 加密，并自动重启应用使配置生效。"
+                  : "开发版继续使用项目中的 .env.local；安装版可在这里直接配置。"}</span>
+              </p>
+            </div>
+            <div className="settings-dialog-actions">
+              <button type="button" onClick={() => setSettingsDialogOpen(false)} disabled={settingsSaving}>取消</button>
+              <button className="primary" type="submit" disabled={!miniMaxSettings?.managedByApp || settingsSaving}>
+                {settingsSaving ? "正在保存…" : "保存并重启"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
       {templateDialogOpen && (
         <div
           className="dialog-backdrop template-dialog-backdrop"
@@ -1628,7 +2373,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
           >
             <header className="template-dialog-heading">
               <div>
-                <span className="template-eyebrow"><Sparkle size={13} weight="fill" /> MiniMax M3 总结方式</span>
+                <span className="template-eyebrow"><Sparkle size={13} weight="fill" /> MiniMax 总结方式</span>
                 <h2 id="template-dialog-title">这次想怎么整理？</h2>
                 <p>{meeting ? "内容模板会影响 AI 的提炼重点；展示样式可随时切换。" : "设置会用于下一场听记，之后仍可重新选择。"}</p>
               </div>
@@ -1691,7 +2436,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             <footer className="template-dialog-footer">
               <p>
                 {meeting && meeting.summaryTemplate !== templateDraft
-                  ? `将以“${summaryTemplateName(templateDraft)}”提示词重新调用 MiniMax M3`
+                  ? `将以“${summaryTemplateName(templateDraft)}”提示词重新调用 MiniMax`
                   : "当前选择只改变展示，不会重复生成内容"}
               </p>
               <div>
@@ -1742,6 +2487,66 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
               <button type="button" onClick={() => setRenamingSpeaker(null)}>取消</button>
               <button className="primary" type="submit" disabled={!speakerNameDraft.trim()}>保存名称</button>
             </div>
+          </form>
+        </div>
+      )}
+      {replaceDialogOpen && meeting && (
+        <div
+          className="dialog-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.currentTarget === event.target && !transcriptSaving) setReplaceDialogOpen(false);
+          }}
+        >
+          <form
+            className="replace-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="replace-dialog-title"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void applyTranscriptReplacement();
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && !transcriptSaving) setReplaceDialogOpen(false);
+            }}
+          >
+            <header className="replace-dialog-heading">
+              <div>
+                <span>⌕</span>
+                <div><h2 id="replace-dialog-title">查找与全局替换</h2><p>只修改整理稿，原始识别文本始终保留。</p></div>
+              </div>
+              <button type="button" onClick={() => setReplaceDialogOpen(false)} disabled={transcriptSaving} aria-label="关闭查找与替换"><X size={17} /></button>
+            </header>
+            <div className="replace-fields">
+              <label><span>查找</span><input autoFocus value={replaceFind} onChange={(event) => setReplaceFind(event.target.value)} placeholder="例如：破丝" /></label>
+              <label><span>替换为</span><input value={replaceWith} onChange={(event) => setReplaceWith(event.target.value)} placeholder="例如：POS（留空表示删除）" /></label>
+            </div>
+            <div className="replace-options">
+              <label><input type="checkbox" checked={replaceCaseSensitive} onChange={(event) => setReplaceCaseSensitive(event.target.checked)} /> 区分大小写</label>
+              <label><input type="checkbox" checked={replaceWholeWord} onChange={(event) => setReplaceWholeWord(event.target.checked)} /> 英文整词匹配</label>
+              <span>{replacementPreview.count} 处匹配 · {replacementPreview.segments.length} 段记录</span>
+            </div>
+            <div className="replace-preview">
+              {replacementPreview.segments.slice(0, 6).map(({ segment, count, next }) => (
+                <article key={segment.id}>
+                  <header><time>{formatClock(segment.startMs)}</time><span>{count} 处</span></header>
+                  <p>{segment.text}</p>
+                  <p className="replacement-result">→ {next}</p>
+                </article>
+              ))}
+              {!replacementPreview.count && <div className="replace-empty">{replaceFind.trim() ? "当前整理稿中没有匹配内容" : "输入简称、产品名或专业术语即可预览"}</div>}
+              {replacementPreview.segments.length > 6 && <small>另有 {replacementPreview.segments.length - 6} 段匹配，将一并替换。</small>}
+            </div>
+            <footer className="replace-dialog-actions">
+              <p>替换后旧的 AI 总结会标记为待更新，可手动重新生成。</p>
+              <div>
+                <button type="button" onClick={() => setReplaceDialogOpen(false)} disabled={transcriptSaving}>取消</button>
+                <button className="primary" type="submit" disabled={!replaceFind.trim() || !replacementPreview.count || transcriptSaving}>
+                  {transcriptSaving ? "正在替换…" : `全部替换 ${replacementPreview.count} 处`}
+                </button>
+              </div>
+            </footer>
           </form>
         </div>
       )}

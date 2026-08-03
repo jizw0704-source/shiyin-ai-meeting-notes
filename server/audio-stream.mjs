@@ -30,7 +30,11 @@ export function parseByteRange(value, size) {
   };
 }
 
-export function streamMeetingAudio(request, response, { meeting, dataRoot }) {
+export function streamMeetingAudio(request, response, {
+  meeting,
+  dataRoot,
+  appOrigin = "http://127.0.0.1:3000",
+}) {
   const meetingsRoot = path.resolve(dataRoot, "meetings");
   const audioPath = meeting?.audioPath ? path.resolve(meeting.audioPath) : "";
   const allowedPrefix = `${meetingsRoot}${path.sep}`;
@@ -38,7 +42,7 @@ export function streamMeetingAudio(request, response, { meeting, dataRoot }) {
   if (!audioPath || !audioPath.startsWith(allowedPrefix) || !existsSync(audioPath)) {
     response.writeHead(404, {
       "Content-Type": "application/json; charset=utf-8",
-      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Origin": appOrigin,
     });
     response.end(JSON.stringify({ error: "原始录音不存在" }));
     return;
@@ -49,7 +53,7 @@ export function streamMeetingAudio(request, response, { meeting, dataRoot }) {
   if (!range) {
     response.writeHead(416, {
       "Content-Range": `bytes */${size}`,
-      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Origin": appOrigin,
     });
     response.end();
     return;
@@ -60,7 +64,7 @@ export function streamMeetingAudio(request, response, { meeting, dataRoot }) {
     "Content-Length": String(range.end - range.start + 1),
     "Accept-Ranges": "bytes",
     "Cache-Control": "private, max-age=0, must-revalidate",
-    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Origin": appOrigin,
   };
   if (range.partial) headers["Content-Range"] = `bytes ${range.start}-${range.end}/${size}`;
   response.writeHead(range.partial ? 206 : 200, headers);
