@@ -1,4 +1,4 @@
-import { createReadStream, createWriteStream, existsSync, mkdirSync, openSync, closeSync, readSync, statSync, writeSync } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, mkdirSync, openSync, closeSync, readSync, rmSync, statSync, writeSync } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import path from "node:path";
 
@@ -62,10 +62,11 @@ export class AudioSession {
     const output = createWriteStream(this.wavPath);
     output.write(wavHeader(this.byteLength, this.sampleRate));
     await pipeline(createReadStream(this.pcmPath), output);
+    rmSync(this.pcmPath, { force: true });
     return this.wavPath;
   }
 
   static isRecoverable(pcmPath) {
-    return existsSync(pcmPath);
+    return existsSync(pcmPath) && statSync(pcmPath).size > 0;
   }
 }

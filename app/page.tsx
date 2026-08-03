@@ -9,13 +9,16 @@ import {
   Clock,
   Compass,
   Flag,
+  FolderOpen,
   GearSix,
+  HardDrives,
   Key,
   ListChecks,
   PushPin,
   Quotes,
   Sparkle,
   Target,
+  Trash,
   UsersThree,
   Waveform,
   WarningCircle,
@@ -41,6 +44,16 @@ type MiniMaxSettings = {
   model: string;
   managedByApp: boolean;
   storageLocation: string;
+};
+type StorageInfo = {
+  totalBytes: number;
+  recordingsBytes: number;
+  temporaryBytes: number;
+  temporaryFiles: number;
+  databaseBytes: number;
+  meetingCount: number;
+  interruptedCount: number;
+  dataRoot: string;
 };
 type Speaker = {
   id: string;
@@ -168,6 +181,7 @@ declare global {
     shiyinDesktop?: {
       getAudioCaptureCapabilities: () => Promise<AudioCaptureCapabilities>;
       openAudioPrivacySettings: (kind: "microphone" | "screen") => Promise<boolean>;
+      openDataFolder: () => Promise<boolean>;
       relaunch: () => void;
       getMiniMaxSettings: () => Promise<MiniMaxSettings>;
       saveMiniMaxSettings: (settings: { apiKey: string; model: string }) => Promise<MiniMaxSettings>;
@@ -219,6 +233,19 @@ function formatMeetingDate(iso: string) {
     ? "今天"
     : `${value.getMonth() + 1}月${value.getDate()}日`;
   return `${date} ${value.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })}`;
+}
+
+function formatBytes(bytes: number | null | undefined) {
+  const value = Math.max(0, bytes || 0);
+  if (value < 1024) return `${value} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let size = value / 1024;
+  let unit = units[0];
+  for (let index = 1; index < units.length && size >= 1024; index += 1) {
+    size /= 1024;
+    unit = units[index];
+  }
+  return `${size >= 10 ? size.toFixed(1) : size.toFixed(2)} ${unit}`;
 }
 
 function statusLabel(status: MeetingStatus) {
@@ -379,6 +406,11 @@ export default function Home() {
   const [miniMaxModelDraft, setMiniMaxModelDraft] = useState("MiniMax-M2.7");
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [settingsError, setSettingsError] = useState("");
+  const [storageDialogOpen, setStorageDialogOpen] = useState(false);
+  const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null);
+  const [storageLoading, setStorageLoading] = useState(false);
+  const [storageCleaning, setStorageCleaning] = useState(false);
+  const [storageError, setStorageError] = useState("");
   const socketRef = useRef<WebSocket | null>(null);
   const playbackRef = useRef<HTMLAudioElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -501,6 +533,50 @@ export default function Home() {
       setSettingsSaving(false);
     }
   }, [miniMaxKeyDraft, miniMaxModelDraft, miniMaxSettings?.configured]);
+
+  const openStorageDialog = useCallback(async () => {
+    setStorageDialogOpen(true);
+    setStorageLoading(true);
+    setStorageError("");
+    try {
+      setStorageInfo(await api<StorageInfo>("/api/storage"));
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : "无法读取本机存储信息");
+    } finally {
+      setStorageLoading(false);
+    }
+  }, []);
+
+  const cleanupStorage = useCallback(async () => {
+    setStorageCleaning(true);
+    setStorageError("");
+    try {
+      const result = await api<{ filesRemoved: number; bytesFreed: number; storage: StorageInfo }>(
+        "/api/storage/cleanup",
+        { method: "POST" },
+      );
+      setStorageInfo(result.storage);
+      setNotice(result.filesRemoved
+        ? `已安全释放 ${formatBytes(result.bytesFreed)}，会议录音与记录均已保留`
+        : "当前没有可清理的临时音频");
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : "清理失败，请稍后重试");
+    } finally {
+      setStorageCleaning(false);
+    }
+  }, []);
+
+  const openDataFolder = useCallback(async () => {
+    try {
+      if (!window.shiyinDesktop) {
+        setNotice(storageInfo?.dataRoot || "数据文件夹仅可由桌面版直接打开");
+        return;
+      }
+      await window.shiyinDesktop.openDataFolder();
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : "无法打开数据文件夹");
+    }
+  }, [storageInfo?.dataRoot]);
 
   const refreshAudioInputs = useCallback(async () => {
     const devices = (await navigator.mediaDevices.enumerateDevices())
@@ -1479,7 +1555,11 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
         <button className="new-note" disabled={processing} onClick={toggleRecording}>
           <span>{recording ? "■" : "●"}</span>{recording ? "结束听记" : "开始新听记"}
         </button>
-        <div className="local-storage-note"><b>本机存储</b><span>录音与记录仅保存在这台电脑</span></div>
+        <button type="button" className="local-storage-note" onClick={() => void openStorageDialog()}>
+          <HardDrives size={17} weight="duotone" />
+          <span><b>本机存储</b><small>管理录音与空间</small></span>
+          <ArrowRight size={13} />
+        </button>
         {isMacDesktop ? (
           <section className="mac-audio-source-picker" aria-labelledby="mac-audio-source-title">
             <div className="mac-source-heading">
@@ -2285,6 +2365,77 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
           </aside>
         </div>
       </section>
+      {storageDialogOpen && (
+        <div
+          className="dialog-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.currentTarget === event.target && !storageCleaning) setStorageDialogOpen(false);
+          }}
+        >
+          <section
+            className="settings-dialog storage-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="storage-dialog-title"
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && !storageCleaning) setStorageDialogOpen(false);
+            }}
+          >
+            <div className="settings-dialog-heading">
+              <span><HardDrives size={21} weight="duotone" /></span>
+              <div>
+                <h2 id="storage-dialog-title">本机存储</h2>
+                <p>录音、逐字稿和声纹数据只保存在这台电脑。</p>
+              </div>
+              <button type="button" onClick={() => setStorageDialogOpen(false)} disabled={storageCleaning} aria-label="关闭本机存储">
+                <X size={17} />
+              </button>
+            </div>
+            {storageLoading ? (
+              <div className="storage-loading">正在统计本机数据…</div>
+            ) : storageInfo ? (
+              <>
+                <div className="storage-total">
+                  <span>当前占用</span>
+                  <strong>{formatBytes(storageInfo.totalBytes)}</strong>
+                  <small>{storageInfo.meetingCount} 场会议 · 数据库 {formatBytes(storageInfo.databaseBytes)}</small>
+                </div>
+                <div className="storage-metrics">
+                  <article><span>会议录音</span><b>{formatBytes(storageInfo.recordingsBytes)}</b></article>
+                  <article><span>可清理临时文件</span><b>{formatBytes(storageInfo.temporaryBytes)}</b></article>
+                </div>
+                <div className="storage-safety-note">
+                  <CheckCircle size={17} weight="fill" />
+                  <p>
+                    <b>{storageInfo.interruptedCount ? `${storageInfo.interruptedCount} 场会议等待恢复` : "异常恢复已开启"}</b>
+                    <span>应用意外退出时，会在下次启动后尽量找回未完成的录音。</span>
+                  </p>
+                </div>
+                <div className="storage-path">
+                  <span>数据位置</span>
+                  <code>{storageInfo.dataRoot}</code>
+                </div>
+                <p className="storage-clean-hint">清理只会删除已经转换完成的重复临时音频，不会删除会议、录音或逐字稿。</p>
+              </>
+            ) : null}
+            {storageError && <p className="settings-error"><WarningCircle size={14} />{storageError}</p>}
+            <div className="settings-dialog-actions storage-actions">
+              <button type="button" onClick={() => void openDataFolder()} disabled={storageLoading || storageCleaning}>
+                <FolderOpen size={15} /> 打开数据文件夹
+              </button>
+              <button
+                type="button"
+                className="primary"
+                onClick={() => void cleanupStorage()}
+                disabled={storageLoading || storageCleaning || !storageInfo?.temporaryBytes || recording}
+              >
+                <Trash size={15} /> {storageCleaning ? "正在清理…" : "清理临时文件"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
       {settingsDialogOpen && (
         <div
           className="dialog-backdrop"

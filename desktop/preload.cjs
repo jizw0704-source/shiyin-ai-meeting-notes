@@ -12,6 +12,9 @@ contextBridge.exposeInMainWorld("shiyinDesktop", {
   openAudioPrivacySettings(kind) {
     return ipcRenderer.invoke("audio-privacy-settings:open", kind);
   },
+  openDataFolder() {
+    return ipcRenderer.invoke("data-folder:open");
+  },
   relaunch() {
     ipcRenderer.send("application:relaunch");
   },

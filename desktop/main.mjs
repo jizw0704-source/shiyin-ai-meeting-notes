@@ -38,6 +38,7 @@ const packagedWebRoot = app.isPackaged
   ? path.join(process.resourcesPath, "app.asar.unpacked")
   : runtimeRoot;
 const settingsPath = path.join(runtimeRoot, "settings.json");
+const dataFolderPath = path.join(runtimeRoot, "data");
 const applicationIconPath = path.join(
   appRoot,
   "build",
@@ -481,6 +482,12 @@ ipcMain.on("recording-state", (_event, active) => {
 });
 
 ipcMain.handle("audio-capture-capabilities", () => audioCaptureCapabilities());
+ipcMain.handle("data-folder:open", async () => {
+  fs.mkdirSync(dataFolderPath, { recursive: true });
+  const error = await shell.openPath(dataFolderPath);
+  if (error) throw new Error(error);
+  return true;
+});
 ipcMain.handle("audio-privacy-settings:open", async (_event, kind) => {
   if (process.platform !== "darwin") return false;
   const privacyPane = kind === "microphone" ? "Privacy_Microphone" : "Privacy_ScreenCapture";

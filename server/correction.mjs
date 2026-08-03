@@ -1,4 +1,4 @@
-import { closeSync, openSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import path from "node:path";
 
 function normalize(vector) {
@@ -14,12 +14,12 @@ function cosine(a, b) {
   return value;
 }
 
-function readPcmRange(fd, fileSize, startMs, endMs) {
+function readPcmRange(fd, fileSize, dataOffset, startMs, endMs) {
   const start = Math.max(0, Math.floor(startMs * 32));
   const end = Math.min(fileSize, Math.ceil(endMs * 32));
   if (end <= start) return Buffer.alloc(0);
   const buffer = Buffer.alloc(end - start);
-  readSync(fd, buffer, 0, buffer.length, start);
+  readSync(fd, buffer, 0, buffer.length, dataOffset + start);
   return buffer;
 }
 
@@ -112,14 +112,18 @@ function buildClusters(items, threshold = 0.64, maxSpeakers = 6) {
 export async function correctMeetingSpeakers({ meetingId, dataRoot, storage, speakerEngine, onProgress = () => {} }) {
   const segments = storage.listSegments(meetingId).flatMap(splitLongSegment);
   if (!segments.length) return [];
-  const pcmPath = path.join(dataRoot, "meetings", meetingId, "audio.pcm.tmp");
-  const fileSize = statSync(pcmPath).size;
-  const fd = openSync(pcmPath, "r");
+  const directory = path.join(dataRoot, "meetings", meetingId);
+  const wavPath = path.join(directory, "audio.wav");
+  const pcmPath = path.join(directory, "audio.pcm.tmp");
+  const audioPath = existsSync(wavPath) ? wavPath : pcmPath;
+  const dataOffset = audioPath === wavPath ? 44 : 0;
+  const fileSize = Math.max(0, statSync(audioPath).size - dataOffset);
+  const fd = openSync(audioPath, "r");
   const items = [];
   try {
     for (let index = 0; index < segments.length; index += 1) {
       const segment = segments[index];
-      const pcm = readPcmRange(fd, fileSize, segment.startMs, segment.endMs ?? segment.startMs + 1000);
+      const pcm = readPcmRange(fd, fileSize, dataOffset, segment.startMs, segment.endMs ?? segment.startMs + 1000);
       const embedding = pcm.length >= 16000 * 2 * 1.2 ? speakerEngine.extractEmbedding(pcm) : null;
       items.push({ ...segment, embedding, originalSpeakerId: segment.speakerId, clusterIndex: null });
       onProgress(Math.round(((index + 1) / segments.length) * 65));

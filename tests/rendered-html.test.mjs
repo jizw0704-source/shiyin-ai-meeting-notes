@@ -25,6 +25,7 @@ test("server-renders the meeting transcription product", async () => {
   assert.match(html, /录音来源/);
   assert.match(html, /电脑声音 \+ 麦克风/);
   assert.match(html, /MiniMax 设置/);
+  assert.match(html, /管理录音与空间/);
   assert.match(html, /完整记录/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/);
 });
@@ -80,7 +81,11 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(page, /过滤“嗯、啊、呃”/);
   assert.match(page, /原始记录/);
   assert.match(page, /撤销上次替换/);
+  assert.match(page, /清理临时文件/);
+  assert.match(page, /异常恢复已开启/);
   assert.match(proxy, /transcriptActionMatch/);
+  assert.match(proxy, /\/api\/storage\/cleanup/);
+  assert.match(proxy, /recoverInterruptedMeetings/);
   assert.match(page, /summary\.preview/);
   assert.match(page, /\/api\/meetings\/\$\{encodeURIComponent\(meeting\.id\)\}\/audio/);
   assert.doesNotMatch(page, /window\.prompt/);
@@ -104,6 +109,7 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(desktopMain, /path\.join\(runtimeRoot, "settings\.json"\)/);
   assert.match(preload, /getAudioCaptureCapabilities/);
   assert.match(preload, /openAudioPrivacySettings/);
+  assert.match(preload, /data-folder:open/);
   assert.match(preload, /application:relaunch/);
   assert.match(preload, /platform-\$\{process\.platform\}/);
   assert.match(preload, /saveMiniMaxSettings/);

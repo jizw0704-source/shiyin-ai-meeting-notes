@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { parseByteRange } from "../server/audio-stream.mjs";
 import { AudioSession } from "../server/audio-session.mjs";
-import { splitLongSegment } from "../server/correction.mjs";
+import { correctMeetingSpeakers, splitLongSegment } from "../server/correction.mjs";
 import { MeetingStorage } from "../server/storage.mjs";
+import {
+  cleanupTemporaryAudio,
+  getStorageStats,
+  recoverInterruptedMeetings,
+} from "../server/storage-maintenance.mjs";
 import { cleanTranscriptText, replaceTranscriptText } from "../server/transcript-cleaning.mjs";
 import {
   normalizeMeetingSummary,
@@ -152,7 +157,105 @@ test("writes recoverable PCM and a valid mono 16 kHz WAV", async () => {
     assert.equal(wav.readUInt16LE(34), 16);
     assert.equal(wav.readUInt32LE(40), pcm.length);
     assert.equal(statSync(wavPath).size, pcm.length + 44);
+    assert.equal(existsSync(path.join(root, "meetings", "meeting-a", "audio.pcm.tmp")), false);
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("recovers an interrupted recording and safely cleans legacy duplicate audio", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-recovery-"));
+  const storage = new MeetingStorage(root);
+  try {
+    const meeting = storage.createMeeting("异常恢复测试");
+    const directory = path.join(root, "meetings", meeting.id);
+    const pcmPath = path.join(directory, "audio.pcm.tmp");
+    const wavPath = path.join(directory, "audio.wav");
+    writeFileSync(pcmPath, Buffer.alloc(64000, 1));
+
+    const recovery = await recoverInterruptedMeetings({ storage, dataRoot: root });
+    const recovered = storage.getMeeting(meeting.id);
+    assert.equal(recovery.recoveredRecordings, 1);
+    assert.equal(recovered.status, "completed");
+    assert.equal(recovered.durationMs, 2000);
+    assert.match(recovered.error, /录音已自动找回/);
+    assert.equal(existsSync(wavPath), true);
+    assert.equal(existsSync(pcmPath), false);
+
+    writeFileSync(pcmPath, Buffer.alloc(32000, 2));
+    const before = getStorageStats({ storage, dataRoot: root });
+    assert.equal(before.temporaryBytes, 32000);
+    const cleanup = cleanupTemporaryAudio({ storage, dataRoot: root });
+    assert.equal(cleanup.filesRemoved, 1);
+    assert.equal(cleanup.bytesFreed, 32000);
+    assert.equal(cleanup.storage.temporaryBytes, 0);
+    assert.equal(existsSync(pcmPath), false);
+    assert.equal(existsSync(wavPath), true);
+  } finally {
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("marks interrupted post-processing as retryable without losing meeting content", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-task-recovery-"));
+  const storage = new MeetingStorage(root);
+  try {
+    const meeting = storage.createMeeting("中断任务测试");
+    storage.addSegment(meeting.id, {
+      seq: 0,
+      startMs: 0,
+      endMs: 1600,
+      text: "已保存的会议内容",
+      source: "local-realtime",
+    });
+    const job = storage.createJob(meeting.id, "summary");
+    storage.updateJob(job.id, { status: "running", progress: 35 });
+    storage.updateMeeting(meeting.id, { status: "summarizing" });
+
+    const recovery = await recoverInterruptedMeetings({ storage, dataRoot: root });
+    const recovered = storage.getMeeting(meeting.id);
+    assert.equal(recovery.interruptedTasks, 1);
+    assert.equal(recovered.status, "completed");
+    assert.match(recovered.error, /可重新执行/);
+    assert.equal(recovered.segments[0].text, "已保存的会议内容");
+    assert.equal(recovered.jobs[0].status, "failed");
+  } finally {
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("corrects speakers from the finalized WAV after temporary PCM is removed", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-wav-correction-"));
+  const storage = new MeetingStorage(root);
+  try {
+    const meeting = storage.createMeeting("WAV 校正测试");
+    const audio = new AudioSession(root, meeting.id);
+    audio.append(Buffer.alloc(64000, 3));
+    const wavPath = await audio.finalize();
+    storage.updateMeeting(meeting.id, { audioPath: wavPath, durationMs: 2000, status: "correcting" });
+    storage.addSegment(meeting.id, {
+      seq: 0,
+      startMs: 0,
+      endMs: 2000,
+      text: "这是一段用于发言人校正的语音。",
+      source: "local-realtime",
+    });
+
+    const corrected = await correctMeetingSpeakers({
+      meetingId: meeting.id,
+      dataRoot: root,
+      storage,
+      speakerEngine: {
+        extractEmbedding() { return new Float32Array([1, 0, 0]); },
+      },
+    });
+    assert.equal(existsSync(path.join(root, "meetings", meeting.id, "audio.pcm.tmp")), false);
+    assert.equal(corrected.length, 1);
+    assert.ok(corrected[0].speakerId);
+  } finally {
+    storage.close();
     rmSync(root, { recursive: true, force: true });
   }
 });

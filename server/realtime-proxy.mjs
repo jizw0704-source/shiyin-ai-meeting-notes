@@ -12,6 +12,11 @@ import { correctMeetingSpeakers } from "./correction.mjs";
 import { LocalAsrEngine } from "./local-asr-engine.mjs";
 import { SpeakerEngine } from "./speaker-engine.mjs";
 import { MeetingStorage } from "./storage.mjs";
+import {
+  cleanupTemporaryAudio,
+  getStorageStats,
+  recoverInterruptedMeetings,
+} from "./storage-maintenance.mjs";
 import { summarizeMeeting, summarizeMeetingPreview } from "./summarizer.mjs";
 import {
   SUMMARY_TEMPLATE_VERSION,
@@ -85,6 +90,7 @@ function resolveAsrMode() {
 }
 
 const asrMode = resolveAsrMode();
+const startupRecovery = await recoverInterruptedMeetings({ storage, dataRoot });
 
 function sendJson(socket, value) {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(value));
@@ -223,6 +229,16 @@ const httpServer = createServer(async (request, response) => {
     }
     if (request.method === "GET" && url.pathname === "/api/meetings") {
       return jsonResponse(response, 200, { meetings: storage.listMeetings() });
+    }
+    if (request.method === "GET" && url.pathname === "/api/storage") {
+      return jsonResponse(response, 200, getStorageStats({ storage, dataRoot }));
+    }
+    if (request.method === "POST" && url.pathname === "/api/storage/cleanup") {
+      return jsonResponse(response, 200, cleanupTemporaryAudio({
+        storage,
+        dataRoot,
+        activeMeetingIds: new Set(activeSessions.keys()),
+      }));
     }
     const audioMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/audio$/);
     if ((request.method === "GET" || request.method === "HEAD") && audioMatch) {
@@ -655,6 +671,9 @@ httpServer.listen(port, bindHost, () => {
   console.log(`拾音后台已启动：http://127.0.0.1:${port}`);
   console.log(`实时转写：${asrMode === "local" ? "本地 Sherpa-ONNX" : asrMode === "dashscope" ? "百炼" : "不可用"}`);
   console.log(`本地声纹模型：${speakerEngine.available ? "可用" : "不可用"}`);
+  if (startupRecovery.recoveredRecordings || startupRecovery.interruptedTasks || startupRecovery.failedRecordings) {
+    console.log(`异常恢复：找回 ${startupRecovery.recoveredRecordings} 段录音，中断 ${startupRecovery.interruptedTasks} 个任务`);
+  }
   if (proxyUrl) console.log("百炼连接将使用系统网络代理");
 });
 
