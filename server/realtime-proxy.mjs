@@ -9,6 +9,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { streamMeetingAudio } from "./audio-stream.mjs";
 import { AudioSession } from "./audio-session.mjs";
 import { correctMeetingSpeakers } from "./correction.mjs";
+import { transcribeHistoricalWav } from "./historical-transcription.mjs";
 import { LocalAsrEngine } from "./local-asr-engine.mjs";
 import { SpeakerEngine } from "./speaker-engine.mjs";
 import { MeetingStorage } from "./storage.mjs";
@@ -18,6 +19,7 @@ import {
   recoverInterruptedMeetings,
 } from "./storage-maintenance.mjs";
 import { summarizeMeeting, summarizeMeetingPreview } from "./summarizer.mjs";
+import { createWorkspaceBackup, restoreWorkspaceBackup } from "./workspace-backup.mjs";
 import {
   SUMMARY_TEMPLATE_VERSION,
   normalizeReportStyle,
@@ -49,6 +51,8 @@ const localAsrEngine = new LocalAsrEngine({
   numThreads: process.env.SHIYIN_LOCAL_ASR_THREADS,
 });
 const activeSessions = new Map();
+const activeRetranscriptions = new Set();
+const appVersion = process.env.SHIYIN_APP_VERSION || "0.3.0";
 const upstreamUrl = process.env.DASHSCOPE_WEBSOCKET_URL || (
   workspaceId
     ? `wss://${workspaceId}.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference`
@@ -205,6 +209,93 @@ async function runCorrectionAndSummary(meetingId, client = null) {
   return meeting;
 }
 
+function meetingIsBusy(meeting) {
+  return ["recording", "correcting", "summarizing", "retranscribing"].includes(meeting?.status);
+}
+
+function workspaceIsBusy() {
+  return activeSessions.size > 0
+    || activeRetranscriptions.size > 0
+    || storage.listMeetings().some(meetingIsBusy);
+}
+
+async function runHistoricalRetranscription(meetingId) {
+  const job = storage.createJob(meetingId, "retranscription");
+  const audioPath = path.join(dataRoot, "meetings", meetingId, "audio.wav");
+  let fallbackVersion = null;
+  let transcriptReplaced = false;
+  activeRetranscriptions.add(meetingId);
+  storage.updateMeeting(meetingId, { status: "retranscribing", error: null });
+  storage.updateJob(job.id, { status: "running", progress: 2 });
+  try {
+    if (!localAsrEngine.available) throw new Error("本地转写模型不可用");
+    if (!existsSync(audioPath)) throw new Error("没有找到这场会议的原始录音");
+    const result = await transcribeHistoricalWav({
+      filePath: audioPath,
+      asrEngine: localAsrEngine,
+      onProgress(progress) {
+        storage.updateJob(job.id, {
+          status: "running",
+          progress: Math.min(70, 5 + Math.round(progress * 0.65)),
+        });
+      },
+    });
+    if (!result.segments.length) throw new Error("没有识别到有效语音，已保留原转写");
+
+    fallbackVersion = storage.createTranscriptVersion(meetingId, {
+      label: "重新转写前自动保存",
+      engine: "existing-transcript",
+    });
+    storage.replaceRetranscribedSegments(meetingId, result.segments);
+    transcriptReplaced = true;
+    storage.updateMeeting(meetingId, { durationMs: result.durationMs });
+    storage.updateJob(job.id, { status: "running", progress: 72 });
+
+    let correctionWarning = null;
+    try {
+      if (!speakerEngine.available) throw new Error("本地声纹模型不可用");
+      const previousNames = fallbackVersion.snapshot?.speakers
+        ?.filter((speaker) => speaker.manuallyNamed)
+        .map((speaker) => speaker.displayName) || [];
+      await correctMeetingSpeakers({
+        meetingId,
+        dataRoot,
+        storage,
+        speakerEngine,
+        onProgress(progress) {
+          storage.updateJob(job.id, {
+            status: "running",
+            progress: 72 + Math.round(progress * 0.23),
+          });
+        },
+      });
+      const correctedSpeakers = storage.listSpeakers(meetingId);
+      previousNames.forEach((name, index) => {
+        if (correctedSpeakers[index]) storage.renameSpeaker(correctedSpeakers[index].id, name);
+      });
+    } catch (error) {
+      correctionWarning = `重新转写已完成，但发言人校正未完成：${error.message}`;
+    }
+
+    storage.createTranscriptVersion(meetingId, {
+      label: "本地重新转写",
+      engine: "Sherpa-ONNX Paraformer",
+      active: true,
+    });
+    storage.updateJob(job.id, { status: "completed", progress: 100 });
+    storage.updateMeeting(meetingId, { status: "completed", error: correctionWarning });
+  } catch (error) {
+    if (transcriptReplaced && fallbackVersion) {
+      try { storage.restoreTranscriptVersion(meetingId, fallbackVersion.id); } catch { /* keep best available data */ }
+    }
+    storage.updateJob(job.id, { status: "failed", error: error.message });
+    storage.updateMeeting(meetingId, { status: "completed", error: `重新转写失败：${error.message}` });
+  } finally {
+    activeRetranscriptions.delete(meetingId);
+  }
+  return storage.getMeeting(meetingId);
+}
+
 const httpServer = createServer(async (request, response) => {
   const requestOrigin = request.headers.origin;
   if (requestOrigin && requestOrigin !== appOrigin) {
@@ -240,6 +331,25 @@ const httpServer = createServer(async (request, response) => {
         activeMeetingIds: new Set(activeSessions.keys()),
       }));
     }
+    if (request.method === "POST" && url.pathname === "/api/backups/create") {
+      if (workspaceIsBusy()) return jsonResponse(response, 409, { error: "有会议正在录音或处理，请完成后再备份" });
+      const body = await readJson(request);
+      return jsonResponse(response, 200, await createWorkspaceBackup({
+        storage,
+        dataRoot,
+        destinationRoot: body.destinationRoot,
+        appVersion,
+      }));
+    }
+    if (request.method === "POST" && url.pathname === "/api/backups/restore") {
+      if (workspaceIsBusy()) return jsonResponse(response, 409, { error: "有会议正在录音或处理，请完成后再恢复" });
+      const body = await readJson(request);
+      return jsonResponse(response, 200, await restoreWorkspaceBackup({
+        storage,
+        dataRoot,
+        backupPath: body.backupPath,
+      }));
+    }
     const audioMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/audio$/);
     if ((request.method === "GET" || request.method === "HEAD") && audioMatch) {
       const meeting = storage.getMeeting(audioMatch[1]);
@@ -262,7 +372,7 @@ const httpServer = createServer(async (request, response) => {
       if (Object.hasOwn(body, "reportStyle")) patch.reportStyle = normalizeReportStyle(body.reportStyle);
       let meeting = storage.updateMeeting(meetingMatch[1], patch);
       if (meeting && Object.hasOwn(body, "fillerFilterEnabled")) {
-        if (["recording", "correcting", "summarizing"].includes(meeting.status)) {
+        if (meetingIsBusy(meeting)) {
           return jsonResponse(response, 409, { error: "会议仍在处理中，请稍后再整理逐字稿" });
         }
         meeting = storage.setFillerFilterEnabled(meeting.id, Boolean(body.fillerFilterEnabled));
@@ -271,7 +381,10 @@ const httpServer = createServer(async (request, response) => {
     }
     if (request.method === "DELETE" && meetingMatch) {
       const meetingId = meetingMatch[1];
-      if (activeSessions.has(meetingId)) return jsonResponse(response, 409, { error: "正在录音的会议不能删除" });
+      const currentMeeting = storage.getMeeting(meetingId);
+      if (activeSessions.has(meetingId) || meetingIsBusy(currentMeeting)) {
+        return jsonResponse(response, 409, { error: "正在录音或处理的会议不能删除" });
+      }
       const directory = path.resolve(dataRoot, "meetings", meetingId);
       if (!directory.startsWith(path.resolve(dataRoot, "meetings") + path.sep)) {
         return jsonResponse(response, 400, { error: "无效会议目录" });
@@ -285,7 +398,7 @@ const httpServer = createServer(async (request, response) => {
       const meetingId = transcriptActionMatch[1];
       const currentMeeting = storage.getMeeting(meetingId);
       if (!currentMeeting) return jsonResponse(response, 404, { error: "会议不存在" });
-      if (["recording", "correcting", "summarizing"].includes(currentMeeting.status)) {
+      if (meetingIsBusy(currentMeeting)) {
         return jsonResponse(response, 409, { error: "会议仍在处理中，请稍后再整理逐字稿" });
       }
       if (transcriptActionMatch[2] === "undo") {
@@ -314,18 +427,30 @@ const httpServer = createServer(async (request, response) => {
       const speaker = storage.renameSpeaker(speakerMatch[1], body.displayName);
       return jsonResponse(response, 200, speaker);
     }
-    const actionMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/(correct|summarize)$/);
+    const versionRestoreMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/transcript-versions\/([^/]+)\/restore$/);
+    if (request.method === "POST" && versionRestoreMatch) {
+      const currentMeeting = storage.getMeeting(versionRestoreMatch[1]);
+      if (!currentMeeting) return jsonResponse(response, 404, { error: "会议不存在" });
+      if (meetingIsBusy(currentMeeting)) return jsonResponse(response, 409, { error: "会议仍在处理中，请稍后再切换版本" });
+      return jsonResponse(response, 200, storage.restoreTranscriptVersion(versionRestoreMatch[1], versionRestoreMatch[2]));
+    }
+    const actionMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/(correct|summarize|retranscribe)$/);
     if (request.method === "POST" && actionMatch) {
       const meetingId = actionMatch[1];
       const currentMeeting = storage.getMeeting(meetingId);
       if (!currentMeeting) return jsonResponse(response, 404, { error: "会议不存在" });
-      if (["recording", "correcting", "summarizing"].includes(currentMeeting.status)) {
+      if (meetingIsBusy(currentMeeting)) {
         return jsonResponse(response, 409, { error: "会议仍在处理中，请稍后再试" });
       }
       if (actionMatch[2] === "summarize" && !miniMaxApiKey) {
         return jsonResponse(response, 400, { error: "请先在本机配置 MINIMAX_API_KEY" });
       }
-      if (actionMatch[2] === "correct") {
+      if (actionMatch[2] === "retranscribe" && workspaceIsBusy()) {
+        return jsonResponse(response, 409, { error: "有会议正在录音或处理，请完成后再重新转写" });
+      }
+      if (actionMatch[2] === "retranscribe") {
+        runHistoricalRetranscription(meetingId).catch(() => undefined);
+      } else if (actionMatch[2] === "correct") {
         runCorrectionAndSummary(meetingId).catch(() => undefined);
       } else {
         runSummary(meetingId).catch((error) => {

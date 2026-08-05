@@ -15,6 +15,12 @@ contextBridge.exposeInMainWorld("shiyinDesktop", {
   openDataFolder() {
     return ipcRenderer.invoke("data-folder:open");
   },
+  createWorkspaceBackup() {
+    return ipcRenderer.invoke("workspace-backup:create");
+  },
+  restoreWorkspaceBackup() {
+    return ipcRenderer.invoke("workspace-backup:restore");
+  },
   relaunch() {
     ipcRenderer.send("application:relaunch");
   },

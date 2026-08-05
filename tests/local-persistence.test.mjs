@@ -6,12 +6,14 @@ import test from "node:test";
 import { parseByteRange } from "../server/audio-stream.mjs";
 import { AudioSession } from "../server/audio-session.mjs";
 import { correctMeetingSpeakers, splitLongSegment } from "../server/correction.mjs";
+import { inspectPcmWav, transcribeHistoricalWav } from "../server/historical-transcription.mjs";
 import { MeetingStorage } from "../server/storage.mjs";
 import {
   cleanupTemporaryAudio,
   getStorageStats,
   recoverInterruptedMeetings,
 } from "../server/storage-maintenance.mjs";
+import { createWorkspaceBackup, restoreWorkspaceBackup } from "../server/workspace-backup.mjs";
 import { cleanTranscriptText, replaceTranscriptText } from "../server/transcript-cleaning.mjs";
 import {
   normalizeMeetingSummary,
@@ -256,6 +258,190 @@ test("corrects speakers from the finalized WAV after temporary PCM is removed", 
     assert.ok(corrected[0].speakerId);
   } finally {
     storage.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("keeps transcript versions and restores an older version without losing history", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-transcript-version-"));
+  const storage = new MeetingStorage(root);
+  try {
+    const meeting = storage.createMeeting("版本测试");
+    const speaker = storage.ensureSpeaker(meeting.id, "发言人1");
+    storage.renameSpeaker(speaker.id, "王工");
+    storage.addSegment(meeting.id, {
+      seq: 0,
+      startMs: 0,
+      endMs: 1500,
+      text: "这是最初的转写。",
+      speakerId: speaker.id,
+      source: "local-realtime",
+    });
+    storage.saveSummary(meeting.id, { overview: "最初总结", decisions: [], topics: [], risks: [], actionItems: [] });
+    storage.updateMeeting(meeting.id, { status: "completed" });
+    const original = storage.createTranscriptVersion(meeting.id, {
+      label: "初始转写",
+      engine: "test-engine",
+      active: true,
+    });
+
+    storage.replaceRetranscribedSegments(meeting.id, [{
+      seq: 0,
+      startMs: 0,
+      endMs: 1600,
+      text: "这是新的转写。",
+    }]);
+    const latest = storage.createTranscriptVersion(meeting.id, {
+      label: "重新转写",
+      engine: "new-engine",
+      active: true,
+    });
+    assert.equal(storage.getMeeting(meeting.id).segments[0].text, "这是新的转写。");
+    assert.equal(storage.getMeeting(meeting.id).activeTranscriptVersionId, latest.id);
+
+    const restored = storage.restoreTranscriptVersion(meeting.id, original.id);
+    assert.equal(restored.segments[0].text, "这是最初的转写。");
+    assert.equal(restored.speakers[0].displayName, "王工");
+    assert.equal(restored.summary.overview, "最初总结");
+    assert.equal(restored.activeTranscriptVersionId, original.id);
+    assert.equal(restored.transcriptVersions.length, 3);
+  } finally {
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("creates a verified workspace backup and safely merges it into another workspace", async () => {
+  const sourceRoot = mkdtempSync(path.join(os.tmpdir(), "shiyin-backup-source-"));
+  const targetRoot = mkdtempSync(path.join(os.tmpdir(), "shiyin-backup-target-"));
+  const destinationRoot = mkdtempSync(path.join(os.tmpdir(), "shiyin-backup-output-"));
+  const sourceStorage = new MeetingStorage(sourceRoot);
+  const targetStorage = new MeetingStorage(targetRoot);
+  try {
+    const meeting = sourceStorage.createMeeting("需要备份的会议");
+    sourceStorage.addSegment(meeting.id, {
+      seq: 0,
+      startMs: 0,
+      endMs: 1000,
+      text: "备份需要保留这段文字。",
+      source: "local-realtime",
+    });
+    sourceStorage.saveSummary(meeting.id, {
+      overview: "备份总结",
+      decisions: [],
+      topics: [],
+      risks: [],
+      actionItems: [],
+    });
+    const audio = new AudioSession(sourceRoot, meeting.id);
+    audio.append(Buffer.alloc(32000, 4));
+    const audioPath = await audio.finalize();
+    sourceStorage.updateMeeting(meeting.id, {
+      status: "completed",
+      durationMs: 1000,
+      audioPath,
+    });
+    sourceStorage.createTranscriptVersion(meeting.id, { label: "备份版本", active: true });
+
+    const backup = await createWorkspaceBackup({
+      storage: sourceStorage,
+      dataRoot: sourceRoot,
+      destinationRoot,
+      appVersion: "test",
+    });
+    assert.equal(backup.meetingCount, 1);
+    assert.equal(existsSync(path.join(backup.path, "manifest.json")), true);
+
+    const restored = await restoreWorkspaceBackup({
+      storage: targetStorage,
+      dataRoot: targetRoot,
+      backupPath: backup.path,
+    });
+    assert.equal(restored.importedMeetings, 1);
+    assert.equal(restored.skippedMeetings, 0);
+    const restoredMeeting = targetStorage.getMeeting(meeting.id);
+    assert.equal(restoredMeeting.title, "需要备份的会议");
+    assert.equal(restoredMeeting.segments[0].text, "备份需要保留这段文字。");
+    assert.equal(restoredMeeting.summary.overview, "备份总结");
+    assert.equal(restoredMeeting.transcriptVersions.length, 1);
+    assert.equal(existsSync(path.join(targetRoot, "meetings", meeting.id, "audio.wav")), true);
+
+    const duplicate = await restoreWorkspaceBackup({
+      storage: targetStorage,
+      dataRoot: targetRoot,
+      backupPath: backup.path,
+    });
+    assert.equal(duplicate.importedMeetings, 0);
+    assert.equal(duplicate.skippedMeetings, 1);
+  } finally {
+    sourceStorage.close();
+    targetStorage.close();
+    rmSync(sourceRoot, { recursive: true, force: true });
+    rmSync(targetRoot, { recursive: true, force: true });
+    rmSync(destinationRoot, { recursive: true, force: true });
+  }
+});
+
+test("rejects a workspace backup when a protected meeting file is modified", async () => {
+  const sourceRoot = mkdtempSync(path.join(os.tmpdir(), "shiyin-backup-tamper-source-"));
+  const targetRoot = mkdtempSync(path.join(os.tmpdir(), "shiyin-backup-tamper-target-"));
+  const destinationRoot = mkdtempSync(path.join(os.tmpdir(), "shiyin-backup-tamper-output-"));
+  const sourceStorage = new MeetingStorage(sourceRoot);
+  const targetStorage = new MeetingStorage(targetRoot);
+  try {
+    const meeting = sourceStorage.createMeeting("校验测试");
+    sourceStorage.updateMeeting(meeting.id, { status: "completed" });
+    const backup = await createWorkspaceBackup({
+      storage: sourceStorage,
+      dataRoot: sourceRoot,
+      destinationRoot,
+    });
+    writeFileSync(path.join(backup.path, "meetings", meeting.id, "meeting.json"), "{}\n");
+    await assert.rejects(
+      restoreWorkspaceBackup({ storage: targetStorage, dataRoot: targetRoot, backupPath: backup.path }),
+      /校验失败/,
+    );
+  } finally {
+    sourceStorage.close();
+    targetStorage.close();
+    rmSync(sourceRoot, { recursive: true, force: true });
+    rmSync(targetRoot, { recursive: true, force: true });
+    rmSync(destinationRoot, { recursive: true, force: true });
+  }
+});
+
+test("streams a saved WAV through the local recognizer for historical retranscription", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-historical-asr-"));
+  try {
+    const audio = new AudioSession(root, "historical-meeting");
+    audio.append(Buffer.alloc(64000, 5));
+    const wavPath = await audio.finalize();
+    const info = inspectPcmWav(wavPath);
+    assert.equal(info.durationMs, 2000);
+
+    let acceptedBytes = 0;
+    const progress = [];
+    const engine = {
+      available: true,
+      createSession(callbacks) {
+        return {
+          acceptPcm(chunk) { acceptedBytes += chunk.length; },
+          finish() {
+            callbacks.onFinal({ text: "历史录音重新转写成功。", startMs: 0, endMs: 2000, words: [] });
+          },
+        };
+      },
+    };
+    const result = await transcribeHistoricalWav({
+      filePath: wavPath,
+      asrEngine: engine,
+      onProgress(value) { progress.push(value); },
+    });
+    assert.equal(acceptedBytes, 64000);
+    assert.equal(result.segments[0].text, "历史录音重新转写成功。");
+    assert.equal(result.durationMs, 2000);
+    assert.equal(progress.at(-1), 100);
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });

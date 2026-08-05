@@ -2,7 +2,7 @@ import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { AudioSession } from "./audio-session.mjs";
 
-const INTERRUPTED_STATUSES = new Set(["recording", "correcting", "summarizing"]);
+const INTERRUPTED_STATUSES = new Set(["recording", "correcting", "summarizing", "retranscribing"]);
 
 function validWav(filePath) {
   if (!existsSync(filePath)) return false;

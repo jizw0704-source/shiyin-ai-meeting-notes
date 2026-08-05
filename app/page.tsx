@@ -26,7 +26,7 @@ import {
 } from "@phosphor-icons/react";
 
 type View = "transcript" | "summary" | "actions";
-type MeetingStatus = "recording" | "correcting" | "summarizing" | "completed" | "failed";
+type MeetingStatus = "recording" | "correcting" | "summarizing" | "retranscribing" | "completed" | "failed";
 type SummaryTemplateId = "meeting-minutes" | "daily-log" | "project-sync" | "brainstorm";
 type ReportStyle = "detailed" | "visual";
 type AudioSourceMode = "microphone" | "system" | "mixed";
@@ -55,6 +55,23 @@ type StorageInfo = {
   interruptedCount: number;
   dataRoot: string;
 };
+type BackupOperationResult = {
+  canceled: boolean;
+  path?: string;
+  meetingCount?: number;
+  totalBytes?: number;
+  importedMeetings?: number;
+  skippedMeetings?: number;
+};
+type TranscriptVersion = {
+  id: string;
+  meetingId: string;
+  versionNo: number;
+  label: string;
+  engine: string;
+  segmentCount: number;
+  createdAt: string;
+};
 type Speaker = {
   id: string;
   meetingId: string;
@@ -75,7 +92,7 @@ type Segment = {
   editedText: string | null;
   cleanedText: string;
   speakerId: string | null;
-  source: "realtime" | "local-realtime" | "corrected";
+  source: "realtime" | "local-realtime" | "local-retranscribed" | "corrected" | "restored";
   confidence: number | null;
 };
 type Summary = {
@@ -146,7 +163,7 @@ type Summary = {
 };
 type Job = {
   id: string;
-  kind: "speaker-correction" | "summary";
+  kind: "speaker-correction" | "summary" | "retranscription";
   status: "pending" | "running" | "completed" | "failed";
   progress: number;
   error: string | null;
@@ -174,6 +191,8 @@ type Meeting = MeetingBrief & {
   segments: Segment[];
   jobs: Job[];
   canUndoTranscriptEdit: boolean;
+  activeTranscriptVersionId: string | null;
+  transcriptVersions: TranscriptVersion[];
 };
 
 declare global {
@@ -182,6 +201,8 @@ declare global {
       getAudioCaptureCapabilities: () => Promise<AudioCaptureCapabilities>;
       openAudioPrivacySettings: (kind: "microphone" | "screen") => Promise<boolean>;
       openDataFolder: () => Promise<boolean>;
+      createWorkspaceBackup: () => Promise<BackupOperationResult>;
+      restoreWorkspaceBackup: () => Promise<BackupOperationResult>;
       relaunch: () => void;
       getMiniMaxSettings: () => Promise<MiniMaxSettings>;
       saveMiniMaxSettings: (settings: { apiKey: string; model: string }) => Promise<MiniMaxSettings>;
@@ -253,9 +274,17 @@ function statusLabel(status: MeetingStatus) {
     recording: "正在听记",
     correcting: "正在校正发言人",
     summarizing: "正在生成总结",
+    retranscribing: "正在重新转写录音",
     completed: "已完成",
     failed: "处理失败",
   }[status];
+}
+
+function meetingIsBusy(status: MeetingStatus | undefined) {
+  return status === "recording"
+    || status === "correcting"
+    || status === "summarizing"
+    || status === "retranscribing";
 }
 
 function summaryLooksInvalid(summary: Summary | null | undefined) {
@@ -410,7 +439,11 @@ export default function Home() {
   const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null);
   const [storageLoading, setStorageLoading] = useState(false);
   const [storageCleaning, setStorageCleaning] = useState(false);
+  const [backupBusy, setBackupBusy] = useState<"create" | "restore" | null>(null);
   const [storageError, setStorageError] = useState("");
+  const [transcriptionDialogOpen, setTranscriptionDialogOpen] = useState(false);
+  const [retranscriptionStarting, setRetranscriptionStarting] = useState(false);
+  const [versionRestoringId, setVersionRestoringId] = useState<string | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const playbackRef = useRef<HTMLAudioElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -577,6 +610,49 @@ export default function Home() {
       setStorageError(error instanceof Error ? error.message : "无法打开数据文件夹");
     }
   }, [storageInfo?.dataRoot]);
+
+  async function createBackup() {
+    if (!window.shiyinDesktop) {
+      setStorageError("完整备份需要在拾音 AI 桌面版中使用");
+      return;
+    }
+    setBackupBusy("create");
+    setStorageError("");
+    try {
+      const result = await window.shiyinDesktop.createWorkspaceBackup();
+      if (!result.canceled) {
+        setNotice(`已备份 ${result.meetingCount || 0} 场会议，共 ${formatBytes(result.totalBytes)}`);
+      }
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : "创建备份失败");
+    } finally {
+      setBackupBusy(null);
+    }
+  }
+
+  async function restoreBackup() {
+    if (!window.shiyinDesktop) {
+      setStorageError("恢复备份需要在拾音 AI 桌面版中使用");
+      return;
+    }
+    setBackupBusy("restore");
+    setStorageError("");
+    try {
+      const result = await window.shiyinDesktop.restoreWorkspaceBackup();
+      if (!result.canceled) {
+        const restored = result.importedMeetings || 0;
+        const skipped = result.skippedMeetings || 0;
+        const items = await refreshMeetings();
+        if (selectedId && items.some((item) => item.id === selectedId)) await loadMeeting(selectedId);
+        setStorageInfo(await api<StorageInfo>("/api/storage"));
+        setNotice(`已恢复 ${restored} 场会议${skipped ? `，跳过 ${skipped} 场已有会议` : ""}`);
+      }
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : "恢复备份失败");
+    } finally {
+      setBackupBusy(null);
+    }
+  }
 
   const refreshAudioInputs = useCallback(async () => {
     const devices = (await navigator.mediaDevices.enumerateDevices())
@@ -1134,8 +1210,62 @@ export default function Home() {
     }
   }
 
+  async function startHistoricalRetranscription() {
+    if (!meeting || meetingIsBusy(meeting.status) || !meeting.audioPath) return;
+    const meetingId = meeting.id;
+    setRetranscriptionStarting(true);
+    try {
+      await api(`/api/meetings/${meetingId}/retranscribe`, { method: "POST" });
+      setTranscriptionDialogOpen(false);
+      setProcessing(true);
+      setConnectionStatus("正在读取历史录音并重新转写…");
+      setMeeting((current) => current?.id === meetingId ? { ...current, status: "retranscribing", error: null } : current);
+      setNotice("历史录音已进入本地重新转写；原逐字稿会自动保留为版本");
+      window.shiyinDesktop?.setRecording(true);
+      const poll = window.setInterval(async () => {
+        const value = await loadMeeting(meetingId).catch(() => null);
+        if (!value) return;
+        const job = [...value.jobs].reverse().find((item) => item.kind === "retranscription");
+        if (value.status === "retranscribing") {
+          setConnectionStatus(`正在重新转写历史录音 ${job?.progress || 0}%`);
+          return;
+        }
+        window.clearInterval(poll);
+        setProcessing(false);
+        setRetranscriptionStarting(false);
+        window.shiyinDesktop?.setRecording(false);
+        mergeMeetingList(value);
+        setConnectionStatus(job?.status === "completed" ? "历史录音重新转写完成" : "重新转写未完成");
+        setNotice(value.error || "重新转写已完成；旧逐字稿可在转写版本中恢复");
+      }, 1500);
+    } catch (error) {
+      setRetranscriptionStarting(false);
+      setProcessing(false);
+      window.shiyinDesktop?.setRecording(false);
+      setNotice(error instanceof Error ? error.message : "无法启动历史录音重新转写");
+    }
+  }
+
+  async function restoreTranscriptVersion(version: TranscriptVersion) {
+    if (!meeting || meetingIsBusy(meeting.status)) return;
+    setVersionRestoringId(version.id);
+    try {
+      const restored = await api<Meeting>(
+        `/api/meetings/${meeting.id}/transcript-versions/${version.id}/restore`,
+        { method: "POST" },
+      );
+      setMeeting(restored);
+      mergeMeetingList(restored);
+      setNotice(`已切换到“${version.label}”；切换前内容也已自动保存`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法恢复转写版本");
+    } finally {
+      setVersionRestoringId(null);
+    }
+  }
+
   async function rerunSummary() {
-    if (!meeting || ["recording", "correcting", "summarizing"].includes(meeting.status)) return;
+    if (!meeting || meetingIsBusy(meeting.status)) return;
     await regenerateSummary(meeting.id);
   }
 
@@ -1725,12 +1855,13 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
           </div>
           <div className="top-actions">
             <button disabled={recording || processing} onClick={openTemplateDialog}><Compass size={15} /> 模板</button>
-            <button disabled={!meeting || processing || ["recording", "correcting", "summarizing"].includes(meeting.status)} onClick={rerunCorrection}>↻ 重新校正</button>
-            <button disabled={!meeting || processing || ["recording", "correcting", "summarizing"].includes(meeting.status)} onClick={rerunSummary}>✦ 重新总结</button>
+            <button disabled={!meeting || processing || meetingIsBusy(meeting.status)} onClick={rerunCorrection}>↻ 重新校正</button>
+            <button disabled={!meeting || processing || meetingIsBusy(meeting.status)} onClick={rerunSummary}>✦ 重新总结</button>
+            <button disabled={!meeting || processing || meetingIsBusy(meeting?.status)} onClick={() => setTranscriptionDialogOpen(true)}><Waveform size={15} /> 转写版本</button>
             <div className="export-control">
               <button
                 className="primary"
-                disabled={!meeting || summaryFailed || processing || meeting.status === "summarizing"}
+                disabled={!meeting || summaryFailed || processing || meetingIsBusy(meeting.status)}
                 onClick={() => setExportMenuOpen((open) => !open)}
                 aria-expanded={exportMenuOpen}
               >⇩ 导出报告</button>
@@ -1742,7 +1873,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                 </div>
               )}
             </div>
-            <button className="more danger" disabled={!meeting || processing || ["recording", "correcting", "summarizing"].includes(meeting.status)} onClick={deleteMeeting}>删除</button>
+            <button className="more danger" disabled={!meeting || processing || meetingIsBusy(meeting.status)} onClick={deleteMeeting}>删除</button>
           </div>
         </header>
 
@@ -2336,7 +2467,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
           </article>
 
           <aside className="insight-card">
-            <div className="insight-title"><span>✦</span><div><h2>会议速览</h2><p>{usingLiveSummary ? "本地转写 · MiniMax 实时草稿" : "本地转写 · MiniMax 总结"}</p></div><button disabled={!meeting || processing || ["recording", "correcting", "summarizing"].includes(meeting.status)} onClick={rerunSummary} aria-label="重新生成总结">↻</button></div>
+            <div className="insight-title"><span>✦</span><div><h2>会议速览</h2><p>{usingLiveSummary ? "本地转写 · MiniMax 实时草稿" : "本地转写 · MiniMax 总结"}</p></div><button disabled={!meeting || processing || meetingIsBusy(meeting.status)} onClick={rerunSummary} aria-label="重新生成总结">↻</button></div>
             <div className="metric-row">
               <div><strong>{Math.ceil((meeting?.durationMs || 0) / 60000)}<small>分钟</small></strong><span>会议时长</span></div>
               <div><strong>{meeting?.speakers.length || 0}<small>位</small></strong><span>识别发言人</span></div>
@@ -2370,7 +2501,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
           className="dialog-backdrop"
           role="presentation"
           onMouseDown={(event) => {
-            if (event.currentTarget === event.target && !storageCleaning) setStorageDialogOpen(false);
+            if (event.currentTarget === event.target && !storageCleaning && !backupBusy) setStorageDialogOpen(false);
           }}
         >
           <section
@@ -2379,7 +2510,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             aria-modal="true"
             aria-labelledby="storage-dialog-title"
             onKeyDown={(event) => {
-              if (event.key === "Escape" && !storageCleaning) setStorageDialogOpen(false);
+              if (event.key === "Escape" && !storageCleaning && !backupBusy) setStorageDialogOpen(false);
             }}
           >
             <div className="settings-dialog-heading">
@@ -2388,7 +2519,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                 <h2 id="storage-dialog-title">本机存储</h2>
                 <p>录音、逐字稿和声纹数据只保存在这台电脑。</p>
               </div>
-              <button type="button" onClick={() => setStorageDialogOpen(false)} disabled={storageCleaning} aria-label="关闭本机存储">
+              <button type="button" onClick={() => setStorageDialogOpen(false)} disabled={storageCleaning || Boolean(backupBusy)} aria-label="关闭本机存储">
                 <X size={17} />
               </button>
             </div>
@@ -2412,6 +2543,20 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                     <span>应用意外退出时，会在下次启动后尽量找回未完成的录音。</span>
                   </p>
                 </div>
+                <div className="storage-backup-card">
+                  <div>
+                    <b>完整数据备份</b>
+                    <span>保存录音、逐字稿、总结、发言人与转写版本；不包含 MiniMax 密钥。</span>
+                  </div>
+                  <div>
+                    <button type="button" onClick={() => void createBackup()} disabled={Boolean(backupBusy) || recording || processing}>
+                      {backupBusy === "create" ? "正在备份…" : "创建备份"}
+                    </button>
+                    <button type="button" onClick={() => void restoreBackup()} disabled={Boolean(backupBusy) || recording || processing}>
+                      {backupBusy === "restore" ? "正在校验…" : "从备份恢复"}
+                    </button>
+                  </div>
+                </div>
                 <div className="storage-path">
                   <span>数据位置</span>
                   <code>{storageInfo.dataRoot}</code>
@@ -2421,17 +2566,93 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             ) : null}
             {storageError && <p className="settings-error"><WarningCircle size={14} />{storageError}</p>}
             <div className="settings-dialog-actions storage-actions">
-              <button type="button" onClick={() => void openDataFolder()} disabled={storageLoading || storageCleaning}>
+              <button type="button" onClick={() => void openDataFolder()} disabled={storageLoading || storageCleaning || Boolean(backupBusy)}>
                 <FolderOpen size={15} /> 打开数据文件夹
               </button>
               <button
                 type="button"
                 className="primary"
                 onClick={() => void cleanupStorage()}
-                disabled={storageLoading || storageCleaning || !storageInfo?.temporaryBytes || recording}
+                disabled={storageLoading || storageCleaning || Boolean(backupBusy) || !storageInfo?.temporaryBytes || recording}
               >
                 <Trash size={15} /> {storageCleaning ? "正在清理…" : "清理临时文件"}
               </button>
+            </div>
+          </section>
+        </div>
+      )}
+      {transcriptionDialogOpen && meeting && (
+        <div
+          className="dialog-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.currentTarget === event.target && !retranscriptionStarting && !versionRestoringId) {
+              setTranscriptionDialogOpen(false);
+            }
+          }}
+        >
+          <section
+            className="settings-dialog transcript-version-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="transcript-version-title"
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && !retranscriptionStarting && !versionRestoringId) {
+                setTranscriptionDialogOpen(false);
+              }
+            }}
+          >
+            <div className="settings-dialog-heading">
+              <span><Waveform size={21} weight="duotone" /></span>
+              <div>
+                <h2 id="transcript-version-title">转写版本</h2>
+                <p>用原始录音重新测试本地模型，旧逐字稿始终保留。</p>
+              </div>
+              <button type="button" onClick={() => setTranscriptionDialogOpen(false)} disabled={retranscriptionStarting || Boolean(versionRestoringId)} aria-label="关闭转写版本">
+                <X size={17} />
+              </button>
+            </div>
+            <div className="retranscription-card">
+              <div>
+                <b>重新转写这场会议</b>
+                <span>全程在本机运行，不使用云端额度。长会议可能需要等待几分钟。</span>
+              </div>
+              <button
+                type="button"
+                className="primary"
+                onClick={() => void startHistoricalRetranscription()}
+                disabled={!meeting.audioPath || retranscriptionStarting || Boolean(versionRestoringId)}
+              >
+                {retranscriptionStarting ? "正在启动…" : "开始重新转写"}
+              </button>
+            </div>
+            <div className="transcript-version-heading">
+              <b>历史版本</b>
+              <span>{meeting.transcriptVersions.length} 个安全快照</span>
+            </div>
+            <div className="transcript-version-list">
+              {meeting.transcriptVersions.map((version) => {
+                const active = meeting.activeTranscriptVersionId === version.id;
+                return (
+                  <article className={active ? "active" : ""} key={version.id}>
+                    <span><Clock size={16} weight="duotone" /></span>
+                    <div>
+                      <b>{version.label}{active ? " · 当前" : ""}</b>
+                      <small>{formatMeetingDate(version.createdAt)} · {version.segmentCount} 段 · {version.engine}</small>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={active || Boolean(versionRestoringId) || retranscriptionStarting}
+                      onClick={() => void restoreTranscriptVersion(version)}
+                    >
+                      {versionRestoringId === version.id ? "正在切换…" : active ? "当前版本" : "切换到此版本"}
+                    </button>
+                  </article>
+                );
+              })}
+              {!meeting.transcriptVersions.length && (
+                <p>还没有历史版本。首次重新转写时，会先自动保存当前逐字稿。</p>
+              )}
             </div>
           </section>
         </div>

@@ -35,7 +35,8 @@ export class MeetingStorage {
         template_version INTEGER NOT NULL DEFAULT 1,
         report_style TEXT NOT NULL DEFAULT 'detailed',
         filler_filter_enabled INTEGER NOT NULL DEFAULT 0,
-        summary_stale INTEGER NOT NULL DEFAULT 0
+        summary_stale INTEGER NOT NULL DEFAULT 0,
+        active_transcript_version_id TEXT
       );
       CREATE TABLE IF NOT EXISTS speakers (
         id TEXT PRIMARY KEY,
@@ -83,10 +84,22 @@ export class MeetingStorage {
         created_at TEXT NOT NULL,
         undone_at TEXT
       );
+      CREATE TABLE IF NOT EXISTS transcript_versions (
+        id TEXT PRIMARY KEY,
+        meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+        version_no INTEGER NOT NULL,
+        label TEXT NOT NULL,
+        engine TEXT NOT NULL,
+        snapshot_json TEXT NOT NULL,
+        segment_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        UNIQUE(meeting_id, version_no)
+      );
       CREATE INDEX IF NOT EXISTS idx_segments_meeting_seq ON segments(meeting_id, seq);
       CREATE INDEX IF NOT EXISTS idx_speakers_meeting ON speakers(meeting_id);
       CREATE INDEX IF NOT EXISTS idx_jobs_meeting ON jobs(meeting_id);
       CREATE INDEX IF NOT EXISTS idx_transcript_edits_meeting ON transcript_edits(meeting_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_transcript_versions_meeting ON transcript_versions(meeting_id, version_no);
     `);
     const meetingColumns = new Set(
       this.db.prepare("PRAGMA table_info(meetings)").all().map((column) => column.name),
@@ -108,6 +121,9 @@ export class MeetingStorage {
     }
     if (!meetingColumns.has("summary_stale")) {
       this.db.exec("ALTER TABLE meetings ADD COLUMN summary_stale INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!meetingColumns.has("active_transcript_version_id")) {
+      this.db.exec("ALTER TABLE meetings ADD COLUMN active_transcript_version_id TEXT");
     }
     const segmentColumns = new Set(
       this.db.prepare("PRAGMA table_info(segments)").all().map((column) => column.name),
@@ -164,6 +180,7 @@ export class MeetingStorage {
       reportStyle: normalizeReportStyle(meeting.report_style || DEFAULT_REPORT_STYLE),
       fillerFilterEnabled: Boolean(meeting.filler_filter_enabled),
       summaryStale: Boolean(meeting.summary_stale),
+      activeTranscriptVersionId: meeting.active_transcript_version_id || null,
     };
     if (!includeDetails) return value;
     value.speakers = this.listSpeakers(meeting.id);
@@ -172,6 +189,7 @@ export class MeetingStorage {
       cleanedText: value.fillerFilterEnabled ? cleanTranscriptText(segment.text) : segment.text,
     }));
     value.jobs = this.listJobs(meeting.id);
+    value.transcriptVersions = this.listTranscriptVersions(meeting.id);
     value.canUndoTranscriptEdit = Boolean(this.latestTranscriptEdit(meeting.id));
     return value;
   }
@@ -187,6 +205,7 @@ export class MeetingStorage {
       summaryTemplate: "summary_template",
       templateVersion: "template_version",
       reportStyle: "report_style",
+      activeTranscriptVersionId: "active_transcript_version_id",
     };
     const entries = Object.entries(patch).filter(([key]) => map[key]);
     if (entries.length) {
@@ -275,6 +294,164 @@ export class MeetingStorage {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  transcriptSnapshot(meetingId) {
+    const meeting = this.getMeeting(meetingId);
+    if (!meeting) throw new Error("会议不存在");
+    return {
+      speakers: meeting.speakers,
+      segments: meeting.segments,
+      summary: meeting.summary,
+      liveSummary: meeting.liveSummary,
+      fillerFilterEnabled: meeting.fillerFilterEnabled,
+      summaryStale: meeting.summaryStale,
+    };
+  }
+
+  createTranscriptVersion(meetingId, options = {}) {
+    const snapshot = options.snapshot || this.transcriptSnapshot(meetingId);
+    const versionNo = Number(this.db.prepare(`
+      SELECT COALESCE(MAX(version_no), 0) + 1 AS value
+      FROM transcript_versions WHERE meeting_id = ?
+    `).get(meetingId)?.value || 1);
+    const id = randomUUID();
+    const createdAt = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO transcript_versions
+      (id, meeting_id, version_no, label, engine, snapshot_json, segment_count, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      meetingId,
+      versionNo,
+      String(options.label || `转写版本 ${versionNo}`).slice(0, 80),
+      String(options.engine || "local").slice(0, 80),
+      JSON.stringify(snapshot),
+      snapshot.segments?.length || 0,
+      createdAt,
+    );
+    if (options.active) {
+      this.db.prepare("UPDATE meetings SET active_transcript_version_id = ? WHERE id = ?").run(id, meetingId);
+    }
+    return this.getTranscriptVersion(id, true);
+  }
+
+  getTranscriptVersion(id, includeSnapshot = false) {
+    const row = this.db.prepare("SELECT * FROM transcript_versions WHERE id = ?").get(id);
+    if (!row) return null;
+    return this.hydrateTranscriptVersion(row, includeSnapshot);
+  }
+
+  listTranscriptVersions(meetingId, includeSnapshot = false) {
+    return this.db.prepare(`
+      SELECT * FROM transcript_versions WHERE meeting_id = ? ORDER BY version_no DESC
+    `).all(meetingId).map((row) => this.hydrateTranscriptVersion(row, includeSnapshot));
+  }
+
+  hydrateTranscriptVersion(row, includeSnapshot = false) {
+    const value = {
+      id: row.id,
+      meetingId: row.meeting_id,
+      versionNo: row.version_no,
+      label: row.label,
+      engine: row.engine,
+      segmentCount: row.segment_count,
+      createdAt: row.created_at,
+    };
+    if (includeSnapshot) value.snapshot = JSON.parse(row.snapshot_json);
+    return value;
+  }
+
+  replaceRetranscribedSegments(meetingId, segments) {
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare("DELETE FROM segments WHERE meeting_id = ?").run(meetingId);
+      this.db.prepare("DELETE FROM transcript_edits WHERE meeting_id = ?").run(meetingId);
+      this.db.prepare("DELETE FROM speakers WHERE meeting_id = ?").run(meetingId);
+      for (const segment of segments) this.addSegment(meetingId, { ...segment, source: "local-retranscribed" });
+      this.db.prepare(`
+        UPDATE meetings
+        SET live_summary_json = NULL, summary_stale = 1, active_transcript_version_id = NULL
+        WHERE id = ?
+      `).run(meetingId);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return this.getMeeting(meetingId);
+  }
+
+  restoreTranscriptVersion(meetingId, versionId) {
+    const version = this.getTranscriptVersion(versionId, true);
+    if (!version || version.meetingId !== meetingId) throw new Error("转写版本不存在");
+    const meeting = this.getMeeting(meetingId);
+    if (!meeting) throw new Error("会议不存在");
+    if (meeting.activeTranscriptVersionId === versionId) return meeting;
+    this.createTranscriptVersion(meetingId, { label: "切换前自动保存", engine: "local-snapshot" });
+    const snapshot = version.snapshot;
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare("DELETE FROM segments WHERE meeting_id = ?").run(meetingId);
+      this.db.prepare("DELETE FROM transcript_edits WHERE meeting_id = ?").run(meetingId);
+      this.db.prepare("DELETE FROM speakers WHERE meeting_id = ?").run(meetingId);
+      for (const speaker of snapshot.speakers || []) {
+        this.db.prepare(`
+          INSERT INTO speakers
+          (id, meeting_id, label, display_name, color, centroid_json, sample_count, manually_named)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          speaker.id,
+          meetingId,
+          speaker.label,
+          speaker.displayName,
+          speaker.color,
+          speaker.centroid ? JSON.stringify(speaker.centroid) : null,
+          speaker.sampleCount || 0,
+          speaker.manuallyNamed ? 1 : 0,
+        );
+      }
+      for (const segment of snapshot.segments || []) {
+        this.db.prepare(`
+          INSERT INTO segments
+          (id, meeting_id, seq, start_ms, end_ms, pause_after_ms, text, speaker_id, source, confidence, words_json, edited_text, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          segment.id || randomUUID(),
+          meetingId,
+          segment.seq,
+          segment.startMs,
+          segment.endMs ?? null,
+          segment.pauseAfterMs ?? null,
+          segment.originalText ?? segment.text,
+          segment.speakerId ?? null,
+          segment.source || "local-retranscribed",
+          segment.confidence ?? null,
+          JSON.stringify(segment.words || []),
+          segment.editedText ?? null,
+          segment.createdAt || new Date().toISOString(),
+        );
+      }
+      this.db.prepare(`
+        UPDATE meetings
+        SET summary_json = ?, live_summary_json = ?, filler_filter_enabled = ?, summary_stale = ?,
+            active_transcript_version_id = ?, status = 'completed', error = NULL
+        WHERE id = ?
+      `).run(
+        snapshot.summary ? JSON.stringify(snapshot.summary) : null,
+        snapshot.liveSummary ? JSON.stringify(snapshot.liveSummary) : null,
+        snapshot.fillerFilterEnabled ? 1 : 0,
+        snapshot.summaryStale ? 1 : 0,
+        versionId,
+        meetingId,
+      );
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return this.getMeeting(meetingId);
   }
 
   setFillerFilterEnabled(meetingId, enabled) {
@@ -482,6 +659,135 @@ export class MeetingStorage {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
+  }
+
+  exportMeetingSnapshot(meetingId) {
+    const meeting = this.getMeeting(meetingId);
+    if (!meeting) throw new Error("会议不存在");
+    const transcriptEdits = this.db.prepare(`
+      SELECT * FROM transcript_edits WHERE meeting_id = ? ORDER BY created_at
+    `).all(meetingId).map((row) => ({
+      id: row.id,
+      findText: row.find_text,
+      replacementText: row.replacement_text,
+      changes: JSON.parse(row.changes_json),
+      createdAt: row.created_at,
+      undoneAt: row.undone_at,
+    }));
+    return {
+      ...meeting,
+      jobs: [],
+      transcriptEdits,
+      transcriptVersions: this.listTranscriptVersions(meetingId, true),
+    };
+  }
+
+  importMeetingSnapshot(snapshot, options = {}) {
+    const meetingId = String(snapshot?.id || "");
+    if (!/^[A-Za-z0-9-]{1,80}$/.test(meetingId)) throw new Error("备份中的会议编号无效");
+    if (this.getMeeting(meetingId)) return { imported: false, meeting: this.getMeeting(meetingId) };
+    const now = new Date().toISOString();
+    const audioPath = options.audioPath || null;
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare(`
+        INSERT INTO meetings
+        (id, title, status, created_at, started_at, ended_at, duration_ms, audio_path,
+         summary_json, live_summary_json, error, summary_template, template_version,
+         report_style, filler_filter_enabled, summary_stale, active_transcript_version_id)
+        VALUES (?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
+      `).run(
+        meetingId,
+        String(snapshot.title || "已恢复会议").slice(0, 80),
+        snapshot.createdAt || snapshot.startedAt || now,
+        snapshot.startedAt || now,
+        snapshot.endedAt || now,
+        Math.max(0, Number(snapshot.durationMs) || 0),
+        audioPath,
+        snapshot.summary ? JSON.stringify(snapshot.summary) : null,
+        snapshot.liveSummary ? JSON.stringify(snapshot.liveSummary) : null,
+        normalizeSummaryTemplateId(snapshot.summaryTemplate),
+        Number(snapshot.templateVersion || SUMMARY_TEMPLATE_VERSION),
+        normalizeReportStyle(snapshot.reportStyle),
+        snapshot.fillerFilterEnabled ? 1 : 0,
+        snapshot.summaryStale ? 1 : 0,
+        snapshot.activeTranscriptVersionId || null,
+      );
+      for (const speaker of snapshot.speakers || []) {
+        this.db.prepare(`
+          INSERT INTO speakers
+          (id, meeting_id, label, display_name, color, centroid_json, sample_count, manually_named)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          speaker.id || randomUUID(),
+          meetingId,
+          speaker.label,
+          speaker.displayName,
+          speaker.color || "blue",
+          speaker.centroid ? JSON.stringify(speaker.centroid) : null,
+          speaker.sampleCount || 0,
+          speaker.manuallyNamed ? 1 : 0,
+        );
+      }
+      for (const segment of snapshot.segments || []) {
+        this.db.prepare(`
+          INSERT INTO segments
+          (id, meeting_id, seq, start_ms, end_ms, pause_after_ms, text, speaker_id, source, confidence, words_json, edited_text, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          segment.id || randomUUID(),
+          meetingId,
+          segment.seq,
+          segment.startMs,
+          segment.endMs ?? null,
+          segment.pauseAfterMs ?? null,
+          segment.originalText ?? segment.text,
+          segment.speakerId ?? null,
+          segment.source || "restored",
+          segment.confidence ?? null,
+          JSON.stringify(segment.words || []),
+          segment.editedText ?? null,
+          segment.createdAt || now,
+        );
+      }
+      for (const edit of snapshot.transcriptEdits || []) {
+        this.db.prepare(`
+          INSERT INTO transcript_edits
+          (id, meeting_id, find_text, replacement_text, changes_json, created_at, undone_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          edit.id || randomUUID(),
+          meetingId,
+          edit.findText,
+          edit.replacementText,
+          JSON.stringify(edit.changes || []),
+          edit.createdAt || now,
+          edit.undoneAt || null,
+        );
+      }
+      for (const version of snapshot.transcriptVersions || []) {
+        if (!version.snapshot) continue;
+        this.db.prepare(`
+          INSERT INTO transcript_versions
+          (id, meeting_id, version_no, label, engine, snapshot_json, segment_count, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          version.id || randomUUID(),
+          meetingId,
+          version.versionNo,
+          version.label,
+          version.engine,
+          JSON.stringify(version.snapshot),
+          version.segmentCount || version.snapshot.segments?.length || 0,
+          version.createdAt || now,
+        );
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return { imported: true, meeting: this.getMeeting(meetingId) };
   }
 
   deleteMeeting(id) {

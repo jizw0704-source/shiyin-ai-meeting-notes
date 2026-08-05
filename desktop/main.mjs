@@ -47,6 +47,7 @@ const applicationIconPath = path.join(
 const nodeEnvironment = () => ({
   ...process.env,
   ELECTRON_RUN_AS_NODE: "1",
+  SHIYIN_APP_VERSION: app.getVersion(),
   SHIYIN_DATA_ROOT: app.isPackaged ? path.join(runtimeRoot, "data") : path.join(sourceRoot, "data"),
   SHIYIN_MODEL_PATH: app.isPackaged
     ? path.join(process.resourcesPath, "models", "speaker", "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx")
@@ -58,6 +59,7 @@ const nodeEnvironment = () => ({
 const webHost = process.env.SHIYIN_WEB_HOST || "127.0.0.1";
 const webPort = Number(process.env.SHIYIN_WEB_PORT || 3000);
 const webUrl = `http://${webHost}:${webPort}`;
+const backendUrl = "http://127.0.0.1:8788";
 
 let mainWindow = null;
 let tray = null;
@@ -95,6 +97,17 @@ async function waitUntilReady(url, timeoutMs = 60000) {
     await new Promise((resolve) => setTimeout(resolve, 300));
   }
   return false;
+}
+
+async function postBackend(pathname, body) {
+  const response = await fetch(`${backendUrl}${pathname}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || "本地后台操作失败");
+  return result;
 }
 
 function spawnNode(script, args = [], extraEnvironment = {}, workingDirectory = runtimeRoot) {
@@ -487,6 +500,32 @@ ipcMain.handle("data-folder:open", async () => {
   const error = await shell.openPath(dataFolderPath);
   if (error) throw new Error(error);
   return true;
+});
+ipcMain.handle("workspace-backup:create", async () => {
+  const selection = await dialog.showOpenDialog(mainWindow, {
+    title: "选择备份保存位置",
+    defaultPath: app.getPath("documents"),
+    buttonLabel: "保存到这里",
+    properties: ["openDirectory", "createDirectory"],
+  });
+  if (selection.canceled || !selection.filePaths[0]) return { canceled: true };
+  return {
+    canceled: false,
+    ...await postBackend("/api/backups/create", { destinationRoot: selection.filePaths[0] }),
+  };
+});
+ipcMain.handle("workspace-backup:restore", async () => {
+  const selection = await dialog.showOpenDialog(mainWindow, {
+    title: "选择拾音 AI 备份文件夹",
+    defaultPath: app.getPath("documents"),
+    buttonLabel: "恢复此备份",
+    properties: ["openDirectory"],
+  });
+  if (selection.canceled || !selection.filePaths[0]) return { canceled: true };
+  return {
+    canceled: false,
+    ...await postBackend("/api/backups/restore", { backupPath: selection.filePaths[0] }),
+  };
 });
 ipcMain.handle("audio-privacy-settings:open", async (_event, kind) => {
   if (process.platform !== "darwin") return false;
