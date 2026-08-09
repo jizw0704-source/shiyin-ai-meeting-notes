@@ -27,6 +27,9 @@ test("server-renders the meeting transcription product", async () => {
   assert.match(html, /MiniMax 设置/);
   assert.match(html, /管理录音与空间/);
   assert.match(html, /转写版本/);
+  assert.match(html, /预计参会人数/);
+  assert.match(html, /12 人/);
+  assert.match(html, /20 人/);
   assert.match(html, /完整记录/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/);
 });
@@ -87,10 +90,13 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(page, /完整数据备份/);
   assert.match(page, /开始重新转写/);
   assert.match(page, /旧逐字稿始终保留/);
+  assert.match(page, /searchParams\.set\("maxSpeakers"/);
+  assert.match(page, /shiyin\.maxSpeakers/);
   assert.match(proxy, /transcriptActionMatch/);
   assert.match(proxy, /\/api\/storage\/cleanup/);
   assert.match(proxy, /recoverInterruptedMeetings/);
   assert.match(proxy, /runHistoricalRetranscription/);
+  assert.match(proxy, /maxSpeakers: meeting\.maxSpeakers/);
   assert.match(proxy, /\/api\/backups\/create/);
   assert.match(page, /summary\.preview/);
   assert.match(page, /\/api\/meetings\/\$\{encodeURIComponent\(meeting\.id\)\}\/audio/);

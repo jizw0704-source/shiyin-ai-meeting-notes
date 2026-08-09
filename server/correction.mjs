@@ -1,5 +1,6 @@
 import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import path from "node:path";
+import { normalizeMaxSpeakers } from "./speaker-settings.mjs";
 
 function normalize(vector) {
   let sum = 0;
@@ -109,7 +110,7 @@ function buildClusters(items, threshold = 0.64, maxSpeakers = 6) {
   return clusters;
 }
 
-export async function correctMeetingSpeakers({ meetingId, dataRoot, storage, speakerEngine, onProgress = () => {} }) {
+export async function correctMeetingSpeakers({ meetingId, dataRoot, storage, speakerEngine, maxSpeakers = 6, onProgress = () => {} }) {
   const segments = storage.listSegments(meetingId).flatMap(splitLongSegment);
   if (!segments.length) return [];
   const directory = path.join(dataRoot, "meetings", meetingId);
@@ -133,7 +134,7 @@ export async function correctMeetingSpeakers({ meetingId, dataRoot, storage, spe
     closeSync(fd);
   }
 
-  const clusters = buildClusters(items);
+  const clusters = buildClusters(items, 0.64, normalizeMaxSpeakers(maxSpeakers));
   const usedSpeakerIds = new Set();
   const clusterSpeaker = new Map();
   for (const cluster of clusters) {

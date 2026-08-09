@@ -184,6 +184,7 @@ async function runCorrectionAndSummary(meetingId, client = null) {
       dataRoot,
       storage,
       speakerEngine,
+      maxSpeakers: storage.getMeeting(meetingId)?.maxSpeakers,
       onProgress(progress) {
         storage.updateJob(correctionJob.id, { status: "running", progress });
         sendJson(client, { type: "job.progress", meetingId, job: storage.getJob(correctionJob.id) });
@@ -262,6 +263,7 @@ async function runHistoricalRetranscription(meetingId) {
         dataRoot,
         storage,
         speakerEngine,
+        maxSpeakers: storage.getMeeting(meetingId)?.maxSpeakers,
         onProgress(progress) {
           storage.updateJob(job.id, {
             status: "running",
@@ -488,6 +490,7 @@ websocketServer.on("connection", (client, request) => {
   const meeting = storage.createMeeting(requestUrl.searchParams.get("title") || meetingTitle(), {
     summaryTemplate: requestUrl.searchParams.get("template"),
     reportStyle: requestUrl.searchParams.get("reportStyle"),
+    maxSpeakers: requestUrl.searchParams.get("maxSpeakers"),
   });
   const meetingId = meeting.id;
   const audio = new AudioSession(dataRoot, meetingId);
@@ -538,7 +541,9 @@ websocketServer.on("connection", (client, request) => {
     const startMs = Math.max(0, Number(result.startMs) || 0);
     const endMs = Math.max(startMs, Number(result.endMs) || audio.durationMs);
     const pcm = audio.readRange(startMs, endMs);
-    const assignment = speakerEngine.classifySegment(meetingId, pcm, storage);
+    const assignment = speakerEngine.classifySegment(meetingId, pcm, storage, {
+      maxSpeakers: meeting.maxSpeakers,
+    });
     const speakerId = assignment?.speaker?.id || lastSpeakerId;
     if (speakerId) lastSpeakerId = speakerId;
     if (previousSegment && previousSegment.endMs !== null) {

@@ -10,6 +10,12 @@ import {
   normalizeSummaryTemplateId,
 } from "./summary-templates.mjs";
 import { cleanTranscriptText, replaceTranscriptText } from "./transcript-cleaning.mjs";
+import { normalizeMaxSpeakers } from "./speaker-settings.mjs";
+
+const speakerPalette = [
+  "green", "violet", "amber", "blue", "rose", "teal", "orange", "indigo", "cyan", "lime",
+  "pink", "brown", "red", "purple", "aqua", "gold", "navy", "olive", "coral", "slate",
+];
 
 export class MeetingStorage {
   constructor(dataRoot = path.resolve("data")) {
@@ -36,7 +42,8 @@ export class MeetingStorage {
         report_style TEXT NOT NULL DEFAULT 'detailed',
         filler_filter_enabled INTEGER NOT NULL DEFAULT 0,
         summary_stale INTEGER NOT NULL DEFAULT 0,
-        active_transcript_version_id TEXT
+        active_transcript_version_id TEXT,
+        max_speakers INTEGER NOT NULL DEFAULT 6
       );
       CREATE TABLE IF NOT EXISTS speakers (
         id TEXT PRIMARY KEY,
@@ -125,6 +132,9 @@ export class MeetingStorage {
     if (!meetingColumns.has("active_transcript_version_id")) {
       this.db.exec("ALTER TABLE meetings ADD COLUMN active_transcript_version_id TEXT");
     }
+    if (!meetingColumns.has("max_speakers")) {
+      this.db.exec("ALTER TABLE meetings ADD COLUMN max_speakers INTEGER NOT NULL DEFAULT 6");
+    }
     const segmentColumns = new Set(
       this.db.prepare("PRAGMA table_info(segments)").all().map((column) => column.name),
     );
@@ -138,6 +148,7 @@ export class MeetingStorage {
     const now = new Date().toISOString();
     const summaryTemplate = normalizeSummaryTemplateId(options.summaryTemplate);
     const reportStyle = normalizeReportStyle(options.reportStyle);
+    const maxSpeakers = normalizeMaxSpeakers(options.maxSpeakers);
     const templateVersion = Number.isInteger(options.templateVersion)
       ? options.templateVersion
       : SUMMARY_TEMPLATE_VERSION;
@@ -145,9 +156,9 @@ export class MeetingStorage {
     mkdirSync(directory, { recursive: true });
     this.db.prepare(`
       INSERT INTO meetings
-      (id, title, status, created_at, started_at, summary_template, template_version, report_style)
-      VALUES (?, ?, 'recording', ?, ?, ?, ?, ?)
-    `).run(id, title, now, now, summaryTemplate, templateVersion, reportStyle);
+      (id, title, status, created_at, started_at, summary_template, template_version, report_style, max_speakers)
+      VALUES (?, ?, 'recording', ?, ?, ?, ?, ?, ?)
+    `).run(id, title, now, now, summaryTemplate, templateVersion, reportStyle, maxSpeakers);
     return this.getMeeting(id);
   }
 
@@ -181,6 +192,7 @@ export class MeetingStorage {
       fillerFilterEnabled: Boolean(meeting.filler_filter_enabled),
       summaryStale: Boolean(meeting.summary_stale),
       activeTranscriptVersionId: meeting.active_transcript_version_id || null,
+      maxSpeakers: normalizeMaxSpeakers(meeting.max_speakers),
     };
     if (!includeDetails) return value;
     value.speakers = this.listSpeakers(meeting.id);
@@ -206,8 +218,13 @@ export class MeetingStorage {
       templateVersion: "template_version",
       reportStyle: "report_style",
       activeTranscriptVersionId: "active_transcript_version_id",
+      maxSpeakers: "max_speakers",
     };
-    const entries = Object.entries(patch).filter(([key]) => map[key]);
+    const normalizedPatch = {
+      ...patch,
+      ...(Object.hasOwn(patch, "maxSpeakers") ? { maxSpeakers: normalizeMaxSpeakers(patch.maxSpeakers) } : {}),
+    };
+    const entries = Object.entries(normalizedPatch).filter(([key]) => map[key]);
     if (entries.length) {
       const sql = `UPDATE meetings SET ${entries.map(([key]) => `${map[key]} = ?`).join(", ")} WHERE id = ?`;
       this.db.prepare(sql).run(...entries.map(([, value]) => value), id);
@@ -526,20 +543,18 @@ export class MeetingStorage {
   ensureSpeaker(meetingId, label, centroid = null) {
     const existing = this.db.prepare("SELECT * FROM speakers WHERE meeting_id = ? AND label = ?").get(meetingId, label);
     if (existing) return this.hydrateSpeaker(existing);
-    const palette = ["green", "violet", "amber", "blue", "rose", "teal"];
     const number = Number(label.match(/\d+/)?.[0] || 1);
     const id = randomUUID();
     this.db.prepare(`
       INSERT INTO speakers (id, meeting_id, label, display_name, color, centroid_json, sample_count)
       VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(id, meetingId, label, label, palette[(number - 1) % palette.length], centroid ? JSON.stringify(Array.from(centroid)) : null, centroid ? 1 : 0);
+    `).run(id, meetingId, label, label, speakerPalette[(number - 1) % speakerPalette.length], centroid ? JSON.stringify(Array.from(centroid)) : null, centroid ? 1 : 0);
     return this.getSpeaker(id);
   }
 
   createCandidateSpeaker(meetingId, centroid = null) {
     const id = randomUUID();
     const count = this.listSpeakers(meetingId).length;
-    const palette = ["green", "violet", "amber", "blue", "rose", "teal"];
     this.db.prepare(`
       INSERT INTO speakers (id, meeting_id, label, display_name, color, centroid_json, sample_count)
       VALUES (?, ?, ?, '待编号发言人', ?, ?, ?)
@@ -547,7 +562,7 @@ export class MeetingStorage {
       id,
       meetingId,
       `__candidate__${id}`,
-      palette[count % palette.length],
+      speakerPalette[count % speakerPalette.length],
       centroid ? JSON.stringify(Array.from(centroid)) : null,
       centroid ? 1 : 0,
     );
@@ -556,7 +571,6 @@ export class MeetingStorage {
 
   reconcileSpeakers(meetingId, orderedSpeakerIds) {
     const activeIds = [...new Set(orderedSpeakerIds.filter(Boolean))];
-    const palette = ["green", "violet", "amber", "blue", "rose", "teal"];
     this.db.exec("BEGIN");
     try {
       const existing = this.db.prepare("SELECT id FROM speakers WHERE meeting_id = ?").all(meetingId);
@@ -574,7 +588,7 @@ export class MeetingStorage {
               display_name = CASE WHEN manually_named = 0 THEN ? ELSE display_name END,
               color = ?
           WHERE id = ?
-        `).run(label, label, palette[index % palette.length], speakerId);
+        `).run(label, label, speakerPalette[index % speakerPalette.length], speakerId);
       });
       this.db.exec("COMMIT");
     } catch (error) {
@@ -694,8 +708,8 @@ export class MeetingStorage {
         INSERT INTO meetings
         (id, title, status, created_at, started_at, ended_at, duration_ms, audio_path,
          summary_json, live_summary_json, error, summary_template, template_version,
-         report_style, filler_filter_enabled, summary_stale, active_transcript_version_id)
-        VALUES (?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
+         report_style, filler_filter_enabled, summary_stale, active_transcript_version_id, max_speakers)
+        VALUES (?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         meetingId,
         String(snapshot.title || "已恢复会议").slice(0, 80),
@@ -712,6 +726,7 @@ export class MeetingStorage {
         snapshot.fillerFilterEnabled ? 1 : 0,
         snapshot.summaryStale ? 1 : 0,
         snapshot.activeTranscriptVersionId || null,
+        normalizeMaxSpeakers(snapshot.maxSpeakers),
       );
       for (const speaker of snapshot.speakers || []) {
         this.db.prepare(`

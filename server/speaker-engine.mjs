@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { normalizeMaxSpeakers } from "./speaker-settings.mjs";
 
 const require = createRequire(import.meta.url);
 
@@ -64,7 +65,7 @@ export class SpeakerEngine {
     })));
   }
 
-  assign(meetingId, embedding, storage) {
+  assign(meetingId, embedding, storage, options = {}) {
     if (!embedding) return null;
     if (!this.clusters.has(meetingId)) this.seedMeeting(meetingId, storage.listSpeakers(meetingId));
     const clusters = this.clusters.get(meetingId);
@@ -73,7 +74,8 @@ export class SpeakerEngine {
       const score = cosine(embedding, cluster.centroid);
       if (!best || score > best.score) best = { cluster, score };
     }
-    if ((!best || best.score < this.threshold) && clusters.length < this.maxSpeakers) {
+    const maxSpeakers = normalizeMaxSpeakers(options.maxSpeakers ?? this.maxSpeakers);
+    if ((!best || best.score < this.threshold) && clusters.length < maxSpeakers) {
       const label = `发言人${clusters.length + 1}`;
       const speaker = storage.ensureSpeaker(meetingId, label, embedding);
       const cluster = { speakerId: speaker.id, label, centroid: embedding, sampleCount: 1 };
@@ -92,10 +94,10 @@ export class SpeakerEngine {
     return { speaker: storage.getSpeaker(cluster.speakerId), score: best.score, created: false };
   }
 
-  classifySegment(meetingId, pcmBuffer, storage) {
+  classifySegment(meetingId, pcmBuffer, storage, options = {}) {
     const durationMs = pcmBuffer.length / 32;
     if (durationMs < this.minDurationMs) return null;
-    return this.assign(meetingId, this.extractEmbedding(pcmBuffer), storage);
+    return this.assign(meetingId, this.extractEmbedding(pcmBuffer), storage, options);
   }
 
   resetMeeting(meetingId) {

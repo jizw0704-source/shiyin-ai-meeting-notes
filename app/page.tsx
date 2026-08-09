@@ -30,6 +30,7 @@ type MeetingStatus = "recording" | "correcting" | "summarizing" | "retranscribin
 type SummaryTemplateId = "meeting-minutes" | "daily-log" | "project-sync" | "brainstorm";
 type ReportStyle = "detailed" | "visual";
 type AudioSourceMode = "microphone" | "system" | "mixed";
+type SpeakerLimit = 6 | 12 | 20;
 type TranscriptMode = "organized" | "original";
 type AudioCaptureCapabilities = {
   platform: string;
@@ -185,6 +186,7 @@ type MeetingBrief = {
   reportStyle: ReportStyle;
   fillerFilterEnabled: boolean;
   summaryStale: boolean;
+  maxSpeakers: SpeakerLimit;
 };
 type Meeting = MeetingBrief & {
   speakers: Speaker[];
@@ -216,6 +218,12 @@ const websocketBase = process.env.NEXT_PUBLIC_ASR_PROXY_URL || "ws://127.0.0.1:8
 const apiBase = process.env.NEXT_PUBLIC_API_URL || websocketBase.replace(/^ws/, "http");
 const DEFAULT_SUMMARY_TEMPLATE: SummaryTemplateId = "meeting-minutes";
 const DEFAULT_REPORT_STYLE: ReportStyle = "detailed";
+const DEFAULT_SPEAKER_LIMIT: SpeakerLimit = 6;
+const speakerLimitOptions: Array<{ value: SpeakerLimit; label: string; detail: string }> = [
+  { value: 6, label: "6 人", detail: "小型会议" },
+  { value: 12, label: "12 人", detail: "内部会议" },
+  { value: 20, label: "20 人", detail: "大型会议" },
+];
 const summaryTemplates: Array<{
   id: SummaryTemplateId;
   name: string;
@@ -427,6 +435,7 @@ export default function Home() {
   const [templateDialogOpen, setTemplateDialogOpen] = useState(false);
   const [defaultSummaryTemplate, setDefaultSummaryTemplate] = useState<SummaryTemplateId>(DEFAULT_SUMMARY_TEMPLATE);
   const [defaultReportStyle, setDefaultReportStyle] = useState<ReportStyle>(DEFAULT_REPORT_STYLE);
+  const [speakerLimit, setSpeakerLimit] = useState<SpeakerLimit>(DEFAULT_SPEAKER_LIMIT);
   const [templateDraft, setTemplateDraft] = useState<SummaryTemplateId>(DEFAULT_SUMMARY_TEMPLATE);
   const [reportStyleDraft, setReportStyleDraft] = useState<ReportStyle>(DEFAULT_REPORT_STYLE);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
@@ -483,10 +492,14 @@ export default function Home() {
     const timer = window.setTimeout(() => {
       const savedTemplate = window.localStorage.getItem("shiyin.summaryTemplate") as SummaryTemplateId | null;
       const savedStyle = window.localStorage.getItem("shiyin.reportStyle");
+      const savedSpeakerLimit = Number(window.localStorage.getItem("shiyin.maxSpeakers"));
       if (summaryTemplates.some((template) => template.id === savedTemplate)) {
         setDefaultSummaryTemplate(savedTemplate!);
       }
       if (savedStyle === "visual") setDefaultReportStyle("visual");
+      if (speakerLimitOptions.some((option) => option.value === savedSpeakerLimit)) {
+        setSpeakerLimit(savedSpeakerLimit as SpeakerLimit);
+      }
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
@@ -961,6 +974,7 @@ export default function Home() {
       const socketUrl = new URL(websocketBase);
       socketUrl.searchParams.set("template", defaultSummaryTemplate);
       socketUrl.searchParams.set("reportStyle", defaultReportStyle);
+      socketUrl.searchParams.set("maxSpeakers", String(speakerLimit));
       const socket = new WebSocket(socketUrl.toString());
       socket.binaryType = "arraybuffer";
       socketRef.current = socket;
@@ -1801,6 +1815,31 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             </button>
           )}
         </div>
+        <section className="speaker-limit-picker" aria-labelledby="speaker-limit-title">
+          <div className="speaker-limit-heading">
+            <UsersThree size={15} weight="duotone" />
+            <span><b id="speaker-limit-title">预计参会人数</b><small>用于区分发言人</small></span>
+          </div>
+          <div className="speaker-limit-options" role="radiogroup" aria-label="选择新会议的发言人数上限">
+            {speakerLimitOptions.map((option) => (
+              <button
+                type="button"
+                key={option.value}
+                className={speakerLimit === option.value ? "active" : ""}
+                aria-pressed={speakerLimit === option.value}
+                disabled={recording || processing}
+                onClick={() => {
+                  setSpeakerLimit(option.value);
+                  window.localStorage.setItem("shiyin.maxSpeakers", String(option.value));
+                  setNotice(`下一场会议最多区分 ${option.value} 位发言人`);
+                }}
+              >
+                <b>{option.label}</b><small>{option.detail}</small>
+              </button>
+            ))}
+          </div>
+          {speakerLimit > 12 && <p>人数较多时，建议会后检查并合并误分的发言人。</p>}
+        </section>
         <button className="template-quick-button" onClick={openTemplateDialog} disabled={recording || processing}>
           <span className={`template-quick-icon ${(meeting?.summaryTemplate || defaultSummaryTemplate).replace("meeting-", "")}`}>
             {summaryTemplateIcon(meeting?.summaryTemplate || defaultSummaryTemplate, 18)}
@@ -1835,7 +1874,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             <GearSix size={17} weight="duotone" />
             <span><b>MiniMax 设置</b><small>{miniMaxSettings?.configured ? "密钥已配置" : "配置密钥与模型"}</small></span>
           </button>
-          <div className="profile"><span>本</span><p><b>本机工作区</b><small>2–6 人会议模式</small></p></div>
+          <div className="profile"><span>本</span><p><b>本机工作区</b><small>新会议最多 {speakerLimit} 人</small></p></div>
         </div>
       </aside>
 
@@ -1849,7 +1888,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             <h1>{meeting?.title || "拾音 AI 会议听记"}</h1>
             <p>
               {meeting
-                ? `${meeting.speakers.length || "待识别"} 位发言人 · ${formatClock(meeting.durationMs || seconds * 1000)}`
+                ? `${meeting.speakers.length || "待识别"} 位发言人 · 上限 ${meeting.maxSpeakers} 人 · ${formatClock(meeting.durationMs || seconds * 1000)}`
                 : "本地实时转写 · 本地发言人识别 · MiniMax 总结"}
             </p>
           </div>

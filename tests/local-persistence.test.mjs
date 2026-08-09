@@ -16,6 +16,7 @@ import {
 } from "../server/storage-maintenance.mjs";
 import { createWorkspaceBackup, restoreWorkspaceBackup } from "../server/workspace-backup.mjs";
 import { findAvailableLocalPort } from "../server/local-port.mjs";
+import { normalizeMaxSpeakers } from "../server/speaker-settings.mjs";
 import { cleanTranscriptText, replaceTranscriptText } from "../server/transcript-cleaning.mjs";
 import {
   normalizeMeetingSummary,
@@ -49,6 +50,13 @@ test("selects another local port when the preferred desktop port is occupied", a
   }
 });
 
+test("normalizes supported meeting sizes without allowing unbounded speaker clusters", () => {
+  assert.equal(normalizeMaxSpeakers(6), 6);
+  assert.equal(normalizeMaxSpeakers("12"), 12);
+  assert.equal(normalizeMaxSpeakers(20), 20);
+  assert.equal(normalizeMaxSpeakers(99), 6);
+});
+
 test("persists meetings, speakers, timestamps, pauses, and manual names", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-storage-"));
   const storage = new MeetingStorage(root);
@@ -56,6 +64,7 @@ test("persists meetings, speakers, timestamps, pauses, and manual names", () => 
     const meeting = storage.createMeeting("测试会议", {
       summaryTemplate: "project-sync",
       reportStyle: "visual",
+      maxSpeakers: 12,
     });
     const speaker = storage.ensureSpeaker(meeting.id, "发言人1", new Float32Array([1, 0, 0]));
     const first = storage.addSegment(meeting.id, {
@@ -95,6 +104,7 @@ test("persists meetings, speakers, timestamps, pauses, and manual names", () => 
     assert.equal(saved.summaryTemplate, "project-sync");
     assert.equal(saved.templateVersion, 1);
     assert.equal(saved.reportStyle, "visual");
+    assert.equal(saved.maxSpeakers, 12);
     assert.equal(saved.segments.length, 2);
     assert.equal(saved.segments[0].pauseAfterMs, 1450);
     assert.equal(saved.liveSummary.headline, "实时草稿");
@@ -340,7 +350,7 @@ test("creates a verified workspace backup and safely merges it into another work
   const sourceStorage = new MeetingStorage(sourceRoot);
   const targetStorage = new MeetingStorage(targetRoot);
   try {
-    const meeting = sourceStorage.createMeeting("需要备份的会议");
+    const meeting = sourceStorage.createMeeting("需要备份的会议", { maxSpeakers: 20 });
     sourceStorage.addSegment(meeting.id, {
       seq: 0,
       startMs: 0,
@@ -385,6 +395,7 @@ test("creates a verified workspace backup and safely merges it into another work
     assert.equal(restoredMeeting.title, "需要备份的会议");
     assert.equal(restoredMeeting.segments[0].text, "备份需要保留这段文字。");
     assert.equal(restoredMeeting.summary.overview, "备份总结");
+    assert.equal(restoredMeeting.maxSpeakers, 20);
     assert.equal(restoredMeeting.transcriptVersions.length, 1);
     assert.equal(existsSync(path.join(targetRoot, "meetings", meeting.id, "audio.wav")), true);
 
