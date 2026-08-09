@@ -110,6 +110,9 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(desktopMain, /trafficLightPosition: \{ x: 18, y: 18 \}/);
   assert.match(desktopMain, /nativeTheme\.themeSource = "system"/);
   assert.match(desktopMain, /screen\.getPrimaryDisplay\(\)\.workAreaSize/);
+  assert.match(desktopMain, /findAvailableLocalPort/);
+  assert.match(desktopMain, /shiyinWebReady/);
+  assert.match(desktopMain, /health\?\.service === "shiyin-ai-backend"/);
   assert.match(desktopMain, /safeStorage\.encryptString/);
   assert.match(desktopMain, /safeStorage\.decryptString/);
   assert.match(desktopMain, /path\.join\(runtimeRoot, "settings\.json"\)/);
@@ -133,6 +136,8 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(proxy, /status: "failed"/);
   assert.match(proxy, /SHIYIN_BIND_HOST \|\| "127\.0\.0\.1"/);
   assert.match(proxy, /SHIYIN_APP_ORIGIN \|\| "http:\/\/127\.0\.0\.1:3000"/);
+  assert.match(proxy, /service: "shiyin-ai-backend"/);
+  assert.match(proxy, /appOrigin/);
   assert.doesNotMatch(proxy, /listen\(port, "0\.0\.0\.0"/);
   assert.doesNotMatch(proxy, /"Access-Control-Allow-Origin": "\*"/);
   assert.doesNotMatch(`${proxy}\n${localAsr}\n${page}`, /sk-[A-Za-z0-9]{16,}/);

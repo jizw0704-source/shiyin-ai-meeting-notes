@@ -307,6 +307,8 @@ const httpServer = createServer(async (request, response) => {
     if (request.method === "GET" && url.pathname === "/health") {
       return jsonResponse(response, 200, {
         ok: true,
+        service: "shiyin-ai-backend",
+        appOrigin,
         asrConfigured: Boolean(asrMode),
         asrMode,
         localAsrAvailable: localAsrEngine.available,

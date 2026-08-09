@@ -19,6 +19,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { findAvailableLocalPort } from "../server/local-port.mjs";
 
 for (const file of [".env.local", ".env"]) {
   try { process.loadEnvFile?.(file); } catch { /* optional local env file */ }
@@ -57,8 +58,9 @@ const nodeEnvironment = () => ({
     : path.join(sourceRoot, "models", "asr"),
 });
 const webHost = process.env.SHIYIN_WEB_HOST || "127.0.0.1";
-const webPort = Number(process.env.SHIYIN_WEB_PORT || 3000);
-const webUrl = `http://${webHost}:${webPort}`;
+const preferredWebPort = Number(process.env.SHIYIN_WEB_PORT || 3000);
+let webPort = preferredWebPort;
+let webUrl = `http://${webHost}:${webPort}`;
 const backendUrl = "http://127.0.0.1:8788";
 
 let mainWindow = null;
@@ -90,10 +92,39 @@ async function reachable(url) {
   }
 }
 
-async function waitUntilReady(url, timeoutMs = 60000) {
+async function shiyinWebReady(url) {
+  try {
+    const response = await fetch(url, {
+      headers: { Accept: "text/html" },
+      signal: AbortSignal.timeout(1200),
+    });
+    if (!response.ok) return false;
+    const html = await response.text();
+    return /<title>拾音 AI(?:｜|<)/i.test(html);
+  } catch {
+    return false;
+  }
+}
+
+async function backendHealth() {
+  try {
+    const response = await fetch(`${backendUrl}/health`, { signal: AbortSignal.timeout(1200) });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+async function backendCompatible() {
+  const health = await backendHealth();
+  return health?.service === "shiyin-ai-backend" && health.appOrigin === webUrl;
+}
+
+async function waitUntilReady(url, timeoutMs = 60000, checker = reachable) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (await reachable(url)) return true;
+    if (await checker(url)) return true;
     await new Promise((resolve) => setTimeout(resolve, 300));
   }
   return false;
@@ -180,10 +211,28 @@ function saveMiniMaxSettings(payload = {}) {
 }
 
 async function ensureServices() {
-  if (!await reachable("http://127.0.0.1:8788/health")) {
-    spawnNode(path.join(appRoot, "server", "realtime-proxy.mjs"));
+  const preferredWebUrl = `http://${webHost}:${preferredWebPort}`;
+  const reuseExistingWeb = await shiyinWebReady(preferredWebUrl);
+  if (reuseExistingWeb) {
+    webPort = preferredWebPort;
+    webUrl = preferredWebUrl;
+  } else {
+    webPort = await findAvailableLocalPort({ host: webHost, preferredPort: preferredWebPort });
+    webUrl = `http://${webHost}:${webPort}`;
   }
-  if (!await reachable(webUrl)) {
+
+  const existingBackend = await backendHealth();
+  if (existingBackend && !await backendCompatible()) {
+    throw new Error("听记后台端口被其他程序占用，请退出旧版拾音 AI 后重试");
+  }
+  if (!existingBackend) {
+    spawnNode(
+      path.join(appRoot, "server", "realtime-proxy.mjs"),
+      [],
+      { SHIYIN_APP_ORIGIN: webUrl },
+    );
+  }
+  if (!reuseExistingWeb) {
     if (productionMode) {
       spawnNode(
         path.join(appRoot, "server", "web-server.mjs"),
@@ -200,8 +249,8 @@ async function ensureServices() {
     }
   }
   const [backendReady, webReady] = await Promise.all([
-    waitUntilReady("http://127.0.0.1:8788/health"),
-    waitUntilReady(webUrl),
+    waitUntilReady(`${backendUrl}/health`, 60000, backendCompatible),
+    waitUntilReady(webUrl, 60000, shiyinWebReady),
   ]);
   if (!backendReady || !webReady) {
     throw new Error(`本地服务启动失败：${backendReady ? "" : "听记后台 "}${webReady ? "" : "界面服务"}`.trim());

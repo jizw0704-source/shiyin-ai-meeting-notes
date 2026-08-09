@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
+import { createServer } from "node:net";
 import path from "node:path";
 import test from "node:test";
 import { parseByteRange } from "../server/audio-stream.mjs";
@@ -14,6 +15,7 @@ import {
   recoverInterruptedMeetings,
 } from "../server/storage-maintenance.mjs";
 import { createWorkspaceBackup, restoreWorkspaceBackup } from "../server/workspace-backup.mjs";
+import { findAvailableLocalPort } from "../server/local-port.mjs";
 import { cleanTranscriptText, replaceTranscriptText } from "../server/transcript-cleaning.mjs";
 import {
   normalizeMeetingSummary,
@@ -26,6 +28,26 @@ import {
   normalizeSummaryTemplateId,
   summaryTemplatePrompt,
 } from "../server/summary-templates.mjs";
+
+test("selects another local port when the preferred desktop port is occupied", async () => {
+  const blocker = createServer();
+  await new Promise((resolve, reject) => {
+    blocker.once("error", reject);
+    blocker.listen({ host: "127.0.0.1", port: 0 }, resolve);
+  });
+  try {
+    const address = blocker.address();
+    assert.equal(typeof address, "object");
+    const selected = await findAvailableLocalPort({
+      host: "127.0.0.1",
+      preferredPort: address.port,
+      attempts: 10,
+    });
+    assert.notEqual(selected, address.port);
+  } finally {
+    await new Promise((resolve) => blocker.close(resolve));
+  }
+});
 
 test("persists meetings, speakers, timestamps, pauses, and manual names", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-storage-"));
