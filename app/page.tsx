@@ -726,7 +726,7 @@ export default function Home() {
   const refreshMeetings = useCallback(async (preferredId?: string) => {
     const result = await api<{ meetings: MeetingBrief[] }>("/api/meetings");
     setMeetings(result.meetings);
-    setSelectedId((current) => preferredId || current || result.meetings[0]?.id || null);
+    setSelectedId((current) => preferredId || current || null);
     return result.meetings;
   }, []);
 
@@ -2061,10 +2061,10 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             <p>
               {meeting
                 ? `${meeting.speakers.length || "待识别"} 位发言人 · 上限 ${meeting.maxSpeakers} 人 · ${formatClock(meeting.durationMs || seconds * 1000)}`
-                : "本地实时转写 · 本地发言人识别 · MiniMax 总结"}
+                : "选择录音来源与参会人数，然后开始本地会议听记"}
             </p>
           </div>
-          <div className="top-actions">
+          {meeting ? <div className="top-actions">
             <button disabled={recording || processing} onClick={openTemplateDialog}><Compass size={15} /> 模板</button>
             <button disabled={!meeting || processing || meetingIsBusy(meeting.status)} onClick={rerunCorrection}>↻ 重新校正</button>
             <button disabled={!meeting || processing || meetingIsBusy(meeting.status)} onClick={rerunSummary}>✦ 重新总结</button>
@@ -2087,10 +2087,14 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
               )}
             </div>
             <button className="more danger" disabled={!meeting || processing || meetingIsBusy(meeting.status)} onClick={deleteMeeting}>删除</button>
-          </div>
+          </div> : (
+            <div className="top-actions start-top-actions">
+              <button disabled={recording || processing} onClick={openTemplateDialog}><Compass size={15} /> 选择总结模板</button>
+            </div>
+          )}
         </header>
 
-        <div className={`content-grid ${view === "summary" ? "report-mode" : ""}`}>
+        <div className={`content-grid ${!meeting ? "start-screen" : view === "summary" ? "report-mode" : ""}`}>
           <article className="main-card">
             {(recording || processing) && (
               <div className={`recording-bar ${processing ? "processing" : ""}`}>
@@ -2121,6 +2125,36 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                 </audio>
               </section>
             )}
+            {!meeting ? (
+              <section className="meeting-start-page" aria-labelledby="meeting-start-title">
+                <div className="meeting-start-orb" aria-hidden="true">
+                  <Waveform size={42} weight="duotone" />
+                </div>
+                <span className="meeting-start-kicker"><i /> 本地听记已准备就绪</span>
+                <h2 id="meeting-start-title">开始一场新的会议</h2>
+                <p>录音和转写会保存在这台 Mac；会议结束后，再由 MiniMax 自动整理纪要与行动项。</p>
+                <button
+                  type="button"
+                  className="meeting-start-button"
+                  disabled={recording || processing}
+                  onClick={() => void startRecording()}
+                >
+                  <span><Waveform size={22} weight="fill" /></span>
+                  <strong>{recording ? "正在启动…" : "开始会议"}</strong>
+                  <small>
+                    {audioSourceMode === "mixed" ? "电脑声音 + 麦克风" : audioSourceMode === "system" ? "电脑声音" : "麦克风"}
+                    {` · 最多 ${speakerLimit} 人`}
+                  </small>
+                </button>
+                <div className="meeting-start-features" aria-label="会议处理方式">
+                  <span><CheckCircle size={15} weight="fill" /> 本地实时转写</span>
+                  <span><HardDrives size={15} weight="duotone" /> 录音保存在本机</span>
+                  <span><Sparkle size={15} weight="fill" /> MiniMax 生成纪要</span>
+                </div>
+                {meetings.length > 0 && <small className="meeting-start-history-hint">需要回看旧内容？请从左侧“历史会议”中选择。</small>}
+              </section>
+            ) : (
+              <>
             <div className="tabs">
               <button className={view === "transcript" ? "active" : ""} onClick={() => setView("transcript")}>完整记录</button>
               <button className={view === "summary" ? "active" : ""} onClick={() => setView("summary")}>AI 总结 <span>✦</span></button>
@@ -2677,9 +2711,11 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                 {!actions.length && <div className="empty-summary"><h2>暂无行动项</h2><p>AI 总结完成后，识别到的责任人、任务和截止时间会显示在这里。</p></div>}
               </div>
             )}
+              </>
+            )}
           </article>
 
-          <aside className="insight-card">
+          {meeting && <aside className="insight-card">
             <div className="insight-title"><span>✦</span><div><h2>会议速览</h2><p>{usingLiveSummary ? "本地转写 · MiniMax 实时草稿" : "本地转写 · MiniMax 总结"}</p></div><button disabled={!meeting || processing || meetingIsBusy(meeting.status)} onClick={rerunSummary} aria-label="重新生成总结">↻</button></div>
             <div className="metric-row">
               <div><strong>{Math.ceil((meeting?.durationMs || 0) / 60000)}<small>分钟</small></strong><span>会议时长</span></div>
@@ -2706,7 +2742,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             <button className="open-summary" onClick={() => summaryFailed ? rerunSummary() : setView("summary")}>
               {summaryFailed ? "重新生成 AI 总结" : usingLiveSummary ? "查看实时草稿" : "查看完整 AI 总结"} <span>→</span>
             </button>
-          </aside>
+          </aside>}
         </div>
       </section>
       {storageDialogOpen && (

@@ -21,18 +21,20 @@ test("server-renders the meeting transcription product", async () => {
   const html = await response.text();
   assert.match(html, /<title>拾音 AI｜MiniMax 智能会议听记<\/title>/i);
   assert.match(html, /开始新听记/);
-  assert.match(html, /本地转写 · MiniMax 总结/);
+  assert.match(html, /开始一场新的会议/);
+  assert.match(html, /开始会议/);
+  assert.match(html, /本地听记已准备就绪/);
+  assert.match(html, /本地实时转写/);
   assert.match(html, /录音来源/);
   assert.match(html, /电脑声音 \+ 麦克风/);
   assert.match(html, /MiniMax 设置/);
   assert.match(html, /管理录音与空间/);
-  assert.match(html, /转写版本/);
   assert.match(html, /预计参会人数/);
   assert.match(html, /历史会议/);
   assert.match(html, /搜索历史会议/);
   assert.match(html, /12 人/);
   assert.match(html, /20 人/);
-  assert.match(html, /完整记录/);
+  assert.doesNotMatch(html, /转写版本|完整记录|会议速览/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/);
 });
 
@@ -95,6 +97,8 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(page, /原始记录/);
   assert.match(page, /撤销上次替换/);
   assert.match(page, /重命名会议/);
+  assert.match(page, /setSelectedId\(\(current\) => preferredId \|\| current \|\| null\)/);
+  assert.doesNotMatch(page, /result\.meetings\[0\]\?\.id/);
   assert.match(page, /会议名称不能为空/);
   assert.match(page, /JSON\.stringify\(\{ title \}\)/);
   assert.match(page, /清理临时文件/);
