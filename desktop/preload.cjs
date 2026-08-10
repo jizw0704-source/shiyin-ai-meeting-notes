@@ -21,6 +21,9 @@ contextBridge.exposeInMainWorld("shiyinDesktop", {
   restoreWorkspaceBackup() {
     return ipcRenderer.invoke("workspace-backup:restore");
   },
+  saveMeetingToObsidian(meeting) {
+    return ipcRenderer.invoke("obsidian:save-meeting", meeting);
+  },
   relaunch() {
     ipcRenderer.send("application:relaunch");
   },

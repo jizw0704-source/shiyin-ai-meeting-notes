@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import { createServer } from "node:net";
 import path from "node:path";
 import test from "node:test";
+import { saveObsidianMeeting } from "../desktop/obsidian-export.mjs";
 import { parseByteRange } from "../server/audio-stream.mjs";
 import { AudioSession } from "../server/audio-session.mjs";
 import { correctMeetingSpeakers, splitLongSegment } from "../server/correction.mjs";
@@ -47,6 +48,62 @@ test("selects another local port when the preferred desktop port is occupied", a
     assert.notEqual(selected, address.port);
   } finally {
     await new Promise((resolve) => blocker.close(resolve));
+  }
+});
+
+test("saves an Obsidian meeting note atomically and preserves the user notes area", async () => {
+  const vault = mkdtempSync(path.join(os.tmpdir(), "shiyin-obsidian-"));
+  mkdirSync(path.join(vault, ".obsidian"));
+  try {
+    const first = await saveObsidianMeeting({
+      vaultPath: vault,
+      meetingId: "meeting-obsidian-1",
+      title: "产品 / 周会",
+      startedAt: "2026-08-10T02:00:00.000Z",
+      markdown: "# 产品周会\n\n第一版总结。\n",
+      savedAt: "2026-08-10T03:00:00.000Z",
+    });
+    assert.equal(first.updated, false);
+    assert.match(first.relativePath, /^20 会议\/拾音 AI\/2026-08-10 产品 - 周会 \[meeting-\]\.md$/);
+    let content = readFileSync(first.path, "utf8");
+    assert.match(content, /type: meeting-note/);
+    assert.match(content, /shiyin_meeting_id: "meeting-obsidian-1"/);
+    assert.match(content, /第一版总结/);
+    assert.match(content, /<!-- shiyin-user-notes -->/);
+
+    writeFileSync(first.path, `${content}这里是用户在 Obsidian 中补充的内容。\n`);
+    const second = await saveObsidianMeeting({
+      vaultPath: vault,
+      existingRelativePath: first.relativePath,
+      meetingId: "meeting-obsidian-1",
+      title: "产品周会（已更新）",
+      startedAt: "2026-08-10T02:00:00.000Z",
+      markdown: "# 产品周会\n\n第二版总结。\n",
+      savedAt: "2026-08-10T04:00:00.000Z",
+    });
+    assert.equal(second.updated, true);
+    assert.equal(second.path, first.path);
+    content = readFileSync(second.path, "utf8");
+    assert.match(content, /第二版总结/);
+    assert.doesNotMatch(content, /第一版总结/);
+    assert.match(content, /这里是用户在 Obsidian 中补充的内容/);
+
+    const protectedFolder = path.join(vault, "10 项目", "拾音 AI");
+    const protectedNote = path.join(protectedFolder, "拾音 AI 项目总览.md");
+    mkdirSync(protectedFolder, { recursive: true });
+    writeFileSync(protectedNote, "这篇项目笔记不能被会议同步覆盖。\n");
+    const guarded = await saveObsidianMeeting({
+      vaultPath: vault,
+      existingRelativePath: "10 项目/拾音 AI/拾音 AI 项目总览.md",
+      meetingId: "meeting-obsidian-2",
+      title: "安全路径测试",
+      startedAt: "2026-08-10T02:00:00.000Z",
+      markdown: "# 安全路径测试\n",
+    });
+    assert.match(guarded.relativePath, /^20 会议\/拾音 AI\//);
+    assert.equal(readFileSync(protectedNote, "utf8"), "这篇项目笔记不能被会议同步覆盖。\n");
+  } finally {
+    rmSync(vault, { recursive: true, force: true });
   }
 });
 

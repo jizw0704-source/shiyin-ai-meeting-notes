@@ -19,6 +19,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { saveObsidianMeeting as writeObsidianMeeting } from "./obsidian-export.mjs";
 import { findAvailableLocalPort } from "../server/local-port.mjs";
 
 for (const file of [".env.local", ".env"]) {
@@ -160,6 +161,13 @@ function readDesktopSettings() {
   }
 }
 
+function writeDesktopSettings(settings) {
+  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+  const temporaryPath = `${settingsPath}.tmp`;
+  fs.writeFileSync(temporaryPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(temporaryPath, settingsPath);
+}
+
 function applyDesktopSettings() {
   const settings = readDesktopSettings();
   if (settings.miniMaxModel) process.env.MINIMAX_MODEL = String(settings.miniMaxModel);
@@ -201,13 +209,50 @@ function saveMiniMaxSettings(payload = {}) {
       ? { encryptedMiniMaxApiKey: safeStorage.encryptString(apiKey).toString("base64") }
       : {}),
   };
-  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-  const temporaryPath = `${settingsPath}.tmp`;
-  fs.writeFileSync(temporaryPath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
-  fs.renameSync(temporaryPath, settingsPath);
+  writeDesktopSettings(next);
   process.env.MINIMAX_MODEL = model;
   if (apiKey) process.env.MINIMAX_API_KEY = apiKey;
   return publicMiniMaxSettings();
+}
+
+function validObsidianVault(candidate) {
+  if (!candidate) return null;
+  const resolved = path.resolve(String(candidate));
+  return fs.existsSync(resolved) && fs.existsSync(path.join(resolved, ".obsidian")) ? resolved : null;
+}
+
+function discoverObsidianVault() {
+  const configPath = path.join(app.getPath("appData"), "obsidian", "obsidian.json");
+  try {
+    const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    const candidates = Object.values(config.vaults || {})
+      .filter((item) => validObsidianVault(item?.path))
+      .sort((left, right) => (
+        Number(Boolean(right.open)) - Number(Boolean(left.open))
+        || Number(right.ts || 0) - Number(left.ts || 0)
+      ));
+    return validObsidianVault(candidates[0]?.path);
+  } catch {
+    return null;
+  }
+}
+
+async function resolveObsidianVault(settings) {
+  const configured = validObsidianVault(settings.obsidianVaultPath);
+  if (configured) return configured;
+  const discovered = discoverObsidianVault();
+  if (discovered) return discovered;
+  const selection = await dialog.showOpenDialog(mainWindow, {
+    title: "选择 Obsidian Vault",
+    defaultPath: app.getPath("documents"),
+    message: "请选择包含 .obsidian 文件夹的 Obsidian Vault",
+    buttonLabel: "使用这个 Vault",
+    properties: ["openDirectory", "createDirectory"],
+  });
+  if (selection.canceled || !selection.filePaths[0]) return null;
+  const selected = validObsidianVault(selection.filePaths[0]);
+  if (!selected) throw new Error("所选文件夹不是 Obsidian Vault，请选择包含 .obsidian 的文件夹");
+  return selected;
 }
 
 async function ensureServices() {
@@ -575,6 +620,35 @@ ipcMain.handle("workspace-backup:restore", async () => {
     canceled: false,
     ...await postBackend("/api/backups/restore", { backupPath: selection.filePaths[0] }),
   };
+});
+ipcMain.handle("obsidian:save-meeting", async (_event, payload = {}) => {
+  const settings = readDesktopSettings();
+  const vaultPath = await resolveObsidianVault(settings);
+  if (!vaultPath) return { canceled: true };
+  const meetingId = String(payload.meetingId || "");
+  const previousRelativePath = settings.obsidianMeetingFiles?.[meetingId] || null;
+  const result = await writeObsidianMeeting({
+    vaultPath,
+    existingRelativePath: previousRelativePath,
+    meetingId,
+    title: String(payload.title || "会议记录"),
+    startedAt: String(payload.startedAt || new Date().toISOString()),
+    markdown: String(payload.markdown || ""),
+  });
+  writeDesktopSettings({
+    ...settings,
+    obsidianVaultPath: vaultPath,
+    obsidianMeetingFiles: {
+      ...(settings.obsidianMeetingFiles || {}),
+      [meetingId]: result.relativePath,
+    },
+  });
+  if (payload.openAfterSave !== false) {
+    const notePath = result.relativePath.replace(/\.md$/i, "");
+    const url = `obsidian://open?vault=${encodeURIComponent(path.basename(vaultPath))}&file=${encodeURIComponent(notePath)}`;
+    await shell.openExternal(url);
+  }
+  return { canceled: false, ...result };
 });
 ipcMain.handle("audio-privacy-settings:open", async (_event, kind) => {
   if (process.platform !== "darwin") return false;

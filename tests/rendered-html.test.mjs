@@ -81,6 +81,10 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(page, /实时草稿/);
   assert.match(page, /Markdown 文件/);
   assert.match(page, /复制 Markdown/);
+  assert.match(page, /保存到 Obsidian/);
+  assert.match(page, /结束后自动同步/);
+  assert.match(page, /saveMeetingToObsidian/);
+  assert.match(page, /shiyin\.obsidianAutoSave/);
   assert.match(page, /查找与全局替换/);
   assert.match(page, /过滤“嗯、啊、呃”/);
   assert.match(page, /原始记录/);
@@ -122,11 +126,14 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(desktopMain, /safeStorage\.encryptString/);
   assert.match(desktopMain, /safeStorage\.decryptString/);
   assert.match(desktopMain, /path\.join\(runtimeRoot, "settings\.json"\)/);
+  assert.match(desktopMain, /obsidian:save-meeting/);
+  assert.match(desktopMain, /discoverObsidianVault/);
   assert.match(preload, /getAudioCaptureCapabilities/);
   assert.match(preload, /openAudioPrivacySettings/);
   assert.match(preload, /data-folder:open/);
   assert.match(preload, /workspace-backup:create/);
   assert.match(preload, /workspace-backup:restore/);
+  assert.match(preload, /obsidian:save-meeting/);
   assert.match(preload, /application:relaunch/);
   assert.match(preload, /platform-\$\{process\.platform\}/);
   assert.match(preload, /saveMiniMaxSettings/);

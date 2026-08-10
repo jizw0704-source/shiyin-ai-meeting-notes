@@ -64,6 +64,13 @@ type BackupOperationResult = {
   importedMeetings?: number;
   skippedMeetings?: number;
 };
+type ObsidianSaveResult = {
+  canceled: boolean;
+  path?: string;
+  relativePath?: string;
+  fileName?: string;
+  updated?: boolean;
+};
 type TranscriptVersion = {
   id: string;
   meetingId: string;
@@ -205,6 +212,13 @@ declare global {
       openDataFolder: () => Promise<boolean>;
       createWorkspaceBackup: () => Promise<BackupOperationResult>;
       restoreWorkspaceBackup: () => Promise<BackupOperationResult>;
+      saveMeetingToObsidian: (meeting: {
+        meetingId: string;
+        title: string;
+        startedAt: string;
+        markdown: string;
+        openAfterSave: boolean;
+      }) => Promise<ObsidianSaveResult>;
       relaunch: () => void;
       getMiniMaxSettings: () => Promise<MiniMaxSettings>;
       saveMiniMaxSettings: (settings: { apiKey: string; model: string }) => Promise<MiniMaxSettings>;
@@ -414,6 +428,8 @@ export default function Home() {
   const [replaceWholeWord, setReplaceWholeWord] = useState(false);
   const [transcriptSaving, setTranscriptSaving] = useState(false);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [obsidianSaving, setObsidianSaving] = useState(false);
+  const [obsidianAutoSave, setObsidianAutoSave] = useState(true);
   const [notice, setNotice] = useState("");
   const [liveText, setLiveText] = useState("");
   const [connectionStatus, setConnectionStatus] = useState("本地实时 ASR");
@@ -493,6 +509,7 @@ export default function Home() {
       const savedTemplate = window.localStorage.getItem("shiyin.summaryTemplate") as SummaryTemplateId | null;
       const savedStyle = window.localStorage.getItem("shiyin.reportStyle");
       const savedSpeakerLimit = Number(window.localStorage.getItem("shiyin.maxSpeakers"));
+      const savedObsidianAutoSave = window.localStorage.getItem("shiyin.obsidianAutoSave");
       if (summaryTemplates.some((template) => template.id === savedTemplate)) {
         setDefaultSummaryTemplate(savedTemplate!);
       }
@@ -500,6 +517,7 @@ export default function Home() {
       if (speakerLimitOptions.some((option) => option.value === savedSpeakerLimit)) {
         setSpeakerLimit(savedSpeakerLimit as SpeakerLimit);
       }
+      setObsidianAutoSave(savedObsidianAutoSave !== "false");
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
@@ -1053,6 +1071,7 @@ export default function Home() {
             setNotice(message.summarySkipped
               ? "会议和逐字稿已保存；配置 MiniMax 密钥后可生成 AI 总结"
               : value.error || "会议已保存，发言人校正和 AI 总结已完成");
+            if (obsidianAutoSave) void saveMeetingToObsidian(value, { automatic: true });
             window.shiyinDesktop?.setRecording(false);
             socket.close();
             socketRef.current = null;
@@ -1464,14 +1483,16 @@ export default function Home() {
     }
   }
 
-  function buildMarkdownReport() {
-    if (!meeting) return "";
-    const summary = usableSummary;
-    const names = new Map(meeting.speakers.map((speaker) => [speaker.id, speaker.displayName]));
+  function buildMarkdownReport(sourceMeeting: Meeting | null = meeting) {
+    if (!sourceMeeting) return "";
+    const summary = (summaryLooksInvalid(sourceMeeting.summary) ? null : sourceMeeting.summary)
+      || (summaryLooksInvalid(sourceMeeting.liveSummary) ? null : sourceMeeting.liveSummary)
+      || null;
+    const names = new Map(sourceMeeting.speakers.map((speaker) => [speaker.id, speaker.displayName]));
     const lines: string[] = [
-      `# ${meeting.title}`,
+      `# ${sourceMeeting.title}`,
       "",
-      `> 拾音 AI 会议报告 · ${formatMeetingDate(meeting.startedAt)} · ${formatClock(meeting.durationMs)} · ${meeting.speakers.length} 位发言人`,
+      `> 拾音 AI 会议报告 · ${formatMeetingDate(sourceMeeting.startedAt)} · ${formatClock(sourceMeeting.durationMs)} · ${sourceMeeting.speakers.length} 位发言人`,
       "",
       "## 会议概述",
       "",
@@ -1539,8 +1560,8 @@ export default function Home() {
     if (topics.length) lines.push("", "## 主题与关键词", "", topics.map((item) => `\`${item}\``).join(" "));
 
     lines.push("", "## 完整逐字稿（整理稿）");
-    if (meeting.fillerFilterEnabled) lines.push("", "> 已应用保守口语过滤；原始识别文本仍保存在拾音 AI 中。");
-    for (const segment of meeting.segments) {
+    if (sourceMeeting.fillerFilterEnabled) lines.push("", "> 已应用保守口语过滤；原始识别文本仍保存在拾音 AI 中。");
+    for (const segment of sourceMeeting.segments) {
       const name = names.get(segment.speakerId || "") || "待确认发言人";
       lines.push("", `### ${formatClock(segment.startMs)}–${formatClock(segment.endMs)} ${name}`, "", segment.cleanedText);
     }
@@ -1567,6 +1588,46 @@ export default function Home() {
       setNotice("无法访问剪贴板，请改用下载 Markdown");
     }
     setExportMenuOpen(false);
+  }
+
+  async function saveMeetingToObsidian(
+    sourceMeeting: Meeting | null = meeting,
+    options: { automatic?: boolean } = {},
+  ) {
+    if (!sourceMeeting) return false;
+    const desktop = window.shiyinDesktop;
+    if (!desktop) {
+      setNotice("保存到 Obsidian 需要使用拾音 AI 桌面版");
+      return false;
+    }
+    setObsidianSaving(true);
+    if (!options.automatic) setExportMenuOpen(false);
+    try {
+      const result = await desktop.saveMeetingToObsidian({
+        meetingId: sourceMeeting.id,
+        title: sourceMeeting.title,
+        startedAt: sourceMeeting.startedAt,
+        markdown: buildMarkdownReport(sourceMeeting),
+        openAfterSave: !options.automatic,
+      });
+      if (result.canceled) return false;
+      setNotice(options.automatic
+        ? `会议已自动同步到 Obsidian：${result.fileName || sourceMeeting.title}`
+        : `${result.updated ? "已更新" : "已保存"} Obsidian 笔记：${result.fileName || sourceMeeting.title}`);
+      return true;
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "保存到 Obsidian 失败");
+      return false;
+    } finally {
+      setObsidianSaving(false);
+    }
+  }
+
+  function toggleObsidianAutoSave() {
+    const enabled = !obsidianAutoSave;
+    setObsidianAutoSave(enabled);
+    window.localStorage.setItem("shiyin.obsidianAutoSave", String(enabled));
+    setNotice(enabled ? "已开启：会议结束后自动同步到 Obsidian" : "已关闭 Obsidian 自动同步；仍可手动保存");
   }
 
   function exportHtmlReport() {
@@ -1900,12 +1961,14 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             <div className="export-control">
               <button
                 className="primary"
-                disabled={!meeting || summaryFailed || processing || meetingIsBusy(meeting.status)}
+                disabled={!meeting || processing || meetingIsBusy(meeting.status)}
                 onClick={() => setExportMenuOpen((open) => !open)}
                 aria-expanded={exportMenuOpen}
               >⇩ 导出报告</button>
               {exportMenuOpen && (
                 <div className="export-menu" role="menu">
+                  <button disabled={obsidianSaving} onClick={() => void saveMeetingToObsidian()}><b>{obsidianSaving ? "正在保存…" : "保存到 Obsidian"}</b><span>生成或更新独立会议笔记</span></button>
+                  <button onClick={toggleObsidianAutoSave}><b>结束后自动同步</b><span>{obsidianAutoSave ? "已开启 · 后续会议自动保存" : "已关闭 · 点击重新开启"}</span></button>
                   <button onClick={exportHtmlReport}><b>网页报告</b><span>适合浏览与打印</span></button>
                   <button onClick={downloadMarkdownReport}><b>Markdown 文件</b><span>适合 AI Agent 分析</span></button>
                   <button onClick={() => void copyMarkdownReport()}><b>复制 Markdown</b><span>直接粘贴给其他 AI</span></button>
