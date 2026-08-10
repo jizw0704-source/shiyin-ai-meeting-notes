@@ -14,6 +14,8 @@ import {
   HardDrives,
   Key,
   ListChecks,
+  MagnifyingGlass,
+  PencilSimple,
   PushPin,
   Quotes,
   Sparkle,
@@ -423,6 +425,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 export default function Home() {
   const [view, setView] = useState<View>("transcript");
   const [meetings, setMeetings] = useState<MeetingBrief[]>([]);
+  const [historyQuery, setHistoryQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [meeting, setMeeting] = useState<Meeting | null>(null);
   const [recording, setRecording] = useState(false);
@@ -456,6 +459,10 @@ export default function Home() {
   const [inputLevel, setInputLevel] = useState(0);
   const [audioWarning, setAudioWarning] = useState("");
   const [highlightedSeq, setHighlightedSeq] = useState<number | null>(null);
+  const [renamingMeeting, setRenamingMeeting] = useState<MeetingBrief | null>(null);
+  const [meetingTitleDraft, setMeetingTitleDraft] = useState("");
+  const [meetingRenameSaving, setMeetingRenameSaving] = useState(false);
+  const [meetingRenameError, setMeetingRenameError] = useState("");
   const [renamingSpeaker, setRenamingSpeaker] = useState<Speaker | null>(null);
   const [speakerNameDraft, setSpeakerNameDraft] = useState("");
   const [templateDialogOpen, setTemplateDialogOpen] = useState(false);
@@ -867,6 +874,14 @@ export default function Home() {
     const total = values.reduce((sum, speaker) => sum + speaker.durationMs, 0) || 1;
     return values.map((speaker) => ({ ...speaker, share: Math.round((speaker.durationMs / total) * 100) }));
   }, [meeting, speakerInsights]);
+  const visibleMeetings = useMemo(() => {
+    const normalizedQuery = historyQuery.trim().toLocaleLowerCase("zh-CN");
+    if (!normalizedQuery) return meetings;
+    return meetings.filter((item) => (
+      item.title.toLocaleLowerCase("zh-CN").includes(normalizedQuery)
+      || formatMeetingDate(item.startedAt).toLocaleLowerCase("zh-CN").includes(normalizedQuery)
+    ));
+  }, [historyQuery, meetings]);
 
   function mergeMeetingList(value: MeetingBrief) {
     setMeetings((items) => [value, ...items.filter((item) => item.id !== value.id)]);
@@ -1389,6 +1404,42 @@ export default function Home() {
       }
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "无法保存总结模板");
+    }
+  }
+
+  function beginRenameMeeting(item: MeetingBrief) {
+    if (meetingIsBusy(item.status) || processing || recording) return;
+    setRenamingMeeting(item);
+    setMeetingTitleDraft(item.title);
+    setMeetingRenameError("");
+  }
+
+  async function saveMeetingTitle() {
+    if (!renamingMeeting || meetingRenameSaving) return;
+    const title = meetingTitleDraft.trim();
+    if (!title) {
+      setMeetingRenameError("会议名称不能为空");
+      return;
+    }
+    if (title === renamingMeeting.title) {
+      setRenamingMeeting(null);
+      return;
+    }
+    setMeetingRenameSaving(true);
+    setMeetingRenameError("");
+    try {
+      const updated = await api<Meeting>(`/api/meetings/${renamingMeeting.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ title }),
+      });
+      mergeMeetingList(updated);
+      setMeeting((current) => current?.id === updated.id ? updated : current);
+      setRenamingMeeting(null);
+      setNotice(`会议已重命名为“${updated.title}”`);
+    } catch (error) {
+      setMeetingRenameError(error instanceof Error ? error.message : "无法重命名会议");
+    } finally {
+      setMeetingRenameSaving(false);
     }
   }
 
@@ -1945,22 +1996,49 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             <em>{globalShortcutStatus.openWindow && globalShortcutStatus.toggleRecording ? "桌面全局快捷键" : "快捷键被其他应用占用"}</em>
           </div>
         )}
-        <div className="nav-label">会议记录</div>
+        <div className="nav-label history-heading">
+          <span>历史会议</span>
+          <b>{meetings.length}</b>
+        </div>
+        <div className="history-search">
+          <MagnifyingGlass size={13} />
+          <input
+            type="search"
+            value={historyQuery}
+            onChange={(event) => setHistoryQuery(event.target.value)}
+            placeholder="搜索历史会议"
+            aria-label="搜索历史会议"
+          />
+          {historyQuery && <button type="button" onClick={() => setHistoryQuery("")} aria-label="清空历史会议搜索"><X size={12} /></button>}
+        </div>
         <div className="meeting-list">
-          {meetings.map((item) => (
-            <button
-              className={`meeting ${selectedId === item.id ? "active" : ""}`}
-              key={item.id}
-              onClick={() => setSelectedId(item.id)}
-            >
-              <span className="meeting-icon">▥</span>
-              <span>
-                <strong>{item.title}</strong>
-                <small>{formatMeetingDate(item.startedAt)} · {formatClock(item.durationMs)}</small>
-              </span>
-            </button>
+          {visibleMeetings.map((item) => (
+            <div className={`history-meeting-row ${selectedId === item.id ? "active" : ""}`} key={item.id}>
+              <button
+                className={`meeting ${selectedId === item.id ? "active" : ""}`}
+                onClick={() => setSelectedId(item.id)}
+                aria-label={`查看会议：${item.title}`}
+              >
+                <span className="meeting-icon">▥</span>
+                <span>
+                  <strong>{item.title}</strong>
+                  <small>{formatMeetingDate(item.startedAt)} · {formatClock(item.durationMs)}</small>
+                </span>
+              </button>
+              <button
+                type="button"
+                className="meeting-rename"
+                onClick={() => beginRenameMeeting(item)}
+                disabled={meetingIsBusy(item.status) || processing || recording}
+                aria-label={`重命名会议：${item.title}`}
+                title="重命名会议"
+              >
+                <PencilSimple size={14} />
+              </button>
+            </div>
           ))}
           {!loading && !meetings.length && <p className="no-meetings">还没有会议记录</p>}
+          {!loading && Boolean(meetings.length) && !visibleMeetings.length && <p className="no-meetings">没有找到匹配的会议</p>}
         </div>
         <div className="sidebar-bottom">
           <div className="privacy-state"><span>●</span> 本地后台已连接</div>
@@ -2993,6 +3071,57 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             <div className="rename-dialog-actions">
               <button type="button" onClick={() => setRenamingSpeaker(null)}>取消</button>
               <button className="primary" type="submit" disabled={!speakerNameDraft.trim()}>保存名称</button>
+            </div>
+          </form>
+        </div>
+      )}
+      {renamingMeeting && (
+        <div
+          className="dialog-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.currentTarget === event.target && !meetingRenameSaving) setRenamingMeeting(null);
+          }}
+        >
+          <form
+            className="rename-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="rename-meeting-title"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveMeetingTitle();
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && !meetingRenameSaving) setRenamingMeeting(null);
+            }}
+          >
+            <div className="rename-dialog-heading">
+              <span><PencilSimple size={20} weight="duotone" /></span>
+              <div>
+                <h2 id="rename-meeting-title">重命名会议</h2>
+                <p>{formatMeetingDate(renamingMeeting.startedAt)} · {formatClock(renamingMeeting.durationMs)}</p>
+              </div>
+            </div>
+            <label htmlFor="meeting-title">会议名称</label>
+            <input
+              id="meeting-title"
+              autoFocus
+              maxLength={80}
+              value={meetingTitleDraft}
+              disabled={meetingRenameSaving}
+              onChange={(event) => {
+                setMeetingTitleDraft(event.target.value);
+                setMeetingRenameError("");
+              }}
+              placeholder="例如：产品设计周会"
+            />
+            {meetingRenameError && <p className="rename-dialog-error"><WarningCircle size={14} />{meetingRenameError}</p>}
+            <div className="rename-dialog-actions">
+              <button type="button" onClick={() => setRenamingMeeting(null)} disabled={meetingRenameSaving}>取消</button>
+              <button className="primary" type="submit" disabled={!meetingTitleDraft.trim() || meetingRenameSaving}>
+                {meetingRenameSaving ? "正在保存…" : "保存名称"}
+              </button>
             </div>
           </form>
         </div>

@@ -153,10 +153,10 @@ test("persists meetings, speakers, timestamps, pauses, and manual names", () => 
       generatedAt: "2026-07-27T12:00:00.000Z",
       throughSeq: 1,
     });
-    storage.updateMeeting(meeting.id, { status: "completed", durationMs: 4800 });
+    storage.updateMeeting(meeting.id, { title: "设计周会", status: "completed", durationMs: 4800 });
 
     const saved = storage.getMeeting(meeting.id);
-    assert.equal(saved.title, "测试会议");
+    assert.equal(saved.title, "设计周会");
     assert.equal(saved.status, "completed");
     assert.equal(saved.summaryTemplate, "project-sync");
     assert.equal(saved.templateVersion, 1);

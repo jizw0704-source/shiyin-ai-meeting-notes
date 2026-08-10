@@ -368,7 +368,11 @@ const httpServer = createServer(async (request, response) => {
     if (request.method === "PATCH" && meetingMatch) {
       const body = await readJson(request);
       const patch = {};
-      if (Object.hasOwn(body, "title")) patch.title = String(body.title || "").trim().slice(0, 80);
+      if (Object.hasOwn(body, "title")) {
+        const title = String(body.title || "").trim();
+        if (!title) return jsonResponse(response, 400, { error: "会议名称不能为空" });
+        patch.title = title.slice(0, 80);
+      }
       if (Object.hasOwn(body, "summaryTemplate")) {
         patch.summaryTemplate = normalizeSummaryTemplateId(body.summaryTemplate);
         patch.templateVersion = SUMMARY_TEMPLATE_VERSION;
