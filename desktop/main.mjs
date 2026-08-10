@@ -3,6 +3,7 @@ import {
   BrowserWindow,
   desktopCapturer,
   dialog,
+  globalShortcut,
   ipcMain,
   Menu,
   nativeImage,
@@ -63,12 +64,16 @@ const preferredWebPort = Number(process.env.SHIYIN_WEB_PORT || 3000);
 let webPort = preferredWebPort;
 let webUrl = `http://${webHost}:${webPort}`;
 const backendUrl = "http://127.0.0.1:8788";
+const openWindowShortcut = "Control+Alt+M";
+const toggleRecordingShortcut = "Control+Alt+R";
 
 let mainWindow = null;
 let tray = null;
 let quitting = false;
 let servicesReady = false;
 let powerBlockerId = null;
+let recordingActive = false;
+let shortcutRegistration = { openWindow: false, toggleRecording: false };
 const managedServices = [];
 
 if (process.platform === "win32") app.setAppUserModelId("com.phenosola.shiyin");
@@ -308,6 +313,29 @@ function showWindow() {
   mainWindow.focus();
 }
 
+function sendWindowCommand(command) {
+  showWindow();
+  if (!mainWindow) return;
+  if (mainWindow.webContents.isLoadingMainFrame()) {
+    mainWindow.webContents.once("did-finish-load", () => mainWindow?.webContents.send("tray-command", command));
+    return;
+  }
+  mainWindow.webContents.send("tray-command", command);
+}
+
+function toggleRecordingFromShortcut() {
+  sendWindowCommand("toggle-recording");
+}
+
+function registerGlobalShortcuts() {
+  globalShortcut.unregister(openWindowShortcut);
+  globalShortcut.unregister(toggleRecordingShortcut);
+  shortcutRegistration = {
+    openWindow: globalShortcut.register(openWindowShortcut, showWindow),
+    toggleRecording: globalShortcut.register(toggleRecordingShortcut, toggleRecordingFromShortcut),
+  };
+}
+
 function quitApplication() {
   quitting = true;
   app.quit();
@@ -331,8 +359,7 @@ function showAbout() {
 }
 
 function openSettings() {
-  showWindow();
-  mainWindow?.webContents.send("tray-command", "open-settings");
+  sendWindowCommand("open-settings");
 }
 
 function rebuildApplicationMenu() {
@@ -356,7 +383,8 @@ function rebuildApplicationMenu() {
     {
       label: "文件",
       submenu: [
-        { label: "打开主窗口", accelerator: "CmdOrCtrl+Shift+O", click: showWindow },
+        { label: "打开主窗口（⌃⌥M）", click: showWindow },
+        { label: "开始/结束听记（⌃⌥R）", click: toggleRecordingFromShortcut },
         { label: "设置…", accelerator: "CmdOrCtrl+,", click: openSettings },
         { type: "separator" },
         ...(process.platform === "darwin"
@@ -445,8 +473,8 @@ function rebuildTrayMenu() {
   tray?.setContextMenu(Menu.buildFromTemplate([
     { label: "打开拾音 AI", click: showWindow },
     {
-      label: "结束当前听记",
-      click: () => mainWindow?.webContents.send("tray-command", "stop-recording"),
+      label: recordingActive ? "结束当前听记" : "开始新听记",
+      click: toggleRecordingFromShortcut,
     },
     { type: "separator" },
     {
@@ -580,6 +608,8 @@ function audioCaptureCapabilities() {
 }
 
 ipcMain.on("recording-state", (_event, active) => {
+  recordingActive = Boolean(active);
+  rebuildTrayMenu();
   if (active && powerBlockerId === null) {
     powerBlockerId = powerSaveBlocker.start("prevent-app-suspension");
   } else if (!active && powerBlockerId !== null) {
@@ -589,6 +619,13 @@ ipcMain.on("recording-state", (_event, active) => {
 });
 
 ipcMain.handle("audio-capture-capabilities", () => audioCaptureCapabilities());
+ipcMain.handle("global-shortcuts:get", () => ({
+  ...shortcutRegistration,
+  openAccelerator: openWindowShortcut,
+  recordingAccelerator: toggleRecordingShortcut,
+  openLabel: "⌃⌥M",
+  recordingLabel: "⌃⌥R",
+}));
 ipcMain.handle("data-folder:open", async () => {
   fs.mkdirSync(dataFolderPath, { recursive: true });
   const error = await shell.openPath(dataFolderPath);
@@ -689,6 +726,7 @@ app.whenReady().then(async () => {
     servicesReady = true;
     installDisplayMediaHandler();
     if (!mainWindow) createWindow();
+    registerGlobalShortcuts();
   } catch (error) {
     dialog.showErrorBox("拾音 AI 无法启动", error.message);
     quitting = true;
@@ -700,6 +738,7 @@ app.on("window-all-closed", () => {
 });
 app.on("before-quit", () => {
   quitting = true;
+  globalShortcut.unregisterAll();
   if (powerBlockerId !== null && powerSaveBlocker.isStarted(powerBlockerId)) {
     powerSaveBlocker.stop(powerBlockerId);
   }

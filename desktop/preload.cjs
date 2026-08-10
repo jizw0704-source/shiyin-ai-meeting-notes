@@ -9,6 +9,9 @@ contextBridge.exposeInMainWorld("shiyinDesktop", {
   getAudioCaptureCapabilities() {
     return ipcRenderer.invoke("audio-capture-capabilities");
   },
+  getGlobalShortcutStatus() {
+    return ipcRenderer.invoke("global-shortcuts:get");
+  },
   openAudioPrivacySettings(kind) {
     return ipcRenderer.invoke("audio-privacy-settings:open", kind);
   },

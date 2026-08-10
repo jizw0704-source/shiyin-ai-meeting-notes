@@ -40,6 +40,14 @@ type AudioCaptureCapabilities = {
   microphonePermission: string;
   screenPermission: string;
 };
+type GlobalShortcutStatus = {
+  openWindow: boolean;
+  toggleRecording: boolean;
+  openAccelerator: string;
+  recordingAccelerator: string;
+  openLabel: string;
+  recordingLabel: string;
+};
 type MiniMaxSettings = {
   configured: boolean;
   model: string;
@@ -208,6 +216,7 @@ declare global {
   interface Window {
     shiyinDesktop?: {
       getAudioCaptureCapabilities: () => Promise<AudioCaptureCapabilities>;
+      getGlobalShortcutStatus: () => Promise<GlobalShortcutStatus>;
       openAudioPrivacySettings: (kind: "microphone" | "screen") => Promise<boolean>;
       openDataFolder: () => Promise<boolean>;
       createWorkspaceBackup: () => Promise<BackupOperationResult>;
@@ -438,6 +447,7 @@ export default function Home() {
   const [audioSourceMode, setAudioSourceMode] = useState<AudioSourceMode>("microphone");
   const [systemAudioAvailable, setSystemAudioAvailable] = useState(false);
   const [audioCaptureCapabilities, setAudioCaptureCapabilities] = useState<AudioCaptureCapabilities | null>(null);
+  const [globalShortcutStatus, setGlobalShortcutStatus] = useState<GlobalShortcutStatus | null>(null);
   const [sourceWarning, setSourceWarning] = useState("");
   const [captureSettingsOpened, setCaptureSettingsOpened] = useState(false);
   const [audioInputs, setAudioInputs] = useState<AudioInput[]>([]);
@@ -478,6 +488,7 @@ export default function Home() {
   const captureStartedAtRef = useRef(0);
   const lastLevelUpdateRef = useRef(0);
   const silenceWarningShownRef = useRef(false);
+  const commandHandlerRef = useRef<(command: string) => void>(() => undefined);
 
   const refreshCaptureCapabilities = useCallback(async () => {
     const desktop = window.shiyinDesktop;
@@ -532,6 +543,11 @@ export default function Home() {
     desktop.getMiniMaxSettings()
       .then((settings) => {
         if (active) setMiniMaxSettings(settings);
+      })
+      .catch(() => undefined);
+    desktop.getGlobalShortcutStatus()
+      .then((status) => {
+        if (active) setGlobalShortcutStatus(status);
       })
       .catch(() => undefined);
     return () => {
@@ -771,12 +787,9 @@ export default function Home() {
   }, [stopAudioCapture]);
 
   useEffect(() => {
-    const unsubscribe = window.shiyinDesktop?.onCommand((command) => {
-      if (command === "stop-recording") stopRecording();
-      if (command === "open-settings") void openSettingsDialog();
-    });
+    const unsubscribe = window.shiyinDesktop?.onCommand((command) => commandHandlerRef.current(command));
     return () => unsubscribe?.();
-  }, [openSettingsDialog, stopRecording]);
+  }, []);
 
   const filteredSegments = useMemo(() => {
     const segments = meeting?.segments || [];
@@ -1192,9 +1205,22 @@ export default function Home() {
   }
 
   async function toggleRecording() {
-    if (recording) await stopRecording();
-    else await startRecording();
+    if (recordingRef.current) {
+      await stopRecording();
+      return;
+    }
+    if (processing) {
+      setNotice("上一场会议仍在处理中，请完成后再开始新的听记");
+      return;
+    }
+    await startRecording();
   }
+
+  commandHandlerRef.current = (command) => {
+    if (command === "stop-recording") void stopRecording();
+    if (command === "open-settings") void openSettingsDialog();
+    if (command === "toggle-recording") void toggleRecording();
+  };
 
   function beginRenameSpeaker(speaker: Speaker) {
     setRenamingSpeaker(speaker);
@@ -1912,6 +1938,13 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
           </span>
           <ArrowRight size={15} />
         </button>
+        {globalShortcutStatus && (
+          <div className={`shortcut-hint ${globalShortcutStatus.openWindow && globalShortcutStatus.toggleRecording ? "" : "warning"}`}>
+            <span><b>{globalShortcutStatus.openLabel}</b><small>打开应用</small></span>
+            <span><b>{globalShortcutStatus.recordingLabel}</b><small>开始 / 结束</small></span>
+            <em>{globalShortcutStatus.openWindow && globalShortcutStatus.toggleRecording ? "桌面全局快捷键" : "快捷键被其他应用占用"}</em>
+          </div>
+        )}
         <div className="nav-label">会议记录</div>
         <div className="meeting-list">
           {meetings.map((item) => (
