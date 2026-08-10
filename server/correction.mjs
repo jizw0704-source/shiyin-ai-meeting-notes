@@ -136,6 +136,7 @@ export async function correctMeetingSpeakers({ meetingId, dataRoot, storage, spe
 
   const clusters = buildClusters(items, 0.64, normalizeMaxSpeakers(maxSpeakers));
   const usedSpeakerIds = new Set();
+  const usedProfileIds = new Set();
   const clusterSpeaker = new Map();
   for (const cluster of clusters) {
     const counts = new Map();
@@ -145,6 +146,19 @@ export async function correctMeetingSpeakers({ meetingId, dataRoot, storage, spe
     const candidates = [...counts.entries()].sort((a, b) => b[1] - a[1]);
     let speaker = candidates.map(([id]) => storage.getSpeaker(id)).find((value) => value && !usedSpeakerIds.has(value.id));
     if (!speaker) speaker = storage.createCandidateSpeaker(meetingId, cluster.centroid);
+    storage.updateSpeakerCentroid(speaker.id, cluster.centroid, cluster.items.length);
+    speaker = storage.getSpeaker(speaker.id);
+    if (!speaker.manuallyNamed) {
+      const profile = storage.matchSpeakerProfile(cluster.centroid, {
+        threshold: 0.78,
+        ambiguityMargin: 0.04,
+        excludeProfileIds: [...usedProfileIds],
+      });
+      speaker = profile
+        ? storage.applySpeakerProfile(speaker.id, profile)
+        : storage.clearAutomaticSpeakerMatch(speaker.id);
+    }
+    if (speaker.profileId) usedProfileIds.add(speaker.profileId);
     usedSpeakerIds.add(speaker.id);
     clusterSpeaker.set(cluster.index, speaker);
   }
@@ -180,6 +194,7 @@ export async function correctMeetingSpeakers({ meetingId, dataRoot, storage, spe
     meetingId,
     clusters.map((cluster) => clusterSpeaker.get(cluster.index)?.id).filter(Boolean),
   );
+  storage.refineMeetingSpeakerProfiles(meetingId);
   onProgress(100);
   return storage.listSegments(meetingId);
 }

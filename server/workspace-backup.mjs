@@ -4,7 +4,8 @@ import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/
 import path from "node:path";
 
 const BACKUP_FORMAT = "shiyin-ai-backup";
-const BACKUP_VERSION = 1;
+const BACKUP_VERSION = 2;
+const SUPPORTED_BACKUP_VERSIONS = new Set([1, BACKUP_VERSION]);
 
 function inside(root, candidate) {
   const resolvedRoot = path.resolve(root);
@@ -48,6 +49,13 @@ export async function createWorkspaceBackup({ storage, dataRoot, destinationRoot
   const files = [];
   await mkdir(temporaryPath, { recursive: false });
   try {
+    const speakerProfilesPath = path.join(temporaryPath, "speaker-profiles.json");
+    await writeFile(
+      speakerProfilesPath,
+      `${JSON.stringify(storage.exportSpeakerProfiles(), null, 2)}\n`,
+      "utf8",
+    );
+    files.push(await fileRecord(temporaryPath, speakerProfilesPath));
     for (const meeting of storage.listMeetings()) {
       const meetingDirectory = path.join(temporaryPath, "meetings", meeting.id);
       await mkdir(meetingDirectory, { recursive: true });
@@ -81,6 +89,7 @@ export async function createWorkspaceBackup({ storage, dataRoot, destinationRoot
       appVersion,
       createdAt: new Date().toISOString(),
       meetingCount: meetings.length,
+      speakerProfilesPath: path.relative(temporaryPath, speakerProfilesPath).split(path.sep).join("/"),
       meetings,
       files,
     };
@@ -99,7 +108,7 @@ async function loadAndValidateManifest(backupPath) {
   const raw = await readFile(path.join(root, "manifest.json"), "utf8")
     .catch(() => { throw new Error("所选文件夹不是有效的拾音 AI 备份"); });
   const manifest = JSON.parse(raw);
-  if (manifest.format !== BACKUP_FORMAT || manifest.formatVersion !== BACKUP_VERSION) {
+  if (manifest.format !== BACKUP_FORMAT || !SUPPORTED_BACKUP_VERSIONS.has(manifest.formatVersion)) {
     throw new Error("备份格式不受支持或版本不兼容");
   }
   if (!Array.isArray(manifest.meetings) || !Array.isArray(manifest.files)) {
@@ -120,6 +129,13 @@ async function loadAndValidateManifest(backupPath) {
 
 export async function restoreWorkspaceBackup({ storage, dataRoot, backupPath }) {
   const { manifest, validatedFiles } = await loadAndValidateManifest(backupPath);
+  if (manifest.speakerProfilesPath) {
+    const profilesFile = validatedFiles.get(manifest.speakerProfilesPath);
+    if (!profilesFile) throw new Error("备份缺少本机发言人声纹库");
+    const profiles = JSON.parse(await readFile(profilesFile, "utf8"));
+    if (!Array.isArray(profiles)) throw new Error("备份中的发言人声纹库格式无效");
+    storage.importSpeakerProfiles(profiles);
+  }
   let importedMeetings = 0;
   let skippedMeetings = 0;
   for (const entry of manifest.meetings) {

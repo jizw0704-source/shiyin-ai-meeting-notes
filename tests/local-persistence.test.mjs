@@ -168,6 +168,71 @@ test("persists meetings, speakers, timestamps, pauses, and manual names", () => 
     assert.equal(saved.liveSummary.throughSeq, 1);
     assert.equal(renamed.displayName, "王工");
     assert.equal(renamed.manuallyNamed, true);
+    assert.equal(renamed.autoMatched, false);
+    assert.ok(renamed.profileId);
+    assert.equal(storage.listSpeakerProfiles().length, 1);
+  } finally {
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("remembers manually named voices and conservatively matches them across meetings", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-speaker-profiles-"));
+  const storage = new MeetingStorage(root);
+  try {
+    const firstMeeting = storage.createMeeting("第一次会议");
+    const wang = storage.ensureSpeaker(firstMeeting.id, "发言人1", new Float32Array([1, 0, 0]));
+    const namedWang = storage.renameSpeaker(wang.id, "王工");
+    assert.ok(namedWang.profileId);
+
+    const confident = storage.matchSpeakerProfile(new Float32Array([0.99, 0.08, 0]), {
+      threshold: 0.8,
+      ambiguityMargin: 0.04,
+    });
+    assert.equal(confident.displayName, "王工");
+
+    const secondMeeting = storage.createMeeting("第二次会议");
+    const matched = storage.ensureSpeaker(
+      secondMeeting.id,
+      "发言人1",
+      new Float32Array([0.99, 0.08, 0]),
+      { profile: confident },
+    );
+    assert.equal(matched.displayName, "王工");
+    assert.equal(matched.autoMatched, true);
+    assert.equal(matched.manuallyNamed, false);
+
+    const li = storage.ensureSpeaker(firstMeeting.id, "发言人2", new Float32Array([0.99, 0.1, 0]));
+    storage.renameSpeaker(li.id, "李工");
+    const ambiguous = storage.matchSpeakerProfile(new Float32Array([1, 0.04, 0]), {
+      threshold: 0.8,
+      ambiguityMargin: 0.04,
+    });
+    assert.equal(ambiguous, null);
+  } finally {
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("builds the local voice library from names saved by an older app version", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-speaker-bootstrap-"));
+  let storage = new MeetingStorage(root);
+  try {
+    const meeting = storage.createMeeting("旧版会议");
+    const speaker = storage.ensureSpeaker(meeting.id, "发言人1", new Float32Array([1, 0, 0]));
+    storage.db.prepare(`
+      UPDATE speakers SET display_name = '王工', manually_named = 1, profile_id = NULL WHERE id = ?
+    `).run(speaker.id);
+    storage.db.prepare("DELETE FROM speaker_profiles").run();
+    storage.close();
+
+    storage = new MeetingStorage(root);
+    const migrated = storage.getSpeaker(speaker.id);
+    assert.equal(migrated.displayName, "王工");
+    assert.ok(migrated.profileId);
+    assert.equal(storage.listSpeakerProfiles()[0].displayName, "王工");
   } finally {
     storage.close();
     rmSync(root, { recursive: true, force: true });
@@ -321,6 +386,9 @@ test("corrects speakers from the finalized WAV after temporary PCM is removed", 
   const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-wav-correction-"));
   const storage = new MeetingStorage(root);
   try {
+    const previousMeeting = storage.createMeeting("已命名会议");
+    const knownSpeaker = storage.ensureSpeaker(previousMeeting.id, "发言人1", new Float32Array([1, 0, 0]));
+    storage.renameSpeaker(knownSpeaker.id, "王工");
     const meeting = storage.createMeeting("WAV 校正测试");
     const audio = new AudioSession(root, meeting.id);
     audio.append(Buffer.alloc(64000, 3));
@@ -345,6 +413,9 @@ test("corrects speakers from the finalized WAV after temporary PCM is removed", 
     assert.equal(existsSync(path.join(root, "meetings", meeting.id, "audio.pcm.tmp")), false);
     assert.equal(corrected.length, 1);
     assert.ok(corrected[0].speakerId);
+    const correctedSpeaker = storage.getSpeaker(corrected[0].speakerId);
+    assert.equal(correctedSpeaker.displayName, "王工");
+    assert.equal(correctedSpeaker.autoMatched, true);
   } finally {
     storage.close();
     rmSync(root, { recursive: true, force: true });
@@ -408,11 +479,14 @@ test("creates a verified workspace backup and safely merges it into another work
   const targetStorage = new MeetingStorage(targetRoot);
   try {
     const meeting = sourceStorage.createMeeting("需要备份的会议", { maxSpeakers: 20 });
+    const backedUpSpeaker = sourceStorage.ensureSpeaker(meeting.id, "发言人1", new Float32Array([1, 0, 0]));
+    sourceStorage.renameSpeaker(backedUpSpeaker.id, "王工");
     sourceStorage.addSegment(meeting.id, {
       seq: 0,
       startMs: 0,
       endMs: 1000,
       text: "备份需要保留这段文字。",
+      speakerId: backedUpSpeaker.id,
       source: "local-realtime",
     });
     sourceStorage.saveSummary(meeting.id, {
@@ -440,6 +514,7 @@ test("creates a verified workspace backup and safely merges it into another work
     });
     assert.equal(backup.meetingCount, 1);
     assert.equal(existsSync(path.join(backup.path, "manifest.json")), true);
+    assert.equal(existsSync(path.join(backup.path, "speaker-profiles.json")), true);
 
     const restored = await restoreWorkspaceBackup({
       storage: targetStorage,
@@ -454,6 +529,8 @@ test("creates a verified workspace backup and safely merges it into another work
     assert.equal(restoredMeeting.summary.overview, "备份总结");
     assert.equal(restoredMeeting.maxSpeakers, 20);
     assert.equal(restoredMeeting.transcriptVersions.length, 1);
+    assert.equal(restoredMeeting.speakers[0].displayName, "王工");
+    assert.equal(targetStorage.listSpeakerProfiles()[0].displayName, "王工");
     assert.equal(existsSync(path.join(targetRoot, "meetings", meeting.id, "audio.wav")), true);
 
     const duplicate = await restoreWorkspaceBackup({
@@ -463,6 +540,8 @@ test("creates a verified workspace backup and safely merges it into another work
     });
     assert.equal(duplicate.importedMeetings, 0);
     assert.equal(duplicate.skippedMeetings, 1);
+    assert.equal(targetStorage.listSpeakerProfiles().length, 1);
+    assert.equal(targetStorage.listSpeakerProfiles()[0].sampleCount, 1);
   } finally {
     sourceStorage.close();
     targetStorage.close();

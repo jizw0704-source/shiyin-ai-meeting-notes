@@ -95,6 +95,10 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(page, /查找与全局替换/);
   assert.match(page, /过滤“嗯、啊、呃”/);
   assert.match(page, /原始记录/);
+  assert.match(page, /记录排列顺序/);
+  assert.match(page, /shiyin\.transcriptOrder/);
+  assert.match(page, /声纹匹配/);
+  assert.match(page, /本机发言人声纹库/);
   assert.match(page, /撤销上次替换/);
   assert.match(page, /重命名会议/);
   assert.match(page, /setSelectedId\(\(current\) => preferredId \|\| current \|\| null\)/);

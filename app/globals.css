@@ -1096,6 +1096,7 @@ button:active:not(:disabled) { transform:scale(.97); }
   font-weight:750;
 }
 .transcript-mode-toggle button.active { color:#3e4e9b; background:#fff; box-shadow:0 3px 10px rgba(47,59,89,.1); }
+.transcript-order-toggle { margin-right:2px; }
 .filler-filter-toggle { display:flex; align-items:center; gap:6px; font-size:9px; font-weight:650; }
 .filler-filter-toggle input { width:14px; height:14px; accent-color:#586cdd; }
 .replace-trigger,.undo-replace {
@@ -1111,6 +1112,7 @@ button:active:not(:disabled) { transform:scale(.97); }
 .replace-trigger:disabled,.undo-replace:disabled { opacity:.45; }
 .undo-replace { color:#5b57ba; }
 .summary-stale-badge { margin-left:auto; color:#a46a18; font-size:9px; font-weight:700; }
+.speaker em.speaker-auto-match { color:#4b65ad; background:#edf1ff; border-color:rgba(75,101,173,.13); }
 .summary-stale-banner {
   position:sticky;
   top:0;
@@ -1625,7 +1627,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,audio:focus-visibl
   .top-actions button{color:#d9dfeb;background:rgba(255,255,255,.075);border-color:rgba(255,255,255,.1);box-shadow:inset 0 1px 0 rgba(255,255,255,.06)}
   .top-actions button:hover:not(:disabled){background:rgba(255,255,255,.12)}
   .tabs{background:rgba(255,255,255,.025)}.tabs>button{color:#949daf}.tabs>button.active{color:#eef2f8;background:rgba(255,255,255,.1);box-shadow:inset 0 1px 0 rgba(255,255,255,.07)}.search{color:#9da7b7;background:rgba(255,255,255,.055);border-color:rgba(255,255,255,.09);box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}.search input{color:#e8ecf3;background:transparent}
-  .utterance{border-color:rgba(255,255,255,.07)}.utterance p,.speaker button,.insight-section>p{color:#c5ccd8}.utterance:hover{background:rgba(255,255,255,.035)}.pause-marker:before,.pause-marker:after{background:rgba(255,255,255,.08)}.pause-marker span{color:#98a2b2;background:#222936}
+  .utterance{border-color:rgba(255,255,255,.07)}.utterance p,.speaker button,.insight-section>p{color:#c5ccd8}.utterance:hover{background:rgba(255,255,255,.035)}.pause-marker:before,.pause-marker:after{background:rgba(255,255,255,.08)}.pause-marker span{color:#98a2b2;background:#222936}.speaker em.speaker-auto-match{color:#aebff4;background:rgba(89,115,198,.14);border-color:rgba(118,143,224,.16)}
   .metric-row,.tags span,.open-summary,.action-row,.report-stats{color:#d7dce6;background:rgba(255,255,255,.055);border-color:rgba(255,255,255,.08)}
   .metric-row div,.insight-section,.action-row{border-color:rgba(255,255,255,.08)}
   .report-overview,.report-section p,.report-section li{color:#bac2d0}.report-section{border-color:rgba(255,255,255,.08)}

@@ -34,6 +34,7 @@ type ReportStyle = "detailed" | "visual";
 type AudioSourceMode = "microphone" | "system" | "mixed";
 type SpeakerLimit = 6 | 12 | 20;
 type TranscriptMode = "organized" | "original";
+type TranscriptOrder = "ascending" | "descending";
 type AudioCaptureCapabilities = {
   platform: string;
   macOSVersion: string;
@@ -97,6 +98,8 @@ type Speaker = {
   displayName: string;
   color: string;
   manuallyNamed: boolean;
+  profileId: string | null;
+  autoMatched: boolean;
 };
 type Segment = {
   id: string;
@@ -433,6 +436,7 @@ export default function Home() {
   const [seconds, setSeconds] = useState(0);
   const [query, setQuery] = useState("");
   const [transcriptMode, setTranscriptMode] = useState<TranscriptMode>("organized");
+  const [transcriptOrder, setTranscriptOrder] = useState<TranscriptOrder>("ascending");
   const [replaceDialogOpen, setReplaceDialogOpen] = useState(false);
   const [replaceFind, setReplaceFind] = useState("");
   const [replaceWith, setReplaceWith] = useState("");
@@ -528,6 +532,7 @@ export default function Home() {
       const savedStyle = window.localStorage.getItem("shiyin.reportStyle");
       const savedSpeakerLimit = Number(window.localStorage.getItem("shiyin.maxSpeakers"));
       const savedObsidianAutoSave = window.localStorage.getItem("shiyin.obsidianAutoSave");
+      const savedTranscriptOrder = window.localStorage.getItem("shiyin.transcriptOrder");
       if (summaryTemplates.some((template) => template.id === savedTemplate)) {
         setDefaultSummaryTemplate(savedTemplate!);
       }
@@ -536,6 +541,7 @@ export default function Home() {
         setSpeakerLimit(savedSpeakerLimit as SpeakerLimit);
       }
       setObsidianAutoSave(savedObsidianAutoSave !== "false");
+      if (savedTranscriptOrder === "descending") setTranscriptOrder("descending");
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
@@ -800,12 +806,15 @@ export default function Home() {
 
   const filteredSegments = useMemo(() => {
     const segments = meeting?.segments || [];
-    if (!query.trim()) return segments;
-    const speakers = new Map(meeting?.speakers.map((speaker) => [speaker.id, speaker.displayName]));
-    const term = query.toLowerCase();
-    return segments.filter((segment) =>
-      `${speakers.get(segment.speakerId || "") || ""}${displayedSegmentText(segment, transcriptMode)}`.toLowerCase().includes(term));
-  }, [meeting, query, transcriptMode]);
+    let matched = segments;
+    if (query.trim()) {
+      const speakers = new Map(meeting?.speakers.map((speaker) => [speaker.id, speaker.displayName]));
+      const term = query.toLowerCase();
+      matched = segments.filter((segment) =>
+        `${speakers.get(segment.speakerId || "") || ""}${displayedSegmentText(segment, transcriptMode)}`.toLowerCase().includes(term));
+    }
+    return transcriptOrder === "descending" ? [...matched].reverse() : matched;
+  }, [meeting, query, transcriptMode, transcriptOrder]);
 
   const replacementPreview = useMemo(() => {
     if (!meeting || !replaceFind.trim()) return { count: 0, segments: [] as Array<{ segment: Segment; count: number; next: string }> };
@@ -1258,7 +1267,7 @@ export default function Home() {
       setMeeting((current) => current
         ? { ...current, speakers: current.speakers.map((item) => item.id === updated.id ? updated : item) }
         : current);
-      setNotice(`已将 ${renamingSpeaker.displayName} 重命名为 ${updated.displayName}`);
+      setNotice(`已保存 ${updated.displayName}，并更新本机发言人声纹库`);
       setRenamingSpeaker(null);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "重命名失败");
@@ -2169,6 +2178,24 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                     <button className={transcriptMode === "organized" ? "active" : ""} onClick={() => setTranscriptMode("organized")}>整理稿</button>
                     <button className={transcriptMode === "original" ? "active" : ""} onClick={() => setTranscriptMode("original")}>原始记录</button>
                   </div>
+                  <div className="transcript-mode-toggle transcript-order-toggle" aria-label="记录排列顺序">
+                    <button
+                      className={transcriptOrder === "ascending" ? "active" : ""}
+                      aria-pressed={transcriptOrder === "ascending"}
+                      onClick={() => {
+                        setTranscriptOrder("ascending");
+                        window.localStorage.setItem("shiyin.transcriptOrder", "ascending");
+                      }}
+                    >正序</button>
+                    <button
+                      className={transcriptOrder === "descending" ? "active" : ""}
+                      aria-pressed={transcriptOrder === "descending"}
+                      onClick={() => {
+                        setTranscriptOrder("descending");
+                        window.localStorage.setItem("shiyin.transcriptOrder", "descending");
+                      }}
+                    >倒序</button>
+                  </div>
                   <label className="filler-filter-toggle">
                     <input
                       type="checkbox"
@@ -2188,8 +2215,12 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                 {filteredSegments.map((segment) => {
                   const speaker = segment.speakerId ? speakerMap.get(segment.speakerId) : null;
                   const name = speaker?.displayName || "待确认发言人";
+                  const pauseMarker = (segment.pauseAfterMs || 0) >= 1000
+                    ? <div className="pause-marker"><span>停顿 {(segment.pauseAfterMs! / 1000).toFixed(1)} 秒</span></div>
+                    : null;
                   return (
                     <Fragment key={segment.id}>
+                      {transcriptOrder === "descending" && pauseMarker}
                       <div
                         id={`segment-${segment.seq}`}
                         className={`utterance ${highlightedSeq === segment.seq ? "highlighted" : ""}`}
@@ -2208,13 +2239,12 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                               <Waveform size={12} />{formatClock(segment.startMs)}–{formatClock(segment.endMs)}
                             </button>
                             {segment.source === "corrected" && <em>已校正</em>}
+                            {speaker?.autoMatched && <em className="speaker-auto-match">声纹匹配</em>}
                           </div>
                           <p>{displayedSegmentText(segment, transcriptMode)}</p>
                         </div>
                       </div>
-                      {(segment.pauseAfterMs || 0) >= 1000 && (
-                        <div className="pause-marker"><span>停顿 {(segment.pauseAfterMs! / 1000).toFixed(1)} 秒</span></div>
-                      )}
+                      {transcriptOrder === "ascending" && pauseMarker}
                     </Fragment>
                   );
                 })}
@@ -2733,7 +2763,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                 {(meeting?.speakers || []).map((speaker) => (
                   <button key={speaker.id} onClick={() => beginRenameSpeaker(speaker)}>
                     <i className={`avatar ${speaker.color}`}>{speaker.displayName.slice(0, 1)}</i>
-                    <span>{speaker.displayName}<small>{speaker.manuallyNamed ? "已命名" : "点击重命名"}</small></span>
+                    <span>{speaker.displayName}<small>{speaker.manuallyNamed ? "已确认并记住" : speaker.autoMatched ? "本机声纹自动匹配" : "点击重命名"}</small></span>
                   </button>
                 ))}
                 {!meeting?.speakers.length && <p>有效语音出现后自动编号</p>}
@@ -2795,7 +2825,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                 <div className="storage-backup-card">
                   <div>
                     <b>完整数据备份</b>
-                    <span>保存录音、逐字稿、总结、发言人与转写版本；不包含 MiniMax 密钥。</span>
+                    <span>保存录音、逐字稿、总结、发言人声纹库与转写版本；不包含 MiniMax 密钥。</span>
                   </div>
                   <div>
                     <button type="button" onClick={() => void createBackup()} disabled={Boolean(backupBusy) || recording || processing}>
@@ -3093,7 +3123,10 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
           >
             <div className="rename-dialog-heading">
               <span><UsersThree size={20} weight="duotone" /></span>
-              <div><h2 id="rename-speaker-title">修改发言人姓名</h2><p>同一发言人的全部记录会一起更新。</p></div>
+              <div>
+                <h2 id="rename-speaker-title">修改发言人姓名</h2>
+                <p>{renamingSpeaker.autoMatched ? "当前姓名由本机声纹库匹配；如有误可直接修改。" : "保存后会记住声纹，下次会议可自动匹配。"}</p>
+              </div>
             </div>
             <label htmlFor="speaker-name">发言人姓名</label>
             <input

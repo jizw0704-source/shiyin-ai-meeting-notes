@@ -17,9 +17,29 @@ const speakerPalette = [
   "pink", "brown", "red", "purple", "aqua", "gold", "navy", "olive", "coral", "slate",
 ];
 
+function normalizeVoiceVector(vector) {
+  if (!vector || !Array.from(vector).length) return null;
+  const values = Array.from(vector, Number);
+  if (!values.every(Number.isFinite)) return null;
+  const magnitude = Math.sqrt(values.reduce((sum, value) => sum + value * value, 0));
+  if (!magnitude) return null;
+  return values.map((value) => value / magnitude);
+}
+
+function voiceSimilarity(left, right) {
+  if (!left || !right || left.length !== right.length) return -1;
+  return left.reduce((sum, value, index) => sum + value * right[index], 0);
+}
+
+function blendVoiceVectors(current, incoming, incomingWeight) {
+  return normalizeVoiceVector(current.map((value, index) =>
+    value * (1 - incomingWeight) + incoming[index] * incomingWeight));
+}
+
 export class MeetingStorage {
   constructor(dataRoot = path.resolve("data")) {
     this.dataRoot = dataRoot;
+    this.profileImportAliases = new Map();
     mkdirSync(dataRoot, { recursive: true });
     this.db = new DatabaseSync(path.join(dataRoot, "shiyin.sqlite"));
     this.db.exec(`
@@ -54,7 +74,17 @@ export class MeetingStorage {
         centroid_json TEXT,
         sample_count INTEGER NOT NULL DEFAULT 0,
         manually_named INTEGER NOT NULL DEFAULT 0,
+        profile_id TEXT,
+        auto_matched INTEGER NOT NULL DEFAULT 0,
         UNIQUE(meeting_id, label)
+      );
+      CREATE TABLE IF NOT EXISTS speaker_profiles (
+        id TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        centroid_json TEXT NOT NULL,
+        sample_count INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS segments (
         id TEXT PRIMARY KEY,
@@ -104,6 +134,7 @@ export class MeetingStorage {
       );
       CREATE INDEX IF NOT EXISTS idx_segments_meeting_seq ON segments(meeting_id, seq);
       CREATE INDEX IF NOT EXISTS idx_speakers_meeting ON speakers(meeting_id);
+      CREATE INDEX IF NOT EXISTS idx_speaker_profiles_name ON speaker_profiles(display_name);
       CREATE INDEX IF NOT EXISTS idx_jobs_meeting ON jobs(meeting_id);
       CREATE INDEX IF NOT EXISTS idx_transcript_edits_meeting ON transcript_edits(meeting_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_transcript_versions_meeting ON transcript_versions(meeting_id, version_no);
@@ -141,6 +172,16 @@ export class MeetingStorage {
     if (!segmentColumns.has("edited_text")) {
       this.db.exec("ALTER TABLE segments ADD COLUMN edited_text TEXT");
     }
+    const speakerColumns = new Set(
+      this.db.prepare("PRAGMA table_info(speakers)").all().map((column) => column.name),
+    );
+    if (!speakerColumns.has("profile_id")) {
+      this.db.exec("ALTER TABLE speakers ADD COLUMN profile_id TEXT");
+    }
+    if (!speakerColumns.has("auto_matched")) {
+      this.db.exec("ALTER TABLE speakers ADD COLUMN auto_matched INTEGER NOT NULL DEFAULT 0");
+    }
+    this.bootstrapSpeakerProfiles();
   }
 
   createMeeting(title = "未命名会议", options = {}) {
@@ -416,8 +457,8 @@ export class MeetingStorage {
       for (const speaker of snapshot.speakers || []) {
         this.db.prepare(`
           INSERT INTO speakers
-          (id, meeting_id, label, display_name, color, centroid_json, sample_count, manually_named)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          (id, meeting_id, label, display_name, color, centroid_json, sample_count, manually_named, profile_id, auto_matched)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           speaker.id,
           meetingId,
@@ -427,6 +468,8 @@ export class MeetingStorage {
           speaker.centroid ? JSON.stringify(speaker.centroid) : null,
           speaker.sampleCount || 0,
           speaker.manuallyNamed ? 1 : 0,
+          speaker.profileId || null,
+          speaker.autoMatched ? 1 : 0,
         );
       }
       for (const segment of snapshot.segments || []) {
@@ -540,31 +583,48 @@ export class MeetingStorage {
     return { meeting: this.getMeeting(meetingId), restored: changes.length };
   }
 
-  ensureSpeaker(meetingId, label, centroid = null) {
+  ensureSpeaker(meetingId, label, centroid = null, options = {}) {
     const existing = this.db.prepare("SELECT * FROM speakers WHERE meeting_id = ? AND label = ?").get(meetingId, label);
     if (existing) return this.hydrateSpeaker(existing);
     const number = Number(label.match(/\d+/)?.[0] || 1);
     const id = randomUUID();
+    const profile = options.profile || null;
     this.db.prepare(`
-      INSERT INTO speakers (id, meeting_id, label, display_name, color, centroid_json, sample_count)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(id, meetingId, label, label, speakerPalette[(number - 1) % speakerPalette.length], centroid ? JSON.stringify(Array.from(centroid)) : null, centroid ? 1 : 0);
+      INSERT INTO speakers
+      (id, meeting_id, label, display_name, color, centroid_json, sample_count, profile_id, auto_matched)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      meetingId,
+      label,
+      profile?.displayName || label,
+      speakerPalette[(number - 1) % speakerPalette.length],
+      centroid ? JSON.stringify(Array.from(centroid)) : null,
+      centroid ? 1 : 0,
+      profile?.id || null,
+      profile ? 1 : 0,
+    );
     return this.getSpeaker(id);
   }
 
-  createCandidateSpeaker(meetingId, centroid = null) {
+  createCandidateSpeaker(meetingId, centroid = null, options = {}) {
     const id = randomUUID();
     const count = this.listSpeakers(meetingId).length;
+    const profile = options.profile || null;
     this.db.prepare(`
-      INSERT INTO speakers (id, meeting_id, label, display_name, color, centroid_json, sample_count)
-      VALUES (?, ?, ?, '待编号发言人', ?, ?, ?)
+      INSERT INTO speakers
+      (id, meeting_id, label, display_name, color, centroid_json, sample_count, profile_id, auto_matched)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       meetingId,
       `__candidate__${id}`,
+      profile?.displayName || "待编号发言人",
       speakerPalette[count % speakerPalette.length],
       centroid ? JSON.stringify(Array.from(centroid)) : null,
       centroid ? 1 : 0,
+      profile?.id || null,
+      profile ? 1 : 0,
     );
     return this.getSpeaker(id);
   }
@@ -585,7 +645,7 @@ export class MeetingStorage {
         this.db.prepare(`
           UPDATE speakers
           SET label = ?,
-              display_name = CASE WHEN manually_named = 0 THEN ? ELSE display_name END,
+              display_name = CASE WHEN manually_named = 0 AND auto_matched = 0 THEN ? ELSE display_name END,
               color = ?
           WHERE id = ?
         `).run(label, label, speakerPalette[index % speakerPalette.length], speakerId);
@@ -618,19 +678,180 @@ export class MeetingStorage {
       centroid: row.centroid_json ? JSON.parse(row.centroid_json) : null,
       sampleCount: row.sample_count,
       manuallyNamed: Boolean(row.manually_named),
+      profileId: row.profile_id || null,
+      autoMatched: Boolean(row.auto_matched),
     };
   }
 
   updateSpeakerCentroid(id, centroid, sampleCount) {
     this.db.prepare("UPDATE speakers SET centroid_json = ?, sample_count = ? WHERE id = ?")
       .run(JSON.stringify(Array.from(centroid)), sampleCount, id);
+    const speaker = this.getSpeaker(id);
+    if (speaker?.manuallyNamed && !speaker.profileId) this.learnSpeakerProfile(id);
   }
 
   renameSpeaker(id, displayName) {
     const clean = String(displayName || "").trim().slice(0, 40);
     if (!clean) throw new Error("发言人姓名不能为空");
-    this.db.prepare("UPDATE speakers SET display_name = ?, manually_named = 1 WHERE id = ?").run(clean, id);
+    const existing = this.getSpeaker(id);
+    if (!existing) throw new Error("发言人不存在");
+    this.db.prepare(`
+      UPDATE speakers
+      SET display_name = ?, manually_named = 1, auto_matched = 0,
+          profile_id = CASE WHEN display_name = ? THEN profile_id ELSE NULL END
+      WHERE id = ?
+    `).run(clean, clean, id);
+    this.learnSpeakerProfile(id);
     return this.getSpeaker(id);
+  }
+
+  listSpeakerProfiles() {
+    return this.db.prepare("SELECT * FROM speaker_profiles ORDER BY updated_at DESC").all()
+      .map((row) => this.hydrateSpeakerProfile(row));
+  }
+
+  getSpeakerProfile(id) {
+    const row = this.db.prepare("SELECT * FROM speaker_profiles WHERE id = ?").get(id);
+    return row ? this.hydrateSpeakerProfile(row) : null;
+  }
+
+  hydrateSpeakerProfile(row) {
+    return {
+      id: row.id,
+      displayName: row.display_name,
+      centroid: JSON.parse(row.centroid_json),
+      sampleCount: row.sample_count,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  matchSpeakerProfile(centroid, options = {}) {
+    const vector = normalizeVoiceVector(centroid);
+    if (!vector) return null;
+    const excluded = new Set(options.excludeProfileIds || []);
+    const matches = this.listSpeakerProfiles()
+      .filter((profile) => !excluded.has(profile.id))
+      .map((profile) => ({ ...profile, score: voiceSimilarity(vector, profile.centroid) }))
+      .filter((profile) => profile.score >= -1)
+      .sort((left, right) => right.score - left.score);
+    const best = matches[0];
+    if (!best || best.score < (options.threshold ?? 0.78)) return null;
+    const runnerUp = matches[1];
+    if (runnerUp && best.score - runnerUp.score < (options.ambiguityMargin ?? 0.04)) return null;
+    return best;
+  }
+
+  applySpeakerProfile(speakerId, profile) {
+    if (!profile) return this.getSpeaker(speakerId);
+    this.db.prepare(`
+      UPDATE speakers
+      SET display_name = ?, profile_id = ?, auto_matched = 1
+      WHERE id = ? AND manually_named = 0
+    `).run(profile.displayName, profile.id, speakerId);
+    return this.getSpeaker(speakerId);
+  }
+
+  clearAutomaticSpeakerMatch(speakerId) {
+    this.db.prepare(`
+      UPDATE speakers
+      SET profile_id = NULL, auto_matched = 0,
+          display_name = CASE WHEN manually_named = 0 THEN label ELSE display_name END
+      WHERE id = ?
+    `).run(speakerId);
+    return this.getSpeaker(speakerId);
+  }
+
+  learnSpeakerProfile(speakerId, options = {}) {
+    const speaker = this.getSpeaker(speakerId);
+    const vector = normalizeVoiceVector(speaker?.centroid);
+    if (!speaker?.manuallyNamed || !vector) return speaker;
+    const sameName = this.db.prepare(`
+      SELECT * FROM speaker_profiles WHERE display_name = ? COLLATE NOCASE
+    `).all(speaker.displayName).map((row) => this.hydrateSpeakerProfile(row));
+    const linked = sameName.find((profile) => profile.id === speaker.profileId);
+    const nearest = sameName
+      .map((profile) => ({ profile, score: voiceSimilarity(vector, profile.centroid) }))
+      .sort((left, right) => right.score - left.score)[0];
+    const matched = linked || (nearest?.score >= 0.78 ? nearest.profile : null);
+    const now = new Date().toISOString();
+    let profile;
+    if (matched) {
+      const refining = matched.id === speaker.profileId || options.refine;
+      const count = refining ? matched.sampleCount : matched.sampleCount + 1;
+      const weight = refining ? 0.2 : Math.min(0.35, 1 / count);
+      const blended = blendVoiceVectors(matched.centroid, vector, weight) || vector;
+      this.db.prepare(`
+        UPDATE speaker_profiles
+        SET centroid_json = ?, sample_count = ?, updated_at = ? WHERE id = ?
+      `).run(JSON.stringify(blended), count, now, matched.id);
+      profile = this.getSpeakerProfile(matched.id);
+    } else {
+      const id = randomUUID();
+      this.db.prepare(`
+        INSERT INTO speaker_profiles
+        (id, display_name, centroid_json, sample_count, created_at, updated_at)
+        VALUES (?, ?, ?, 1, ?, ?)
+      `).run(id, speaker.displayName, JSON.stringify(vector), now, now);
+      profile = this.getSpeakerProfile(id);
+    }
+    this.db.prepare("UPDATE speakers SET profile_id = ? WHERE id = ?").run(profile.id, speakerId);
+    return this.getSpeaker(speakerId);
+  }
+
+  refineMeetingSpeakerProfiles(meetingId) {
+    for (const speaker of this.listSpeakers(meetingId)) {
+      if (speaker.manuallyNamed && speaker.centroid) this.learnSpeakerProfile(speaker.id, { refine: true });
+    }
+  }
+
+  bootstrapSpeakerProfiles() {
+    const rows = this.db.prepare(`
+      SELECT id FROM speakers
+      WHERE manually_named = 1 AND centroid_json IS NOT NULL AND profile_id IS NULL
+    `).all();
+    for (const row of rows) this.learnSpeakerProfile(row.id);
+  }
+
+  exportSpeakerProfiles() {
+    return this.listSpeakerProfiles();
+  }
+
+  importSpeakerProfiles(profiles = []) {
+    for (const incoming of profiles) {
+      const vector = normalizeVoiceVector(incoming?.centroid);
+      const displayName = String(incoming?.displayName || "").trim().slice(0, 40);
+      if (!vector || !displayName) continue;
+      const existingById = incoming.id ? this.getSpeakerProfile(incoming.id) : null;
+      const sameName = this.db.prepare(`
+        SELECT * FROM speaker_profiles WHERE display_name = ? COLLATE NOCASE
+      `).all(displayName).map((row) => this.hydrateSpeakerProfile(row));
+      const nearest = sameName
+        .map((profile) => ({ profile, score: voiceSimilarity(vector, profile.centroid) }))
+        .sort((left, right) => right.score - left.score)[0];
+      const existing = existingById || (nearest?.score >= 0.78 ? nearest.profile : null);
+      const now = new Date().toISOString();
+      if (existing) {
+        if (incoming.id) this.profileImportAliases.set(incoming.id, existing.id);
+      } else {
+        const requestedId = String(incoming.id || "");
+        const id = requestedId && !this.getSpeakerProfile(requestedId) ? requestedId : randomUUID();
+        this.db.prepare(`
+          INSERT INTO speaker_profiles
+          (id, display_name, centroid_json, sample_count, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(
+          id,
+          displayName,
+          JSON.stringify(vector),
+          Math.max(1, Number(incoming.sampleCount) || 1),
+          incoming.createdAt || now,
+          incoming.updatedAt || now,
+        );
+        if (incoming.id) this.profileImportAliases.set(incoming.id, id);
+      }
+    }
+    return this.listSpeakerProfiles();
   }
 
   createJob(meetingId, kind) {
@@ -729,10 +950,11 @@ export class MeetingStorage {
         normalizeMaxSpeakers(snapshot.maxSpeakers),
       );
       for (const speaker of snapshot.speakers || []) {
+        const profileId = this.profileImportAliases.get(speaker.profileId) || speaker.profileId || null;
         this.db.prepare(`
           INSERT INTO speakers
-          (id, meeting_id, label, display_name, color, centroid_json, sample_count, manually_named)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          (id, meeting_id, label, display_name, color, centroid_json, sample_count, manually_named, profile_id, auto_matched)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           speaker.id || randomUUID(),
           meetingId,
@@ -742,6 +964,8 @@ export class MeetingStorage {
           speaker.centroid ? JSON.stringify(speaker.centroid) : null,
           speaker.sampleCount || 0,
           speaker.manuallyNamed ? 1 : 0,
+          profileId,
+          speaker.autoMatched && profileId ? 1 : 0,
         );
       }
       for (const segment of snapshot.segments || []) {
@@ -802,6 +1026,7 @@ export class MeetingStorage {
       this.db.exec("ROLLBACK");
       throw error;
     }
+    this.bootstrapSpeakerProfiles();
     return { imported: true, meeting: this.getMeeting(meetingId) };
   }
 

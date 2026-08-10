@@ -77,7 +77,15 @@ export class SpeakerEngine {
     const maxSpeakers = normalizeMaxSpeakers(options.maxSpeakers ?? this.maxSpeakers);
     if ((!best || best.score < this.threshold) && clusters.length < maxSpeakers) {
       const label = `发言人${clusters.length + 1}`;
-      const speaker = storage.ensureSpeaker(meetingId, label, embedding);
+      const usedProfileIds = storage.listSpeakers(meetingId)
+        .map((speaker) => speaker.profileId)
+        .filter(Boolean);
+      const profile = storage.matchSpeakerProfile(embedding, {
+        threshold: 0.84,
+        ambiguityMargin: 0.05,
+        excludeProfileIds: usedProfileIds,
+      });
+      const speaker = storage.ensureSpeaker(meetingId, label, embedding, { profile });
       const cluster = { speakerId: speaker.id, label, centroid: embedding, sampleCount: 1 };
       clusters.push(cluster);
       return { speaker, score: 1, created: true };
