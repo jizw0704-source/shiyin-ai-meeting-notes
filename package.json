@@ -1,6 +1,6 @@
 {
   "name": "shiyin-minimax-meeting-notes",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "基于 Sherpa-ONNX 本地实时转写、CAM++ 本地声纹识别与 MiniMax 的 AI 会议听记工具",
   "author": "LightningFlashEvE",
   "license": "UNLICENSED",
@@ -14,11 +14,13 @@
     "desktop:start": "electron desktop/main.mjs --production",
     "desktop:pack": "npm run build && electron-builder --dir",
     "desktop:dist": "npm run build && electron-builder",
+    "desktop:dist:win": "npm run build && electron-builder --win nsis --x64",
     "dev:web": "vinext dev",
     "asr:proxy": "node server/realtime-proxy.mjs",
     "build": "vinext build",
     "start": "vinext start",
     "test": "npm run build && node --test tests/rendered-html.test.mjs tests/local-persistence.test.mjs",
+    "test:native-models": "node scripts/native-model-smoke.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern release --ignore-pattern .next",
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate"
@@ -106,7 +108,11 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "拾音 AI"
     }
   },
   "overrides": {

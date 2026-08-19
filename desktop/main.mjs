@@ -66,6 +66,8 @@ let webUrl = `http://${webHost}:${webPort}`;
 const backendUrl = "http://127.0.0.1:8788";
 const openWindowShortcut = "Control+Alt+M";
 const toggleRecordingShortcut = "Control+Alt+R";
+const openWindowShortcutLabel = process.platform === "darwin" ? "⌃⌥M" : "Ctrl+Alt+M";
+const toggleRecordingShortcutLabel = process.platform === "darwin" ? "⌃⌥R" : "Ctrl+Alt+R";
 
 let mainWindow = null;
 let tray = null;
@@ -383,8 +385,8 @@ function rebuildApplicationMenu() {
     {
       label: "文件",
       submenu: [
-        { label: "打开主窗口（⌃⌥M）", click: showWindow },
-        { label: "开始/结束听记（⌃⌥R）", click: toggleRecordingFromShortcut },
+        { label: `打开主窗口（${openWindowShortcutLabel}）`, click: showWindow },
+        { label: `开始/结束听记（${toggleRecordingShortcutLabel}）`, click: toggleRecordingFromShortcut },
         { label: "设置…", accelerator: "CmdOrCtrl+,", click: openSettings },
         { type: "separator" },
         ...(process.platform === "darwin"
@@ -623,8 +625,8 @@ ipcMain.handle("global-shortcuts:get", () => ({
   ...shortcutRegistration,
   openAccelerator: openWindowShortcut,
   recordingAccelerator: toggleRecordingShortcut,
-  openLabel: "⌃⌥M",
-  recordingLabel: "⌃⌥R",
+  openLabel: openWindowShortcutLabel,
+  recordingLabel: toggleRecordingShortcutLabel,
 }));
 ipcMain.handle("data-folder:open", async () => {
   fs.mkdirSync(dataFolderPath, { recursive: true });

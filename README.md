@@ -4,14 +4,14 @@
 
 本地模式不消耗云端语音转写时长额度。原始录音、逐字稿、发言人声纹档案和历史版本均保存在自己的电脑上；只有在生成 AI 总结时，整理后的会议文本才会发送给 MiniMax。
 
-> 当前版本：`0.5.0`<br>
-> 主要验收平台：Apple Silicon Mac<br>
+> 当前源码版本：`0.5.1`<br>
+> 主要验收平台：Apple Silicon Mac；Windows x64 已补充自动构建与安装冒烟测试<br>
 > 项目状态：个人使用与内部测试；当前仓库为 `UNLICENSED`，对外分发或商业使用前需确认授权。
 
 ## 快速导航
 
 - [核心能力](#核心能力)
-- [0.5.0 重点功能](#050-重点功能)
+- [0.5 系列重点功能](#05-系列重点功能)
 - [在 Mac 上安装和使用](#在-mac-上安装和使用)
 - [数据、备份与更新](#数据备份与更新)
 - [从源码运行](#从源码运行)
@@ -53,7 +53,7 @@ flowchart LR
 | 导出 | Markdown、网页报告、复制给 AI Agent、Obsidian 同步 | 本机 |
 | 数据保护 | 异常恢复、历史转写版本、完整备份与校验 | 本机 |
 
-## 0.5.0 重点功能
+## 0.5 系列重点功能
 
 ### 正序与倒序记录
 
@@ -145,7 +145,7 @@ flowchart LR
 
 - Node.js `22.13.0` 或更高版本；
 - npm，使用仓库中已提交的 `package-lock.json`；
-- Apple Silicon Mac 为当前主要验收平台；
+- Apple Silicon Mac 为主要日常使用平台；Windows x64 通过 GitHub Actions 构建和安装验证；
 - MiniMax API Key 仅在需要 AI 总结时使用。
 
 ### 1. 安装依赖
@@ -217,10 +217,12 @@ npm run dev
 | `npm run lint` | 运行 ESLint |
 | `npm run typecheck` | 运行 TypeScript 类型检查 |
 | `npm test` | 构建并运行全部自动化测试 |
+| `npm run test:native-models` | 实际加载并调用当前平台的本地转写与声纹模型 |
 | `npm run build` | 生成生产构建 |
 | `npm run desktop:start` | 运行已构建的桌面应用 |
 | `npm run desktop:pack` | 生成未压缩的桌面应用目录 |
 | `npm run desktop:dist` | 生成当前平台安装包 |
+| `npm run desktop:dist:win` | 在 Windows 上生成 x64 NSIS 安装包 |
 
 提交功能前至少运行：
 
@@ -242,7 +244,16 @@ Apple Silicon DMG 会生成到 `release/`。增加功能后应先更新 `package
 
 ### Windows
 
-仓库仍保留 NSIS 和系统回环音频配置，但 `0.5.0` 的主要开发与验收环境是 Apple Silicon Mac，当前 Windows 安装包尚未重新完成同等程度的回归测试。
+Windows x64 使用 NSIS 安装包。推送到 `main` 后，[Windows build and smoke test](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/windows-build.yml) 会在真实 Windows runner 上完成：
+
+- 校验并加载固定版本的 Paraformer 与 CAM++ 模型；
+- 运行 lint、类型检查和全部自动化测试；
+- 构建并静默安装 Windows 安装包；
+- 启动安装版，验证界面、本地后台、转写模型和发言人模型；
+- 覆盖安装一次，并确认用户数据在升级和卸载后仍保留；
+- 上传安装包、SHA-256 校验文件与测试结果，保留 14 天。
+
+团队测试请只下载绿色 `Success` 运行中的 artifact，并按 [Windows 版本验收清单](docs/WINDOWS_TEST_CHECKLIST.md) 验证真实麦克风、电脑声音、快捷键和长会议。安装包目前未使用商业代码签名，SmartScreen 可能显示“未知发布者”。
 
 ## 主要代码结构
 
@@ -280,7 +291,7 @@ tests/                       本地持久化和界面构建测试
 - 声纹匹配是整理辅助能力，不是身份认证或安全验证功能。
 - 当前 Paraformer 模型不提供逐词时间戳，句段时间由实时音频位置估算。
 - MiniMax 总结需要网络连接和有效额度；失败时应用会尽量保留已有实时草稿。
-- 当前 macOS 安装包未进行商业代码签名。
+- 当前 macOS 与 Windows 安装包均未进行商业代码签名。
 
 ## 来源与授权
 

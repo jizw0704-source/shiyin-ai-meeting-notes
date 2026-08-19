@@ -1,0 +1,126 @@
+name: Windows build and smoke test
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/windows-build.yml"
+      - "app/**"
+      - "desktop/**"
+      - "public/**"
+      - "scripts/**"
+      - "server/**"
+      - "tests/**"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig.json"
+      - "eslint.config.mjs"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-smoke-test:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      MODEL_ASSET_TAG: model-assets-v1
+      MODEL_ASSET_NAME: shiyin-asr-models-v1.zip
+      MODEL_ASSET_SHA256: 3b68b492c58a761418d5d7437e802867eaafb6c98e90019562e02c7c20f7e1b1
+      MODEL_ENCODER_SHA256: 81a70226a8934e6ed92aa1d4fc486b428b5398e2f2619ed4897b7294cab90e9a
+      MODEL_DECODER_SHA256: f3cca9f77bb9d93c8fcbfb63ae617b6b1ee96818df3aa3b151c40658fe38594f
+      MODEL_TOKENS_SHA256: 59aba8873a2ed1e122c25fee421e25f283b63290efbde85c1f01a853d83cb6e6
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Restore pinned ASR model cache
+        id: asr-model-cache
+        uses: actions/cache@v4
+        with:
+          path: models/asr
+          key: shiyin-asr-models-${{ env.MODEL_ASSET_SHA256 }}
+
+      - name: Download pinned local ASR models
+        if: steps.asr-model-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP $env:MODEL_ASSET_NAME
+          gh release download $env:MODEL_ASSET_TAG --repo $env:GITHUB_REPOSITORY --pattern $env:MODEL_ASSET_NAME --dir $env:RUNNER_TEMP
+          $actualHash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $env:MODEL_ASSET_SHA256) {
+            throw "ASR model bundle checksum mismatch: $actualHash"
+          }
+          Expand-Archive -Path $archive -DestinationPath (Join-Path $env:RUNNER_TEMP "shiyin-models") -Force
+          New-Item -ItemType Directory -Force -Path "models/asr" | Out-Null
+          Copy-Item -Path (Join-Path $env:RUNNER_TEMP "shiyin-models/shiyin-asr-models-v1/*") -Destination "models/asr" -Force
+
+      - name: Verify local ASR model files
+        shell: pwsh
+        run: |
+          $expected = @{
+            "encoder.int8.onnx" = $env:MODEL_ENCODER_SHA256
+            "decoder.int8.onnx" = $env:MODEL_DECODER_SHA256
+            "tokens.txt" = $env:MODEL_TOKENS_SHA256
+          }
+          foreach ($entry in $expected.GetEnumerator()) {
+            $path = Join-Path "models/asr" $entry.Key
+            if (-not (Test-Path $path)) { throw "Missing ASR model file: $($entry.Key)" }
+            $actual = (Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $entry.Value) { throw "ASR model checksum mismatch: $($entry.Key) $actual" }
+          }
+
+      - name: Run code quality checks
+        run: |
+          npm run lint
+          npm run typecheck
+          npm test
+
+      - name: Verify Windows native models
+        run: npm run test:native-models
+
+      - name: Build Windows NSIS installer
+        run: npm run desktop:dist:win
+
+      - name: Install, launch, upgrade, and uninstall smoke test
+        shell: pwsh
+        run: ./scripts/windows-installer-smoke.ps1 -ReleaseDirectory release -ExpectedVersion 0.5.1
+
+      - name: Write installer checksum
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem release -File | Where-Object { $_.Name -match "Setup.*\.exe$" } | Select-Object -First 1
+          if (-not $installer) { throw "Windows installer not found" }
+          $hash = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $($installer.Name)" | Set-Content -Path "release/SHA256SUMS-windows.txt" -Encoding ascii
+
+      - name: Upload verified Windows installer
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiyin-ai-windows-${{ github.sha }}
+          path: |
+            release/*Setup*.exe
+            release/*.blockmap
+            release/SHA256SUMS-windows.txt
+            release/windows-smoke-result.json
+          if-no-files-found: warn
+          retention-days: 14

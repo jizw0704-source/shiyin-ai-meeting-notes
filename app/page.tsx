@@ -970,6 +970,7 @@ export default function Home() {
       let microphoneStream: MediaStream | null = null;
       let systemStream: MediaStream | null = null;
       let microphoneLabel = "当前麦克风";
+      const systemAudioName = currentCaptureCapabilities?.platform === "darwin" ? "Mac 声音" : "电脑声音";
 
       if (needsMicrophone) {
         setConnectionStatus("正在连接麦克风…");
@@ -995,7 +996,9 @@ export default function Home() {
         setConnectionStatus(
           currentCaptureCapabilities?.platform === "darwin"
             ? "请在 macOS 共享面板中选择屏幕，并开启系统音频…"
-            : "请选择要共享的屏幕，并开启系统音频…",
+            : currentCaptureCapabilities?.platform === "win32"
+              ? "正在连接 Windows 电脑声音…"
+              : "请选择要共享的屏幕，并开启系统音频…",
         );
         systemStream = await navigator.mediaDevices.getDisplayMedia({
           audio: true,
@@ -1013,7 +1016,9 @@ export default function Home() {
           throw new Error(
             currentCaptureCapabilities?.platform === "darwin"
               ? "已选择屏幕，但没有收到 Mac 声音；请重新开始并在共享面板中开启“系统音频”"
-              : "没有收到电脑声音，请重新选择屏幕并开启“共享系统音频”",
+              : currentCaptureCapabilities?.platform === "win32"
+                ? "没有收到 Windows 电脑声音，请确认会议或媒体正在播放声音"
+                : "没有收到电脑声音，请重新选择屏幕并开启“共享系统音频”",
           );
         }
         captureStreams.push(systemStream);
@@ -1144,11 +1149,11 @@ export default function Home() {
           track.addEventListener("ended", () => {
             if (!recordingRef.current) return;
             if (captureMode === "system") {
-              setNotice("电脑声音共享已停止，正在结束本次听记");
+              setNotice(`${systemAudioName}共享已停止，正在结束本次听记`);
               stopRecording().catch(() => undefined);
             } else {
               setActiveDeviceLabel(microphoneLabel);
-              setSourceWarning("Mac 声音共享已停止，当前继续录制麦克风");
+              setSourceWarning(`${systemAudioName}共享已停止，当前继续录制麦克风`);
             }
           });
         }
@@ -1806,6 +1811,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
   }
 
   const isMacDesktop = audioCaptureCapabilities?.platform === "darwin";
+  const isWindowsDesktop = audioCaptureCapabilities?.platform === "win32";
   const macScreenPermission = audioCaptureCapabilities?.screenPermission || "unknown";
   const macMicrophonePermission = audioCaptureCapabilities?.microphonePermission || "unknown";
   const macScreenPermissionBlocked = ["denied", "restricted"].includes(macScreenPermission);
@@ -1919,7 +1925,9 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             </select>
             <small>
               {systemAudioAvailable
-                ? "电脑声音模式开始时会让你选择共享屏幕"
+                ? isWindowsDesktop
+                  ? "Windows 桌面版会直接采集系统播放声音"
+                  : "电脑声音模式开始时会让你选择共享屏幕"
                 : "电脑声音录制仅在桌面版可用"}
             </small>
           </label>

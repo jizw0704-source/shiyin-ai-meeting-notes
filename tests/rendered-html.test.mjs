@@ -69,6 +69,8 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(page, /createDynamicsCompressor/);
   assert.match(page, /"microphone" \| "system" \| "mixed"/);
   assert.match(page, /Mac 系统音频已就绪/);
+  assert.match(page, /Windows 桌面版会直接采集系统播放声音/);
+  assert.match(page, /正在连接 Windows 电脑声音/);
   assert.match(page, /只读取系统声音/);
   assert.match(page, /打开系统设置/);
   assert.match(page, /BlackHole/i);
@@ -148,6 +150,8 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(desktopMain, /globalShortcut\.register/);
   assert.match(desktopMain, /Control\+Alt\+M/);
   assert.match(desktopMain, /Control\+Alt\+R/);
+  assert.match(desktopMain, /Ctrl\+Alt\+M/);
+  assert.match(desktopMain, /Ctrl\+Alt\+R/);
   assert.match(desktopMain, /global-shortcuts:get/);
   assert.match(desktopMain, /globalShortcut\.unregisterAll/);
   assert.match(preload, /getAudioCaptureCapabilities/);
