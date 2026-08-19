@@ -55,7 +55,9 @@ jobs:
         run: npm ci
 
       - name: Read application version
-        run: echo "APP_VERSION=$(node -p \"require('./package.json').version\")" >> "$GITHUB_ENV"
+        run: |
+          app_version="$(node -p "require('./package.json').version")"
+          echo "APP_VERSION=$app_version" >> "$GITHUB_ENV"
 
       - name: Restore pinned ASR model cache
         id: asr-model-cache
