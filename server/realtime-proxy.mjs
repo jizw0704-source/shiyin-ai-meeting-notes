@@ -43,10 +43,14 @@ const liveSummaryStartMs = Math.max(15000, Number(process.env.LIVE_SUMMARY_START
 const liveSummaryIntervalMs = Math.max(10000, Number(process.env.LIVE_SUMMARY_INTERVAL_MS) || 20000);
 const modelPath = path.resolve(process.env.SHIYIN_MODEL_PATH || path.join("models", "speaker", "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"));
 const localAsrModelDir = path.resolve(process.env.SHIYIN_LOCAL_ASR_MODEL_DIR || path.join("models", "asr"));
+const punctuationModelPath = path.resolve(
+  process.env.SHIYIN_PUNCTUATION_MODEL_PATH || path.join("models", "punctuation", "model.int8.onnx"),
+);
 const storage = new MeetingStorage(dataRoot);
 const speakerEngine = new SpeakerEngine({ modelPath, maxSpeakers: 6, threshold: 0.62 });
 const localAsrEngine = new LocalAsrEngine({
   modelDir: localAsrModelDir,
+  punctuationModelPath,
   trailingSilenceMs: process.env.SHIYIN_LOCAL_ASR_SILENCE_MS,
   numThreads: process.env.SHIYIN_LOCAL_ASR_THREADS,
 });
@@ -314,6 +318,7 @@ const httpServer = createServer(async (request, response) => {
         asrConfigured: Boolean(asrMode),
         asrMode,
         localAsrAvailable: localAsrEngine.available,
+        punctuationModelAvailable: localAsrEngine.punctuationAvailable,
         dashScopeConfigured: Boolean(apiKey),
         miniMaxConfigured: Boolean(miniMaxApiKey),
         speakerModelAvailable: speakerEngine.available,
@@ -541,6 +546,7 @@ websocketServer.on("connection", (client, request) => {
 
   function publishFinal(result) {
     const text = String(result.text || "").trim();
+    const originalText = String(result.originalText || text).trim();
     if (!text) return;
     const startMs = Math.max(0, Number(result.startMs) || 0);
     const endMs = Math.max(startMs, Number(result.endMs) || audio.durationMs);
@@ -557,7 +563,8 @@ websocketServer.on("connection", (client, request) => {
       seq: sequence++,
       startMs,
       endMs,
-      text,
+      text: originalText,
+      editedText: text === originalText ? null : text,
       speakerId,
       source: asrMode === "local" ? "local-realtime" : "realtime",
       confidence: assignment?.score ?? null,

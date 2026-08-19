@@ -286,10 +286,14 @@ export class MeetingStorage {
   addSegment(meetingId, segment) {
     const id = randomUUID();
     const now = new Date().toISOString();
+    const originalText = String(segment.originalText ?? segment.text ?? "");
+    const editedText = Object.hasOwn(segment, "editedText")
+      ? segment.editedText
+      : (segment.originalText !== undefined && segment.text !== originalText ? segment.text : null);
     this.db.prepare(`
       INSERT INTO segments
-      (id, meeting_id, seq, start_ms, end_ms, pause_after_ms, text, speaker_id, source, confidence, words_json, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, meeting_id, seq, start_ms, end_ms, pause_after_ms, text, speaker_id, source, confidence, words_json, edited_text, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       meetingId,
@@ -297,11 +301,12 @@ export class MeetingStorage {
       segment.startMs,
       segment.endMs ?? null,
       segment.pauseAfterMs ?? null,
-      segment.text,
+      originalText,
       segment.speakerId ?? null,
       segment.source || "realtime",
       segment.confidence ?? null,
       segment.words ? JSON.stringify(segment.words) : null,
+      editedText,
       now,
     );
     return this.getSegment(id);

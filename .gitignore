@@ -49,5 +49,6 @@ next-env.d.ts
 /work/
 /data/
 /models/asr/
+/models/punctuation/
 /.openai/
 /build/icon.png

@@ -55,11 +55,13 @@ export async function transcribeHistoricalWav({ filePath, asrEngine, onProgress 
     onFinal(result) {
       const text = String(result.text || "").trim();
       if (!text) return;
+      const originalText = String(result.originalText || text).trim();
       segments.push({
         seq: segments.length,
         startMs: Math.max(0, Number(result.startMs) || 0),
         endMs: Math.min(wav.durationMs, Math.max(0, Number(result.endMs) || 0)),
-        text,
+        text: originalText,
+        editedText: text === originalText ? null : text,
         speakerId: null,
         confidence: null,
         words: result.words || [],

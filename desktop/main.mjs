@@ -61,6 +61,9 @@ const nodeEnvironment = () => ({
   SHIYIN_LOCAL_ASR_MODEL_DIR: app.isPackaged
     ? path.join(process.resourcesPath, "models", "asr")
     : path.join(sourceRoot, "models", "asr"),
+  SHIYIN_PUNCTUATION_MODEL_PATH: app.isPackaged
+    ? path.join(process.resourcesPath, "models", "punctuation", "model.int8.onnx")
+    : path.join(sourceRoot, "models", "punctuation", "model.int8.onnx"),
 });
 const webHost = process.env.SHIYIN_WEB_HOST || "127.0.0.1";
 const preferredWebPort = Number(process.env.SHIYIN_WEB_PORT || 3000);
@@ -265,6 +268,29 @@ async function resolveObsidianVault(settings) {
   const selected = validObsidianVault(selection.filePaths[0]);
   if (!selected) throw new Error("所选文件夹不是 Obsidian Vault，请选择包含 .obsidian 的文件夹");
   return selected;
+}
+
+function publicNotebookSettings() {
+  const vaultPath = validObsidianVault(readDesktopSettings().obsidianVaultPath);
+  return {
+    obsidianConfigured: Boolean(vaultPath),
+    obsidianVaultName: vaultPath ? path.basename(vaultPath) : null,
+  };
+}
+
+async function connectObsidianVault() {
+  const selection = await dialog.showOpenDialog(mainWindow, {
+    title: "连接 Obsidian AI 笔记本",
+    defaultPath: app.getPath("documents"),
+    message: "请选择包含 .obsidian 文件夹的 Obsidian Vault",
+    buttonLabel: "连接这个 Vault",
+    properties: ["openDirectory"],
+  });
+  if (selection.canceled || !selection.filePaths[0]) return { canceled: true, ...publicNotebookSettings() };
+  const vaultPath = validObsidianVault(selection.filePaths[0]);
+  if (!vaultPath) throw new Error("所选文件夹不是 Obsidian Vault，请选择包含 .obsidian 的文件夹");
+  writeDesktopSettings({ ...readDesktopSettings(), obsidianVaultPath: vaultPath });
+  return { canceled: false, ...publicNotebookSettings() };
 }
 
 async function ensureServices() {
@@ -717,6 +743,8 @@ ipcMain.handle("minimax-settings:save", (_event, payload) => {
   }, 500);
   return settings;
 });
+ipcMain.handle("notebook-settings:get", () => publicNotebookSettings());
+ipcMain.handle("notebook-settings:connect-obsidian", () => connectObsidianVault());
 
 app.on("second-instance", showWindow);
 app.on("activate", () => {

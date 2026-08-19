@@ -47,6 +47,7 @@ function Start-And-VerifyShiyin {
   if (-not $health.ok) { throw "安装版启动后，本地后台未能在 120 秒内就绪" }
   if ($health.service -ne "shiyin-ai-backend") { throw "后台身份校验失败" }
   if ($health.asrMode -ne "local" -or -not $health.localAsrAvailable) { throw "安装版未加载本地转写模型" }
+  if (-not $health.punctuationModelAvailable) { throw "安装版未加载本地标点模型" }
   if (-not $health.speakerModelAvailable) { throw "安装版未加载发言人模型" }
 
   $page = Invoke-WebRequest -Uri $health.appOrigin -UseBasicParsing -TimeoutSec 10
@@ -110,6 +111,7 @@ try {
     version = $secondRun.version
     installer = $installer.Name
     localAsrAvailable = $secondRun.health.localAsrAvailable
+    punctuationModelAvailable = $secondRun.health.punctuationModelAvailable
     speakerModelAvailable = $secondRun.health.speakerModelAvailable
     cssAssetCount = $secondRun.cssAssetCount
     scriptAssetCount = $secondRun.scriptAssetCount

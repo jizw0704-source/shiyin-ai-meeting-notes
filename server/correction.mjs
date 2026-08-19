@@ -56,6 +56,8 @@ export function splitLongSegment(segment) {
         startMs: pieceWords[0].begin_time ?? segment.startMs,
         endMs: pieceWords.at(-1).end_time ?? pieceEnd,
         text: joinTimedWords(pieceWords),
+        originalText: joinTimedWords(pieceWords),
+        editedText: null,
         words: pieceWords,
       });
       wordStart = index + 1;
@@ -69,6 +71,8 @@ export function splitLongSegment(segment) {
     startMs: remainingWords[0]?.begin_time ?? segment.startMs,
     endMs: remainingWords.at(-1)?.end_time ?? segment.endMs,
     text: joinTimedWords(remainingWords) || segment.text,
+    originalText: joinTimedWords(remainingWords) || segment.text,
+    editedText: null,
     words: remainingWords,
   });
   return pieces;
@@ -183,6 +187,8 @@ export async function correctMeetingSpeakers({ meetingId, dataRoot, storage, spe
       endMs: item.endMs,
       pauseAfterMs: next && item.endMs !== null ? Math.max(0, next.startMs - item.endMs) : null,
       text: item.text,
+      originalText: item.originalText,
+      editedText: item.editedText,
       speakerId: clusterSpeaker.get(item.clusterIndex)?.id || item.originalSpeakerId || null,
       confidence: item.speakerConfidence ?? item.confidence,
       words: item.words,

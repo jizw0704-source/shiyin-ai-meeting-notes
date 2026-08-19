@@ -19,6 +19,7 @@ import { createWorkspaceBackup, restoreWorkspaceBackup } from "../server/workspa
 import { findAvailableLocalPort } from "../server/local-port.mjs";
 import { normalizeMaxSpeakers } from "../server/speaker-settings.mjs";
 import { cleanTranscriptText, replaceTranscriptText } from "../server/transcript-cleaning.mjs";
+import { punctuateTranscriptText } from "../server/transcript-punctuation.mjs";
 import {
   normalizeMeetingSummary,
   parseJsonContent,
@@ -286,6 +287,44 @@ test("conservatively keeps affirmative fillers and supports whole-word replaceme
   );
 });
 
+test("adds conservative punctuation to local realtime transcript", () => {
+  assert.equal(
+    punctuateTranscriptText("我们先确认第一件事情然后讨论第二件事情最后再安排负责人"),
+    "我们先确认第一件事情，然后讨论第二件事情最后再安排负责人。",
+  );
+  assert.equal(punctuateTranscriptText("这个方案为什么"), "这个方案为什么？");
+  assert.equal(punctuateTranscriptText("已经有标点。"), "已经有标点。");
+  assert.equal(punctuateTranscriptText("这句话暂时以逗号结尾，"), "这句话暂时以逗号结尾。");
+  assert.equal(punctuateTranscriptText("正在识别然后继续", { final: false }), "正在识别然后继续");
+  assert.equal(
+    punctuateTranscriptText("现在可以增加一些标点符号里面有现在在做这个测试"),
+    "现在可以增加一些标点符号里面有。现在在做这个测试。",
+  );
+});
+
+test("stores organized punctuation without overwriting original ASR text", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-punctuation-storage-"));
+  const storage = new MeetingStorage(root);
+  try {
+    const meeting = storage.createMeeting("断句测试");
+    storage.addSegment(meeting.id, {
+      seq: 0,
+      startMs: 0,
+      endMs: 2000,
+      text: "我们先确认方案然后安排负责人",
+      editedText: "我们先确认方案，然后安排负责人。",
+      source: "local-realtime",
+    });
+    const [segment] = storage.getMeeting(meeting.id).segments;
+    assert.equal(segment.originalText, "我们先确认方案然后安排负责人");
+    assert.equal(segment.text, "我们先确认方案，然后安排负责人。");
+    assert.equal(segment.cleanedText, "我们先确认方案，然后安排负责人。");
+  } finally {
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("normalizes template and report settings", () => {
   assert.equal(normalizeSummaryTemplateId("brainstorm"), "brainstorm");
   assert.equal(normalizeSummaryTemplateId("unknown"), "meeting-minutes");
@@ -399,7 +438,8 @@ test("corrects speakers from the finalized WAV after temporary PCM is removed", 
       seq: 0,
       startMs: 0,
       endMs: 2000,
-      text: "这是一段用于发言人校正的语音。",
+      text: "这是一段用于发言人校正的语音",
+      editedText: "这是一段用于发言人校正的语音。",
       source: "local-realtime",
     });
 
@@ -414,6 +454,8 @@ test("corrects speakers from the finalized WAV after temporary PCM is removed", 
     assert.equal(existsSync(path.join(root, "meetings", meeting.id, "audio.pcm.tmp")), false);
     assert.equal(corrected.length, 1);
     assert.ok(corrected[0].speakerId);
+    assert.equal(corrected[0].originalText, "这是一段用于发言人校正的语音");
+    assert.equal(corrected[0].text, "这是一段用于发言人校正的语音。");
     const correctedSpeaker = storage.getSpeaker(corrected[0].speakerId);
     assert.equal(correctedSpeaker.displayName, "王工");
     assert.equal(correctedSpeaker.autoMatched, true);

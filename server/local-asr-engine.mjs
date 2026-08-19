@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
+import { normalizeTranscriptText, punctuateTranscriptText } from "./transcript-punctuation.mjs";
 
 const require = createRequire(import.meta.url);
 const SAMPLE_RATE = 16000;
@@ -15,14 +16,8 @@ function pcmToFloat32(buffer) {
   return samples;
 }
 
-function cleanText(value, final = false) {
-  const text = String(value || "").replace(/\s+/g, " ").trim();
-  if (!final || !text || /[。！？!?；;,.，]$/u.test(text)) return text;
-  return `${text}。`;
-}
-
 class LocalAsrSession {
-  constructor(recognizer, callbacks = {}) {
+  constructor(recognizer, callbacks = {}, punctuate = null) {
     this.recognizer = recognizer;
     this.stream = recognizer.createStream();
     this.onPartial = callbacks.onPartial;
@@ -32,6 +27,17 @@ class LocalAsrSession {
     this.lastPartial = "";
     this.finished = false;
     this.trailingByte = null;
+    this.punctuate = punctuate;
+  }
+
+  organizeFinalText(originalText) {
+    let text = originalText;
+    try {
+      text = this.punctuate?.(originalText) || originalText;
+    } catch {
+      text = originalText;
+    }
+    return punctuateTranscriptText(text);
   }
 
   acceptPcm(value) {
@@ -55,29 +61,43 @@ class LocalAsrSession {
     const endpoint = this.recognizer.isEndpoint(this.stream);
     if (endpoint) {
       this.appendTailPadding();
-      const text = cleanText(this.recognizer.getResult(this.stream).text || this.lastPartial, true);
+      const originalText = normalizeTranscriptText(
+        this.recognizer.getResult(this.stream).text || this.lastPartial,
+      );
+      const text = this.organizeFinalText(originalText);
       const endMs = this.currentTimeMs;
-      if (text) this.onFinal?.({ text, startMs: this.segmentStartMs, endMs, words: [] });
+      if (text) {
+        this.onFinal?.({ text, originalText, startMs: this.segmentStartMs, endMs, words: [] });
+      }
       this.recognizer.reset(this.stream);
       this.segmentStartMs = endMs;
       this.lastPartial = "";
       return;
     }
 
-    const text = cleanText(this.recognizer.getResult(this.stream).text);
-    if (text && text !== this.lastPartial) {
-      this.lastPartial = text;
-      this.onPartial?.({ text, startMs: this.segmentStartMs, words: [] });
+    const originalText = normalizeTranscriptText(this.recognizer.getResult(this.stream).text);
+    if (originalText && originalText !== this.lastPartial) {
+      this.lastPartial = originalText;
+      this.onPartial?.({
+        text: punctuateTranscriptText(originalText, { final: false }),
+        originalText,
+        startMs: this.segmentStartMs,
+        words: [],
+      });
     }
   }
 
   finish() {
     if (this.finished) return;
     this.appendTailPadding();
-    const text = cleanText(this.recognizer.getResult(this.stream).text || this.lastPartial, true);
+    const originalText = normalizeTranscriptText(
+      this.recognizer.getResult(this.stream).text || this.lastPartial,
+    );
+    const text = this.organizeFinalText(originalText);
     if (text) {
       this.onFinal?.({
         text,
+        originalText,
         startMs: this.segmentStartMs,
         endMs: this.currentTimeMs,
         words: [],
@@ -108,15 +128,20 @@ export class LocalAsrEngine {
     this.encoderPath = path.join(this.modelDir, "encoder.int8.onnx");
     this.decoderPath = path.join(this.modelDir, "decoder.int8.onnx");
     this.tokensPath = path.join(this.modelDir, "tokens.txt");
+    this.punctuationModelPath = path.resolve(
+      options.punctuationModelPath || path.join("models", "punctuation", "model.int8.onnx"),
+    );
     this.recognizer = null;
+    this.punctuation = null;
     this.error = null;
+    this.punctuationError = null;
 
     if (![this.encoderPath, this.decoderPath, this.tokensPath].every(existsSync)) return;
     try {
       const sherpa = require("sherpa-onnx-node");
       const trailingSilenceSeconds = Math.max(
         0.5,
-        Number(options.trailingSilenceMs || 2000) / 1000,
+        Number(options.trailingSilenceMs || 1200) / 1000,
       );
       this.recognizer = new sherpa.OnlineRecognizer({
         featConfig: { sampleRate: SAMPLE_RATE, featureDim: 80 },
@@ -135,8 +160,22 @@ export class LocalAsrEngine {
         enableEndpoint: true,
         rule1MinTrailingSilence: 2.4,
         rule2MinTrailingSilence: trailingSilenceSeconds,
-        rule3MinUtteranceLength: 20,
+        rule3MinUtteranceLength: 12,
       });
+      if (existsSync(this.punctuationModelPath)) {
+        try {
+          this.punctuation = new sherpa.OfflinePunctuation({
+            model: {
+              ctTransformer: this.punctuationModelPath,
+              numThreads: Math.max(1, Math.min(4, Number(options.numThreads || 2))),
+              provider: "cpu",
+              debug: false,
+            },
+          });
+        } catch (error) {
+          this.punctuationError = error;
+        }
+      }
     } catch (error) {
       this.error = error;
     }
@@ -146,10 +185,18 @@ export class LocalAsrEngine {
     return Boolean(this.recognizer);
   }
 
+  get punctuationAvailable() {
+    return Boolean(this.punctuation);
+  }
+
   createSession(callbacks = {}) {
     if (!this.recognizer) {
       throw new Error(this.error?.message || `本地转写模型不可用：${this.modelDir}`);
     }
-    return new LocalAsrSession(this.recognizer, callbacks);
+    return new LocalAsrSession(
+      this.recognizer,
+      callbacks,
+      this.punctuation ? (text) => this.punctuation.addPunct(text) : null,
+    );
   }
 }

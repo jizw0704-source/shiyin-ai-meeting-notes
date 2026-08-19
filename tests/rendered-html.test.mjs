@@ -74,6 +74,7 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(proxy, /process\.env\.DASHSCOPE_API_KEY/);
   assert.match(proxy, /SHIYIN_ASR_MODE/);
   assert.match(proxy, /localAsrAvailable/);
+  assert.match(proxy, /punctuationModelAvailable/);
   assert.match(localAsr, /sherpa-onnx-node/);
   assert.match(localAsr, /encoder\.int8\.onnx/);
   assert.match(localAsr, /decoder\.int8\.onnx/);
@@ -110,6 +111,9 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(page, /Markdown 文件/);
   assert.match(page, /复制 Markdown/);
   assert.match(page, /保存到 Obsidian/);
+  assert.match(page, /AI 笔记本/);
+  assert.match(page, /配置 MiniMax 并生成总结/);
+  assert.match(page, /connectObsidianVault/);
   assert.match(page, /结束后自动同步/);
   assert.match(page, /saveMeetingToObsidian/);
   assert.match(page, /shiyin\.obsidianAutoSave/);
@@ -167,7 +171,9 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(desktopMain, /safeStorage\.encryptString/);
   assert.match(desktopMain, /safeStorage\.decryptString/);
   assert.match(desktopMain, /path\.join\(runtimeRoot, "settings\.json"\)/);
+  assert.match(desktopMain, /SHIYIN_PUNCTUATION_MODEL_PATH/);
   assert.match(desktopMain, /obsidian:save-meeting/);
+  assert.match(desktopMain, /notebook-settings:get/);
   assert.match(desktopMain, /discoverObsidianVault/);
   assert.match(desktopMain, /globalShortcut\.register/);
   assert.match(desktopMain, /Control\+Alt\+M/);
@@ -182,6 +188,7 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(preload, /workspace-backup:create/);
   assert.match(preload, /workspace-backup:restore/);
   assert.match(preload, /obsidian:save-meeting/);
+  assert.match(preload, /notebook-settings:connect-obsidian/);
   assert.match(preload, /global-shortcuts:get/);
   assert.match(preload, /application:relaunch/);
   assert.match(preload, /platform-\$\{process\.platform\}/);
@@ -191,6 +198,7 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(envExample, /DASHSCOPE_API_KEY=/);
   assert.match(envExample, /SHIYIN_ASR_MODE=local/);
   assert.match(envExample, /SHIYIN_LOCAL_ASR_MODEL_DIR=/);
+  assert.match(envExample, /SHIYIN_PUNCTUATION_MODEL_PATH=/);
   assert.match(envExample, /MINIMAX_TIMEOUT_MS=180000/);
   assert.match(envExample, /MINIMAX_STREAM_IDLE_TIMEOUT_MS=60000/);
   assert.match(envExample, /LIVE_SUMMARY_START_MS=30000/);

@@ -139,6 +139,10 @@ flowchart LR
 
 会议数据和 MiniMax 配置与 App 本体分开保存在个人应用数据目录。用新版覆盖“应用程序”中的旧版本不会主动删除旧会议。重要升级前仍建议先在“本机存储”中创建完整备份。
 
+### 可选连接 AI 笔记本
+
+Obsidian 同步默认关闭，不影响录音、转写或 MiniMax 总结。需要时可在左侧底部“MiniMax 设置”中连接自己的 Obsidian Vault，再选择是否在会议结束后自动同步；未连接时应用不会主动弹出 Obsidian 目录选择或同步错误。
+
 ## 从源码运行
 
 ### 环境要求
@@ -164,11 +168,14 @@ models/
 │   ├── encoder.int8.onnx
 │   ├── decoder.int8.onnx
 │   └── tokens.txt
+├── punctuation/
+│   └── model.int8.onnx
 └── speaker/
     └── 3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx
 ```
 
 CAM++ 发言人模型已包含在当前仓库中；Paraformer ASR 模型体积较大，需要单独准备。
+中英文本地标点使用 Sherpa-ONNX 的 CT-Transformer int8 模型；模型缺失时会回退到保守断句规则，不影响录音与转写。
 
 ### 3. 配置环境
 
@@ -183,6 +190,9 @@ MINIMAX_API_KEY=your_minimax_api_key
 MINIMAX_MODEL=MiniMax-M2.7
 SHIYIN_ASR_MODE=local
 SHIYIN_LOCAL_ASR_MODEL_DIR=./models/asr
+SHIYIN_PUNCTUATION_MODEL_PATH=./models/punctuation/model.int8.onnx
+# 对话停顿约 1.2 秒后结束当前句；调小会更快断句，也更容易产生短句
+SHIYIN_LOCAL_ASR_SILENCE_MS=1200
 SHIYIN_MODEL_PATH=./models/speaker/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx
 SHIYIN_DATA_ROOT=./data
 ```

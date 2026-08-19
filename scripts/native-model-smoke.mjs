@@ -18,12 +18,23 @@ assert.doesNotThrow(
 
 const asrEngine = new LocalAsrEngine({
   modelDir: path.join(sourceRoot, "models", "asr"),
+  punctuationModelPath: path.join(sourceRoot, "models", "punctuation", "model.int8.onnx"),
   numThreads: 1,
 });
 assert.equal(
   asrEngine.available,
   true,
   `Paraformer 本地转写模型加载失败：${asrEngine.error?.message || "模型文件不完整"}`,
+);
+assert.equal(
+  asrEngine.punctuationAvailable,
+  true,
+  `本地标点模型加载失败：${asrEngine.punctuationError?.message || "模型文件不完整"}`,
+);
+assert.match(
+  asrEngine.punctuation.addPunct("我们先确认方案然后安排负责人"),
+  /[，。！？]/u,
+  "本地标点模型已加载，但没有生成标点",
 );
 
 const sampleRate = 16000;
@@ -60,6 +71,7 @@ process.stdout.write(`${JSON.stringify({
   arch: process.arch,
   nativePackage: platformPackage,
   asrAvailable: asrEngine.available,
+  punctuationModelAvailable: asrEngine.punctuationAvailable,
   speakerModelAvailable: speakerEngine.available,
   speakerEmbeddingDimensions: embedding.length,
 })}\n`);

@@ -27,6 +27,12 @@ contextBridge.exposeInMainWorld("shiyinDesktop", {
   saveMeetingToObsidian(meeting) {
     return ipcRenderer.invoke("obsidian:save-meeting", meeting);
   },
+  getNotebookSettings() {
+    return ipcRenderer.invoke("notebook-settings:get");
+  },
+  connectObsidianVault() {
+    return ipcRenderer.invoke("notebook-settings:connect-obsidian");
+  },
   relaunch() {
     ipcRenderer.send("application:relaunch");
   },

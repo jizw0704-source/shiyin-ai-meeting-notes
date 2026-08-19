@@ -36,6 +36,9 @@ jobs:
       MODEL_ENCODER_SHA256: 81a70226a8934e6ed92aa1d4fc486b428b5398e2f2619ed4897b7294cab90e9a
       MODEL_DECODER_SHA256: f3cca9f77bb9d93c8fcbfb63ae617b6b1ee96818df3aa3b151c40658fe38594f
       MODEL_TOKENS_SHA256: 59aba8873a2ed1e122c25fee421e25f283b63290efbde85c1f01a853d83cb6e6
+      PUNCTUATION_MODEL_URL: https://github.com/k2-fsa/sherpa-onnx/releases/download/punctuation-models/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8.tar.bz2
+      PUNCTUATION_ARCHIVE_SHA256: c0d5aa5f8eeb686032345e180bedf39319dc2e0556781c6264bcadba8328a6e1
+      PUNCTUATION_MODEL_SHA256: 65a3fb9f5ad7bfb96bf69e0dc4481df97f6ee60513c1d94ce981ba6effd524b1
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
     steps:
@@ -93,6 +96,34 @@ jobs:
             if (-not (Test-Path $path)) { throw "Missing ASR model file: $($entry.Key)" }
             $actual = (Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant()
             if ($actual -ne $entry.Value) { throw "ASR model checksum mismatch: $($entry.Key) $actual" }
+          }
+
+      - name: Restore pinned punctuation model cache
+        id: punctuation-model-cache
+        uses: actions/cache@v5
+        with:
+          path: models/punctuation
+          key: shiyin-punctuation-model-${{ env.PUNCTUATION_MODEL_SHA256 }}
+
+      - name: Download pinned punctuation model
+        if: steps.punctuation-model-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "shiyin-punctuation-int8.tar.bz2"
+          curl.exe -L --fail --show-error --output $archive $env:PUNCTUATION_MODEL_URL
+          $actualHash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $env:PUNCTUATION_ARCHIVE_SHA256) {
+            throw "Punctuation archive checksum mismatch: $actualHash"
+          }
+          New-Item -ItemType Directory -Force -Path "models/punctuation" | Out-Null
+          tar.exe -xjf $archive -C "models/punctuation" --strip-components=1
+
+      - name: Verify punctuation model file
+        shell: pwsh
+        run: |
+          $actual = (Get-FileHash "models/punctuation/model.int8.onnx" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $env:PUNCTUATION_MODEL_SHA256) {
+            throw "Punctuation model checksum mismatch: $actual"
           }
 
       - name: Run code quality checks

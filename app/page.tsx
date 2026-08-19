@@ -57,6 +57,11 @@ type MiniMaxSettings = {
   managedByApp: boolean;
   storageLocation: string;
 };
+type NotebookSettings = {
+  obsidianConfigured: boolean;
+  obsidianVaultName: string | null;
+  canceled?: boolean;
+};
 type StorageInfo = {
   totalBytes: number;
   recordingsBytes: number;
@@ -233,6 +238,8 @@ declare global {
         markdown: string;
         openAfterSave: boolean;
       }) => Promise<ObsidianSaveResult>;
+      getNotebookSettings: () => Promise<NotebookSettings>;
+      connectObsidianVault: () => Promise<NotebookSettings>;
       relaunch: () => void;
       getMiniMaxSettings: () => Promise<MiniMaxSettings>;
       saveMiniMaxSettings: (settings: { apiKey: string; model: string }) => Promise<MiniMaxSettings>;
@@ -445,9 +452,12 @@ export default function Home() {
   const [transcriptSaving, setTranscriptSaving] = useState(false);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [obsidianSaving, setObsidianSaving] = useState(false);
-  const [obsidianAutoSave, setObsidianAutoSave] = useState(true);
+  const [obsidianAutoSave, setObsidianAutoSave] = useState(false);
+  const [notebookSettings, setNotebookSettings] = useState<NotebookSettings | null>(null);
+  const [notebookConnecting, setNotebookConnecting] = useState(false);
   const [notice, setNotice] = useState("");
   const [liveText, setLiveText] = useState("");
+  const [liveConfirmedText, setLiveConfirmedText] = useState("");
   const [connectionStatus, setConnectionStatus] = useState("本地实时 ASR");
   const [loading, setLoading] = useState(true);
   const [completedActions, setCompletedActions] = useState<Set<number>>(new Set());
@@ -540,7 +550,7 @@ export default function Home() {
       if (speakerLimitOptions.some((option) => option.value === savedSpeakerLimit)) {
         setSpeakerLimit(savedSpeakerLimit as SpeakerLimit);
       }
-      setObsidianAutoSave(savedObsidianAutoSave !== "false");
+      setObsidianAutoSave(savedObsidianAutoSave === "true");
       if (savedTranscriptOrder === "descending") setTranscriptOrder("descending");
     }, 0);
     return () => window.clearTimeout(timer);
@@ -556,6 +566,11 @@ export default function Home() {
     desktop.getMiniMaxSettings()
       .then((settings) => {
         if (active) setMiniMaxSettings(settings);
+      })
+      .catch(() => undefined);
+    desktop.getNotebookSettings()
+      .then((settings) => {
+        if (active) setNotebookSettings(settings);
       })
       .catch(() => undefined);
     desktop.getGlobalShortcutStatus()
@@ -594,14 +609,36 @@ export default function Home() {
       return;
     }
     try {
-      const settings = await desktop.getMiniMaxSettings();
+      const [settings, notebook] = await Promise.all([
+        desktop.getMiniMaxSettings(),
+        desktop.getNotebookSettings(),
+      ]);
       setMiniMaxSettings(settings);
+      setNotebookSettings(notebook);
       setMiniMaxModelDraft(settings.model);
       setMiniMaxKeyDraft("");
       setSettingsError("");
       setSettingsDialogOpen(true);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "无法读取 MiniMax 配置");
+    }
+  }, []);
+
+  const connectNotebook = useCallback(async () => {
+    const desktop = window.shiyinDesktop;
+    if (!desktop) return;
+    setNotebookConnecting(true);
+    setSettingsError("");
+    try {
+      const settings = await desktop.connectObsidianVault();
+      setNotebookSettings(settings);
+      if (!settings.canceled && settings.obsidianConfigured) {
+        setNotice(`已连接 AI 笔记本：${settings.obsidianVaultName || "Obsidian"}`);
+      }
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : "无法连接 AI 笔记本");
+    } finally {
+      setNotebookConnecting(false);
     }
   }, []);
 
@@ -1052,6 +1089,8 @@ export default function Home() {
             sessionAsrLabel = message.asrLabel || "实时转写";
             window.clearTimeout(timeout);
             const value = message.meeting as Meeting;
+            setLiveText("");
+            setLiveConfirmedText("");
             setMeeting(value);
             setSelectedId(value.id);
             mergeMeetingList(value);
@@ -1065,6 +1104,7 @@ export default function Home() {
             setLiveText(message.text || "");
           } else if (message.type === "segment.final") {
             setLiveText("");
+            setLiveConfirmedText(message.segment.cleanedText || message.segment.text || "");
             updateLiveSegment(message.segment, message.speakers);
           } else if (message.type === "summary.preview.started") {
             setConnectionStatus("MiniMax 正在整理实时草稿…");
@@ -1113,7 +1153,9 @@ export default function Home() {
             setNotice(message.summarySkipped
               ? "会议和逐字稿已保存；配置 MiniMax 密钥后可生成 AI 总结"
               : value.error || "会议已保存，发言人校正和 AI 总结已完成");
-            if (obsidianAutoSave) void saveMeetingToObsidian(value, { automatic: true });
+            if (obsidianAutoSave && notebookSettings?.obsidianConfigured) {
+              void saveMeetingToObsidian(value, { automatic: true });
+            }
             window.shiyinDesktop?.setRecording(false);
             socket.close();
             socketRef.current = null;
@@ -1354,6 +1396,11 @@ export default function Home() {
 
   async function rerunSummary() {
     if (!meeting || meetingIsBusy(meeting.status)) return;
+    if (!miniMaxSettings?.configured) {
+      setNotice("请先配置 MiniMax，再重新生成 AI 总结");
+      await openSettingsDialog();
+      return;
+    }
     await regenerateSummary(meeting.id);
   }
 
@@ -1715,6 +1762,11 @@ export default function Home() {
   }
 
   function toggleObsidianAutoSave() {
+    if (!notebookSettings?.obsidianConfigured) {
+      setSettingsDialogOpen(true);
+      setNotice("请先连接 Obsidian AI 笔记本");
+      return;
+    }
     const enabled = !obsidianAutoSave;
     setObsidianAutoSave(enabled);
     window.localStorage.setItem("shiyin.obsidianAutoSave", String(enabled));
@@ -2059,7 +2111,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
         </div>
         <div className="sidebar-bottom">
           <div className="privacy-state"><span>●</span> 本地后台已连接</div>
-          <button className="settings-button" disabled={recording || processing} onClick={() => void openSettingsDialog()}>
+          <button className={`settings-button ${miniMaxSettings?.configured ? "" : "needs-attention"}`} disabled={recording || processing} onClick={() => void openSettingsDialog()}>
             <GearSix size={17} weight="duotone" />
             <span><b>MiniMax 设置</b><small>{miniMaxSettings?.configured ? "密钥已配置" : "配置密钥与模型"}</small></span>
           </button>
@@ -2095,8 +2147,13 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
               >⇩ 导出报告</button>
               {exportMenuOpen && (
                 <div className="export-menu" role="menu">
-                  <button disabled={obsidianSaving} onClick={() => void saveMeetingToObsidian()}><b>{obsidianSaving ? "正在保存…" : "保存到 Obsidian"}</b><span>生成或更新独立会议笔记</span></button>
-                  <button onClick={toggleObsidianAutoSave}><b>结束后自动同步</b><span>{obsidianAutoSave ? "已开启 · 后续会议自动保存" : "已关闭 · 点击重新开启"}</span></button>
+                  <button
+                    disabled={obsidianSaving}
+                    onClick={() => notebookSettings?.obsidianConfigured
+                      ? void saveMeetingToObsidian()
+                      : void openSettingsDialog()}
+                  ><b>{obsidianSaving ? "正在同步…" : notebookSettings?.obsidianConfigured ? "同步到 AI 笔记本" : "连接 AI 笔记本"}</b><span>{notebookSettings?.obsidianConfigured ? `Obsidian · ${notebookSettings.obsidianVaultName || "已连接"}` : "可选连接自己的 Obsidian 知识库"}</span></button>
+                  <button onClick={toggleObsidianAutoSave}><b>结束后自动同步</b><span>{obsidianAutoSave ? "已开启 · 后续会议自动保存" : "默认关闭 · 用户可自行开启"}</span></button>
                   <button onClick={exportHtmlReport}><b>网页报告</b><span>适合浏览与打印</span></button>
                   <button onClick={downloadMarkdownReport}><b>Markdown 文件</b><span>适合 AI Agent 分析</span></button>
                   <button onClick={() => void copyMarkdownReport()}><b>复制 Markdown</b><span>直接粘贴给其他 AI</span></button>
@@ -2124,7 +2181,13 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                 {recording && <button onClick={stopRecording}>结束</button>}
               </div>
             )}
-            {liveText && <div className="live-caption"><span>实时</span>{liveText}</div>}
+            {(liveConfirmedText || liveText) && (
+              <div className="live-caption">
+                <span>实时</span>
+                {liveConfirmedText && <strong>{liveConfirmedText}</strong>}
+                {liveText && <em>{liveText}</em>}
+              </div>
+            )}
             {meeting?.audioPath && (
               <section className="audio-dock" aria-label="原始录音播放器">
                 <div className="audio-dock-label">
@@ -2722,6 +2785,11 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                           ? "MiniMax 正在流式生成正式报告，请稍候。"
                           : "结束听记后，会先在本地校正发言人，再用 MiniMax 生成完整会议报告。"}
                     </p>
+                    {!miniMaxSettings?.configured && meeting?.status !== "recording" && (
+                      <button className="empty-summary-configure" onClick={() => void openSettingsDialog()}>
+                        配置 MiniMax 并生成总结
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -3000,9 +3068,29 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
               <p>
                 <b>{miniMaxSettings?.configured ? "密钥已配置" : "等待配置密钥"}</b>
                 <span>{miniMaxSettings?.managedByApp
-                  ? "保存后由 macOS 加密，并自动重启应用使配置生效。"
+                  ? "保存后由当前系统安全加密，并自动重启应用使配置生效。"
                   : "开发版继续使用项目中的 .env.local；安装版可在这里直接配置。"}</span>
               </p>
+            </div>
+            <div className="notebook-settings-card">
+              <div>
+                <b>AI 笔记本 <em>可选</em></b>
+                <span>{notebookSettings?.obsidianConfigured
+                  ? `已连接 Obsidian：${notebookSettings.obsidianVaultName || "当前 Vault"}`
+                  : "可连接自己的 Obsidian；未连接时不会自动同步或弹出错误。"}</span>
+              </div>
+              <button type="button" onClick={() => void connectNotebook()} disabled={notebookConnecting || settingsSaving}>
+                {notebookConnecting ? "正在选择…" : notebookSettings?.obsidianConfigured ? "更换" : "连接 Obsidian"}
+              </button>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={obsidianAutoSave}
+                  disabled={!notebookSettings?.obsidianConfigured}
+                  onChange={toggleObsidianAutoSave}
+                />
+                会议结束后自动同步
+              </label>
             </div>
             <div className="settings-dialog-actions">
               <button type="button" onClick={() => setSettingsDialogOpen(false)} disabled={settingsSaving}>取消</button>

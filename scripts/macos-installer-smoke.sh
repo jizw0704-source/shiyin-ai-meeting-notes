@@ -97,6 +97,7 @@ start_and_verify() {
     if (!health.ok) throw new Error("本地后台状态异常");
     if (health.service !== "shiyin-ai-backend") throw new Error("后台身份校验失败");
     if (health.asrMode !== "local" || !health.localAsrAvailable) throw new Error("本地转写模型不可用");
+    if (!health.punctuationModelAvailable) throw new Error("本地标点模型不可用");
     if (!health.speakerModelAvailable) throw new Error("发言人模型不可用");
     if (!health.appOrigin) throw new Error("缺少应用地址");
     process.stdout.write(health.appOrigin);
@@ -136,6 +137,7 @@ node -e '
     installer: process.argv[2],
     architecture: process.arch,
     localAsrAvailable: true,
+    punctuationModelAvailable: true,
     speakerModelAvailable: true,
     dataPreservedAcrossUpgrade: true,
     dataPreservedAfterAppRemoval: true,
