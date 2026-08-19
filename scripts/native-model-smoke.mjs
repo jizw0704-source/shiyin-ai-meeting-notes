@@ -7,7 +7,9 @@ import { SpeakerEngine } from "../server/speaker-engine.mjs";
 
 const require = createRequire(import.meta.url);
 const sourceRoot = path.resolve(import.meta.dirname, "..");
-const platformPackage = `sherpa-onnx-${process.platform}-${process.arch}`;
+const platformPackage = process.platform === "win32"
+  ? `sherpa-onnx-win-${process.arch}`
+  : `sherpa-onnx-${process.platform}-${process.arch}`;
 
 assert.doesNotThrow(
   () => require.resolve(platformPackage),
