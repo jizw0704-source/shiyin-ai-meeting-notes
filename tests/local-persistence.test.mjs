@@ -272,6 +272,7 @@ test("keeps original transcript while filtering, replacing, and undoing organize
     assert.match(undone.meeting.segments[0].text, /POS 平台/);
     assert.equal(undone.meeting.canUndoTranscriptEdit, false);
   } finally {
+    storage.close();
     rmSync(root, { recursive: true, force: true });
   }
 });
