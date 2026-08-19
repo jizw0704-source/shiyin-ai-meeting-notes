@@ -28,7 +28,10 @@ for (const file of [".env.local", ".env"]) {
 }
 
 app.setName("拾音 AI");
-if (app.isPackaged) {
+const userDataOverride = String(process.env.SHIYIN_USER_DATA_ROOT || "").trim();
+if (userDataOverride) {
+  app.setPath("userData", path.resolve(userDataOverride));
+} else if (app.isPackaged) {
   app.setPath("userData", path.join(app.getPath("appData"), "拾音 AI"));
 }
 
@@ -63,7 +66,8 @@ const webHost = process.env.SHIYIN_WEB_HOST || "127.0.0.1";
 const preferredWebPort = Number(process.env.SHIYIN_WEB_PORT || 3000);
 let webPort = preferredWebPort;
 let webUrl = `http://${webHost}:${webPort}`;
-const backendUrl = "http://127.0.0.1:8788";
+const backendPort = Number(process.env.ASR_PROXY_PORT || 8788);
+const backendUrl = `http://127.0.0.1:${backendPort}`;
 const openWindowShortcut = "Control+Alt+M";
 const toggleRecordingShortcut = "Control+Alt+R";
 const openWindowShortcutLabel = process.platform === "darwin" ? "⌃⌥M" : "Ctrl+Alt+M";
@@ -79,7 +83,8 @@ let shortcutRegistration = { openWindow: false, toggleRecording: false };
 const managedServices = [];
 
 if (process.platform === "win32") app.setAppUserModelId("com.phenosola.shiyin");
-const singleInstance = app.requestSingleInstanceLock();
+const singleInstance = process.env.SHIYIN_ALLOW_MULTIPLE_INSTANCES === "1"
+  || app.requestSingleInstanceLock();
 if (!singleInstance) app.quit();
 
 function trayIcon() {

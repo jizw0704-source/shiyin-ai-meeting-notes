@@ -1,6 +1,7 @@
 name: Windows build and smoke test
 
 on:
+  workflow_call:
   workflow_dispatch:
   push:
     branches: [main]
@@ -49,6 +50,12 @@ jobs:
 
       - name: Install locked dependencies
         run: npm ci
+
+      - name: Read application version
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Restore pinned ASR model cache
         id: asr-model-cache
@@ -102,7 +109,7 @@ jobs:
 
       - name: Install, launch, upgrade, and uninstall smoke test
         shell: pwsh
-        run: ./scripts/windows-installer-smoke.ps1 -ReleaseDirectory release -ExpectedVersion 0.5.1
+        run: ./scripts/windows-installer-smoke.ps1 -ReleaseDirectory release -ExpectedVersion $env:APP_VERSION
 
       - name: Write installer checksum
         shell: pwsh
@@ -123,4 +130,4 @@ jobs:
             release/SHA256SUMS-windows.txt
             release/windows-smoke-result.json
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 30

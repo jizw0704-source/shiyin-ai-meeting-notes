@@ -222,6 +222,7 @@ npm run dev
 | `npm run desktop:start` | 运行已构建的桌面应用 |
 | `npm run desktop:pack` | 生成未压缩的桌面应用目录 |
 | `npm run desktop:dist` | 生成当前平台安装包 |
+| `npm run desktop:dist:mac` | 在 Apple Silicon Mac 上生成 arm64 DMG 与 ZIP |
 | `npm run desktop:dist:win` | 在 Windows 上生成 x64 NSIS 安装包 |
 
 提交功能前至少运行：
@@ -237,10 +238,10 @@ npm test
 ### macOS
 
 ```bash
-npm run desktop:dist
+npm run desktop:dist:mac
 ```
 
-Apple Silicon DMG 会生成到 `release/`。增加功能后应先更新 `package.json` 和 `package-lock.json` 中的版本号，再完成检查与打包。
+Apple Silicon DMG 与 ZIP 会生成到 `release/`。推送到 `main` 后，`macOS build and smoke test` 会在 ARM64 Mac runner 上完成模型推理、DMG 挂载、安装版启动、覆盖安装和移除应用后的数据保留测试。
 
 ### Windows
 
@@ -251,9 +252,13 @@ Windows x64 使用 NSIS 安装包。推送到 `main` 后，[Windows build and sm
 - 构建并静默安装 Windows 安装包；
 - 启动安装版，验证界面、本地后台、转写模型和发言人模型；
 - 覆盖安装一次，并确认用户数据在升级和卸载后仍保留；
-- 上传安装包、SHA-256 校验文件与测试结果，保留 14 天。
+- 上传安装包、SHA-256 校验文件与测试结果，保留 30 天。
 
 团队测试请只下载绿色 `Success` 运行中的 artifact，并按 [Windows 版本验收清单](docs/WINDOWS_TEST_CHECKLIST.md) 验证真实麦克风、电脑声音、快捷键和长会议。安装包目前未使用商业代码签名，SmartScreen 可能显示“未知发布者”。
+
+### 双平台内部版本
+
+需要整理一个可供内部测试的版本时，可以手动运行 `Create internal draft release`。流程会重新构建并验证 Mac 与 Windows，然后创建未公开的 Draft + Prerelease；不会自动发布给用户。操作步骤与正式发布前检查见 [双平台版本发布流程](docs/RELEASE_PROCESS.md)。
 
 ## 主要代码结构
 

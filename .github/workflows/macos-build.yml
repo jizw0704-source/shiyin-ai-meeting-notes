@@ -1,0 +1,115 @@
+name: macOS build and smoke test
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/macos-build.yml"
+      - "app/**"
+      - "desktop/**"
+      - "public/**"
+      - "scripts/**"
+      - "server/**"
+      - "tests/**"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig.json"
+      - "eslint.config.mjs"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-smoke-test:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      MODEL_ASSET_TAG: model-assets-v1
+      MODEL_ASSET_NAME: shiyin-asr-models-v1.zip
+      MODEL_ASSET_SHA256: 3b68b492c58a761418d5d7437e802867eaafb6c98e90019562e02c7c20f7e1b1
+      MODEL_ENCODER_SHA256: 81a70226a8934e6ed92aa1d4fc486b428b5398e2f2619ed4897b7294cab90e9a
+      MODEL_DECODER_SHA256: f3cca9f77bb9d93c8fcbfb63ae617b6b1ee96818df3aa3b151c40658fe38594f
+      MODEL_TOKENS_SHA256: 59aba8873a2ed1e122c25fee421e25f283b63290efbde85c1f01a853d83cb6e6
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Read application version
+        run: echo "APP_VERSION=$(node -p \"require('./package.json').version\")" >> "$GITHUB_ENV"
+
+      - name: Restore pinned ASR model cache
+        id: asr-model-cache
+        uses: actions/cache@v5
+        with:
+          path: models/asr
+          key: shiyin-asr-models-${{ env.MODEL_ASSET_SHA256 }}
+
+      - name: Download pinned local ASR models
+        if: steps.asr-model-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          archive="$RUNNER_TEMP/$MODEL_ASSET_NAME"
+          gh release download "$MODEL_ASSET_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$MODEL_ASSET_NAME" --dir "$RUNNER_TEMP"
+          echo "$MODEL_ASSET_SHA256  $archive" | shasum -a 256 --check
+          ditto -x -k "$archive" "$RUNNER_TEMP/shiyin-models"
+          mkdir -p models/asr
+          ditto "$RUNNER_TEMP/shiyin-models/shiyin-asr-models-v1" models/asr
+
+      - name: Verify local ASR model files
+        run: |
+          echo "$MODEL_ENCODER_SHA256  models/asr/encoder.int8.onnx" | shasum -a 256 --check
+          echo "$MODEL_DECODER_SHA256  models/asr/decoder.int8.onnx" | shasum -a 256 --check
+          echo "$MODEL_TOKENS_SHA256  models/asr/tokens.txt" | shasum -a 256 --check
+
+      - name: Run code quality checks
+        run: |
+          npm run lint
+          npm run typecheck
+          npm test
+
+      - name: Verify macOS native models
+        run: npm run test:native-models
+
+      - name: Build macOS DMG and ZIP
+        run: npm run desktop:dist:mac
+
+      - name: Install, launch, upgrade, and remove smoke test
+        run: ./scripts/macos-installer-smoke.sh release "$APP_VERSION"
+
+      - name: Write package checksums
+        run: |
+          cd release
+          shasum -a 256 ./*.dmg ./*.zip > SHA256SUMS-macos.txt
+
+      - name: Upload verified macOS packages
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: shiyin-ai-macos-arm64-${{ github.sha }}
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.blockmap
+            release/latest-mac.yml
+            release/SHA256SUMS-macos.txt
+            release/macos-smoke-result.json
+          if-no-files-found: warn
+          retention-days: 30

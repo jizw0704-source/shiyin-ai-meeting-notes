@@ -1,0 +1,89 @@
+name: Create internal draft release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version from package.json, for example 0.5.1
+        required: true
+        type: string
+      confirm:
+        description: Type CREATE_DRAFT to build both platforms and create a private draft
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: draft-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Validate version and explicit confirmation
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          RELEASE_CONFIRMATION: ${{ inputs.confirm }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$RELEASE_CONFIRMATION" != "CREATE_DRAFT" ]]; then
+            echo "Confirmation must be CREATE_DRAFT" >&2
+            exit 1
+          fi
+          package_version="$(node -p "require('./package.json').version")"
+          if [[ "$REQUESTED_VERSION" != "$package_version" ]]; then
+            echo "Requested version $REQUESTED_VERSION does not match package.json $package_version" >&2
+            exit 1
+          fi
+          if gh release view "v$REQUESTED_VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release v$REQUESTED_VERSION already exists" >&2
+            exit 1
+          fi
+
+  build-windows:
+    needs: validate
+    uses: ./.github/workflows/windows-build.yml
+
+  build-macos:
+    needs: validate
+    uses: ./.github/workflows/macos-build.yml
+
+  create-draft:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REQUESTED_VERSION: ${{ inputs.version }}
+    steps:
+      - name: Download verified Windows packages
+        uses: actions/download-artifact@v6
+        with:
+          name: shiyin-ai-windows-${{ github.sha }}
+          path: release-assets/windows
+
+      - name: Download verified macOS packages
+        uses: actions/download-artifact@v6
+        with:
+          name: shiyin-ai-macos-arm64-${{ github.sha }}
+          path: release-assets/macos
+
+      - name: Create unpublished prerelease draft
+        run: |
+          mapfile -d '' release_files < <(find release-assets -type f -print0)
+          if [[ "${#release_files[@]}" -eq 0 ]]; then
+            echo "No verified release files were downloaded" >&2
+            exit 1
+          fi
+          gh release create "v$REQUESTED_VERSION" "${release_files[@]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "拾音 AI v$REQUESTED_VERSION（内部测试）" \
+            --generate-notes \
+            --draft \
+            --prerelease
