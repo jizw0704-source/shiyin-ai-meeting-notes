@@ -14,7 +14,7 @@
     "desktop:start": "electron desktop/main.mjs --production",
     "desktop:pack": "npm run build && electron-builder --dir",
     "desktop:dist": "npm run build && electron-builder",
-    "desktop:dist:win": "npm run build && electron-builder --win nsis --x64",
+    "desktop:dist:win": "npm run build && electron-builder --win nsis --x64 --publish never",
     "dev:web": "vinext dev",
     "asr:proxy": "node server/realtime-proxy.mjs",
     "build": "vinext build",
