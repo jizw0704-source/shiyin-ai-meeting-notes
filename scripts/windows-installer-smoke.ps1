@@ -53,7 +53,34 @@ function Start-And-VerifyShiyin {
   if ($page.StatusCode -ne 200 -or $page.Content -notmatch "<title>拾音 AI") {
     throw "安装版界面身份或 HTTP 状态校验失败"
   }
-  return @{ application = $application; health = $health; version = $version }
+
+  $assetMatches = [regex]::Matches($page.Content, '(?:href|src)=["''](?<path>/assets/[^"'']+\.(?:css|js))["'']')
+  $assetPaths = @($assetMatches | ForEach-Object { $_.Groups["path"].Value } | Sort-Object -Unique)
+  $cssPaths = @($assetPaths | Where-Object { $_ -match "\.css$" })
+  $scriptPaths = @($assetPaths | Where-Object { $_ -match "\.js$" })
+  if ($cssPaths.Count -eq 0 -or $scriptPaths.Count -eq 0) {
+    throw "安装版页面没有声明完整的 CSS 与 JavaScript 静态资源"
+  }
+
+  foreach ($assetPath in $assetPaths) {
+    $assetUrl = [System.Uri]::new([System.Uri]$health.appOrigin, $assetPath)
+    $asset = Invoke-WebRequest -Uri $assetUrl -UseBasicParsing -TimeoutSec 10
+    if ($asset.StatusCode -ne 200) { throw "静态资源加载失败：$assetPath ($($asset.StatusCode))" }
+    $contentType = [string]$asset.Headers["Content-Type"]
+    if ($assetPath -match "\.css$" -and $contentType -notmatch "text/css") {
+      throw "CSS Content-Type 错误：$assetPath ($contentType)"
+    }
+    if ($assetPath -match "\.js$" -and $contentType -notmatch "javascript") {
+      throw "JavaScript Content-Type 错误：$assetPath ($contentType)"
+    }
+  }
+  return @{
+    application = $application
+    health = $health
+    version = $version
+    cssAssetCount = $cssPaths.Count
+    scriptAssetCount = $scriptPaths.Count
+  }
 }
 
 try {
@@ -84,6 +111,8 @@ try {
     installer = $installer.Name
     localAsrAvailable = $secondRun.health.localAsrAvailable
     speakerModelAvailable = $secondRun.health.speakerModelAvailable
+    cssAssetCount = $secondRun.cssAssetCount
+    scriptAssetCount = $secondRun.scriptAssetCount
     dataPreservedAcrossUpgrade = $true
     dataPreservedAfterUninstall = $true
   }

@@ -254,7 +254,7 @@ Windows x64 使用 NSIS 安装包。推送到 `main` 后，[Windows build and sm
 - 覆盖安装一次，并确认用户数据在升级和卸载后仍保留；
 - 上传安装包、SHA-256 校验文件与测试结果，保留 30 天。
 
-团队测试请只下载绿色 `Success` 运行中的 artifact，并按 [Windows 版本验收清单](docs/WINDOWS_TEST_CHECKLIST.md) 验证真实麦克风、电脑声音、快捷键和长会议。安装包目前未使用商业代码签名，SmartScreen 可能显示“未知发布者”。
+团队测试请只下载绿色 `Success` 运行中的 artifact，并按 [macOS 版本验收清单](docs/MACOS_TEST_CHECKLIST.md) 或 [Windows 版本验收清单](docs/WINDOWS_TEST_CHECKLIST.md) 验证真实麦克风、电脑声音、快捷键和长会议。安装包目前未使用商业代码签名；macOS 可能触发 Gatekeeper，Windows SmartScreen 可能显示“未知发布者”。
 
 ### 双平台内部版本
 

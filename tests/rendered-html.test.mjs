@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
+import { normalizeWindowsStaticCache } from "../server/vinext-windows-static-cache.mjs";
 
 async function render() {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -34,8 +35,29 @@ test("server-renders the meeting transcription product", async () => {
   assert.match(html, /搜索历史会议/);
   assert.match(html, /12 人/);
   assert.match(html, /20 人/);
+  assert.match(html, /录音和转写会保存在这台电脑/);
+  assert.doesNotMatch(html, /录音和转写会保存在这台 Mac/);
   assert.doesNotMatch(html, /转写版本|完整记录|会议速览/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/);
+});
+
+test("normalizes vinext static asset cache keys on Windows", () => {
+  const cssEntry = { type: "css" };
+  const jsEntry = { type: "javascript" };
+  const cache = {
+    entries: new Map([
+      ["/assets\\index-ABC123.css", cssEntry],
+      ["/assets\\page-DEF456.js", jsEntry],
+      ["/favicon.svg", { type: "svg" }],
+    ]),
+  };
+
+  assert.equal(normalizeWindowsStaticCache(cache, "win32"), cache);
+  assert.equal(cache.entries.get("/assets/index-ABC123.css"), cssEntry);
+  assert.equal(cache.entries.get("/assets/page-DEF456.js"), jsEntry);
+  assert.equal(cache.entries.has("/assets\\index-ABC123.css"), false);
+  assert.equal(cache.entries.has("/assets\\page-DEF456.js"), false);
+  assert.equal(cache.entries.has("/favicon.svg"), true);
 });
 
 test("supports local transcription and keeps cloud keys behind the realtime proxy", async () => {

@@ -2149,7 +2149,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                 </div>
                 <span className="meeting-start-kicker"><i /> 本地听记已准备就绪</span>
                 <h2 id="meeting-start-title">开始一场新的会议</h2>
-                <p>录音和转写会保存在这台 Mac；会议结束后，再由 MiniMax 自动整理纪要与行动项。</p>
+                <p>录音和转写会保存在这台电脑；会议结束后，再由 MiniMax 自动整理纪要与行动项。</p>
                 <button
                   type="button"
                   className="meeting-start-button"
