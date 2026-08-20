@@ -2080,7 +2080,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
           />
           {historyQuery && <button type="button" onClick={() => setHistoryQuery("")} aria-label="清空历史会议搜索"><X size={12} /></button>}
         </div>
-        <div className="meeting-list">
+        <div className="meeting-list" role="region" aria-label="历史会议列表">
           {visibleMeetings.map((item) => (
             <div className={`history-meeting-row ${selectedId === item.id ? "active" : ""}`} key={item.id}>
               <button
