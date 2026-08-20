@@ -559,7 +559,7 @@ async function extractLongMeeting(transcript, apiKey, model, options = {}) {
   return digests;
 }
 
-export async function summarizeMeetingPreview(meeting, apiKey, model = "MiniMax-M2.7", options = {}) {
+export async function summarizeMeetingPreview(meeting, apiKey, model = "MiniMax-M3", options = {}) {
   if (!meeting.segments.length) return null;
   if (!apiKey) throw new Error("尚未配置 MINIMAX_API_KEY");
   const summaryTemplate = normalizeSummaryTemplateId(meeting.summaryTemplate);
@@ -590,7 +590,7 @@ export async function summarizeMeetingPreview(meeting, apiKey, model = "MiniMax-
   };
 }
 
-export async function summarizeMeeting(meeting, apiKey, model = "MiniMax-M2.7", options = {}) {
+export async function summarizeMeeting(meeting, apiKey, model = "MiniMax-M3", options = {}) {
   if (!meeting.segments.length) {
     return normalizeMeetingSummary({
       headline: "本次会议未识别到有效内容",

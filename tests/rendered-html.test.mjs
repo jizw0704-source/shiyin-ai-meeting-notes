@@ -86,6 +86,10 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(proxy, /streamMeetingAudio/);
   assert.match(proxy, /summarizeMeetingPreview/);
   assert.match(proxy, /summary\.preview/);
+  assert.match(proxy, /\/api\/settings\/minimax/);
+  assert.match(proxy, /SHIYIN_DESKTOP_CONTROL_TOKEN/);
+  assert.match(proxy, /await runSummaryAfterMeeting\(meetingId, client\)/);
+  assert.doesNotMatch(proxy, /await runCorrectionAndSummary\(meetingId, client\);/);
   assert.match(proxy, /liveSummaryStartMs/);
   assert.match(proxy, /status: "failed", error: `总结失败：\$\{error\.message\}`/);
   assert.match(page, /AudioWorkletNode/);
@@ -102,7 +106,10 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(page, /重新生成 AI 总结/);
   assert.match(page, /这次想怎么整理/);
   assert.match(page, /MiniMax 总结方式/);
-  assert.match(page, /保存并重启/);
+  assert.match(page, /保存并立即生效/);
+  assert.match(page, /MiniMax-M3/);
+  assert.match(page, /setView\("summary"\)/);
+  assert.match(page, /发言人校正可按需手动运行/);
   assert.match(page, /不会写进安装包/);
   assert.match(page, /图文纪要/);
   assert.match(page, /切换不消耗额度/);
@@ -178,6 +185,10 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(desktopMain, /health\?\.service === "shiyin-ai-backend"/);
   assert.match(desktopMain, /safeStorage\.encryptString/);
   assert.match(desktopMain, /safeStorage\.decryptString/);
+  assert.match(desktopMain, /storedModel === "MiniMax-M2\.7"/);
+  assert.match(desktopMain, /defaultMiniMaxModel = "MiniMax-M3"/);
+  assert.match(desktopMain, /X-Shiyin-Control-Token/);
+  assert.match(desktopMain, /postBackend\("\/api\/settings\/minimax"/);
   assert.match(desktopMain, /path\.join\(runtimeRoot, "settings\.json"\)/);
   assert.match(desktopMain, /SHIYIN_PUNCTUATION_MODEL_PATH/);
   assert.match(desktopMain, /obsidian:save-meeting/);

@@ -35,8 +35,9 @@ const bindHost = process.env.SHIYIN_BIND_HOST || "127.0.0.1";
 const appOrigin = process.env.SHIYIN_APP_ORIGIN || "http://127.0.0.1:3000";
 const apiKey = process.env.DASHSCOPE_API_KEY;
 const requestedAsrMode = String(process.env.SHIYIN_ASR_MODE || "auto").trim().toLowerCase();
-const miniMaxApiKey = process.env.MINIMAX_API_KEY;
-const miniMaxModel = process.env.MINIMAX_MODEL || "MiniMax-M2.7";
+let miniMaxApiKey = process.env.MINIMAX_API_KEY;
+let miniMaxModel = process.env.MINIMAX_MODEL || "MiniMax-M3";
+const desktopControlToken = String(process.env.SHIYIN_DESKTOP_CONTROL_TOKEN || "");
 const workspaceId = process.env.DASHSCOPE_WORKSPACE_ID;
 const dataRoot = path.resolve(process.env.SHIYIN_DATA_ROOT || "data");
 const liveSummaryStartMs = Math.max(15000, Number(process.env.LIVE_SUMMARY_START_MS) || 30000);
@@ -202,6 +203,10 @@ async function runCorrectionAndSummary(meetingId, client = null) {
     sendJson(client, { type: "error", recoverable: true, message: `说话人校正失败：${error.message}` });
   }
 
+  return runSummaryAfterMeeting(meetingId, client);
+}
+
+async function runSummaryAfterMeeting(meetingId, client = null) {
   if (!miniMaxApiKey) {
     storage.updateMeeting(meetingId, { status: "completed", error: null });
     const meeting = storage.getMeeting(meetingId);
@@ -326,6 +331,21 @@ const httpServer = createServer(async (request, response) => {
         liveSummaryStartMs,
         liveSummaryIntervalMs,
       });
+    }
+    if (request.method === "POST" && url.pathname === "/api/settings/minimax") {
+      if (!desktopControlToken || request.headers["x-shiyin-control-token"] !== desktopControlToken) {
+        return jsonResponse(response, 403, { error: "桌面配置授权失败" });
+      }
+      const body = await readJson(request);
+      const nextApiKey = String(body.apiKey || "").trim();
+      const nextModel = String(body.model || "MiniMax-M3").trim() || "MiniMax-M3";
+      if (!nextApiKey) return jsonResponse(response, 400, { error: "MiniMax API Key 不能为空" });
+      if (nextApiKey.length > 1024 || nextModel.length > 120) {
+        return jsonResponse(response, 400, { error: "MiniMax 配置内容过长" });
+      }
+      miniMaxApiKey = nextApiKey;
+      miniMaxModel = nextModel;
+      return jsonResponse(response, 200, { configured: true, model: miniMaxModel });
     }
     if (request.method === "GET" && url.pathname === "/api/meetings") {
       return jsonResponse(response, 200, { meetings: storage.listMeetings() });
@@ -667,11 +687,11 @@ websocketServer.on("connection", (client, request) => {
         endedAt: new Date().toISOString(),
         durationMs: audio.durationMs,
         audioPath: wavPath,
-        status: "correcting",
+        status: miniMaxApiKey ? "summarizing" : "completed",
         error: asrError,
       });
       activeSessions.delete(meetingId);
-      await runCorrectionAndSummary(meetingId, client);
+      await runSummaryAfterMeeting(meetingId, client);
     } catch (error) {
       activeSessions.delete(meetingId);
       storage.updateMeeting(meetingId, { status: "failed", error: error.message });

@@ -17,6 +17,7 @@ import {
   Tray,
 } from "electron";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -71,6 +72,8 @@ let webPort = preferredWebPort;
 let webUrl = `http://${webHost}:${webPort}`;
 const backendPort = Number(process.env.ASR_PROXY_PORT || 8788);
 const backendUrl = `http://127.0.0.1:${backendPort}`;
+const backendControlToken = randomUUID();
+const defaultMiniMaxModel = "MiniMax-M3";
 const openWindowShortcut = "Control+Alt+M";
 const toggleRecordingShortcut = "Control+Alt+R";
 const openWindowShortcutLabel = process.platform === "darwin" ? "⌃⌥M" : "Ctrl+Alt+M";
@@ -159,7 +162,10 @@ async function waitUntilReady(url, timeoutMs = 60000, checker = reachable) {
 async function postBackend(pathname, body) {
   const response = await fetch(`${backendUrl}${pathname}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shiyin-Control-Token": backendControlToken,
+    },
     body: JSON.stringify(body),
   });
   const result = await response.json();
@@ -195,7 +201,14 @@ function writeDesktopSettings(settings) {
 
 function applyDesktopSettings() {
   const settings = readDesktopSettings();
-  if (settings.miniMaxModel) process.env.MINIMAX_MODEL = String(settings.miniMaxModel);
+  const storedModel = String(settings.miniMaxModel || "").trim();
+  const model = !storedModel || storedModel === "MiniMax-M2.7"
+    ? defaultMiniMaxModel
+    : storedModel;
+  process.env.MINIMAX_MODEL = model;
+  if (storedModel === "MiniMax-M2.7") {
+    writeDesktopSettings({ ...settings, miniMaxModel: model });
+  }
   if (!settings.encryptedMiniMaxApiKey) return;
   try {
     process.env.MINIMAX_API_KEY = safeStorage.decryptString(
@@ -210,7 +223,7 @@ function applyDesktopSettings() {
 function publicMiniMaxSettings() {
   return {
     configured: Boolean(process.env.MINIMAX_API_KEY),
-    model: process.env.MINIMAX_MODEL || "MiniMax-M2.7",
+    model: process.env.MINIMAX_MODEL || defaultMiniMaxModel,
     managedByApp: app.isPackaged,
     storageLocation: settingsPath,
   };
@@ -218,7 +231,8 @@ function publicMiniMaxSettings() {
 
 function saveMiniMaxSettings(payload = {}) {
   const apiKey = String(payload.apiKey || "").trim();
-  const model = String(payload.model || "MiniMax-M2.7").trim() || "MiniMax-M2.7";
+  const requestedModel = String(payload.model || defaultMiniMaxModel).trim() || defaultMiniMaxModel;
+  const model = requestedModel === "MiniMax-M2.7" ? defaultMiniMaxModel : requestedModel;
   const existing = readDesktopSettings();
   if (!apiKey && !existing.encryptedMiniMaxApiKey && !process.env.MINIMAX_API_KEY) {
     throw new Error("请输入 MiniMax API Key");
@@ -322,7 +336,10 @@ async function ensureServices() {
     spawnNode(
       path.join(appRoot, "server", "realtime-proxy.mjs"),
       [],
-      { SHIYIN_APP_ORIGIN: webUrl },
+      {
+        SHIYIN_APP_ORIGIN: webUrl,
+        SHIYIN_DESKTOP_CONTROL_TOKEN: backendControlToken,
+      },
     );
   }
   if (!reuseExistingWeb) {
@@ -881,12 +898,12 @@ ipcMain.on("application:relaunch", () => {
 });
 
 ipcMain.handle("minimax-settings:get", () => publicMiniMaxSettings());
-ipcMain.handle("minimax-settings:save", (_event, payload) => {
+ipcMain.handle("minimax-settings:save", async (_event, payload) => {
   const settings = saveMiniMaxSettings(payload);
-  setTimeout(() => {
-    app.relaunch();
-    app.exit(0);
-  }, 500);
+  await postBackend("/api/settings/minimax", {
+    apiKey: process.env.MINIMAX_API_KEY,
+    model: process.env.MINIMAX_MODEL,
+  });
   return settings;
 });
 ipcMain.handle("notebook-settings:get", () => publicNotebookSettings());

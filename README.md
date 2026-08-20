@@ -198,7 +198,7 @@ cp .env.example .env.local
 
 ```dotenv
 MINIMAX_API_KEY=your_minimax_api_key
-MINIMAX_MODEL=MiniMax-M2.7
+MINIMAX_MODEL=MiniMax-M3
 
 SHIYIN_ASR_MODE=local
 SHIYIN_LOCAL_ASR_MODEL_DIR=./models/asr

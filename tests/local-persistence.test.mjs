@@ -832,7 +832,7 @@ test("streams a live MiniMax draft and reports incremental progress", async () =
         pauseAfterMs: 0,
         text: "接口联调完成，下一步做回归测试。",
       }],
-    }, "test-key", "MiniMax-M2.7", {
+    }, "test-key", "MiniMax-M3", {
       stream: true,
       onProgress(value) {
         progress.push(value.characters);

@@ -508,7 +508,7 @@ export default function Home() {
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [miniMaxSettings, setMiniMaxSettings] = useState<MiniMaxSettings | null>(null);
   const [miniMaxKeyDraft, setMiniMaxKeyDraft] = useState("");
-  const [miniMaxModelDraft, setMiniMaxModelDraft] = useState("MiniMax-M2.7");
+  const [miniMaxModelDraft, setMiniMaxModelDraft] = useState("MiniMax-M3");
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [settingsError, setSettingsError] = useState("");
   const [storageDialogOpen, setStorageDialogOpen] = useState(false);
@@ -703,14 +703,17 @@ export default function Home() {
     setSettingsSaving(true);
     setSettingsError("");
     try {
-      await desktop.saveMiniMaxSettings({
+      const settings = await desktop.saveMiniMaxSettings({
         apiKey: miniMaxKeyDraft,
         model: miniMaxModelDraft,
       });
+      setMiniMaxSettings(settings);
+      setMiniMaxKeyDraft("");
       setSettingsDialogOpen(false);
-      setNotice("配置已安全保存，应用正在重新启动…");
+      setNotice("配置已安全保存，现在可以直接生成 AI 总结");
     } catch (error) {
       setSettingsError(error instanceof Error ? error.message : "保存失败，请重试");
+    } finally {
       setSettingsSaving(false);
     }
   }, [miniMaxKeyDraft, miniMaxModelDraft, miniMaxSettings?.configured]);
@@ -880,12 +883,15 @@ export default function Home() {
     setRecording(false);
     window.shiyinDesktop?.setRecording(false);
     setProcessing(true);
-    setConnectionStatus("录音已保存，正在校正发言人…");
+    if (miniMaxSettings?.configured) setView("summary");
+    setConnectionStatus(miniMaxSettings?.configured
+      ? "录音已保存，正在生成 AI 总结…"
+      : "录音已保存，正在完成会议…");
     await stopAudioCapture();
     if (socketRef.current?.readyState === WebSocket.OPEN) {
       socketRef.current.send(JSON.stringify({ type: "session.stop" }));
     }
-  }, [stopAudioCapture]);
+  }, [miniMaxSettings?.configured, stopAudioCapture]);
 
   useEffect(() => {
     const unsubscribe = window.shiyinDesktop?.onCommand((command) => commandHandlerRef.current(command));
@@ -1203,7 +1209,7 @@ export default function Home() {
             setConnectionStatus("处理完成");
             setNotice(message.summarySkipped
               ? "会议和逐字稿已保存；配置 MiniMax 密钥后可生成 AI 总结"
-              : value.error || "会议已保存，发言人校正和 AI 总结已完成");
+              : value.error || "会议已保存，AI 总结已完成；如有需要可手动校正发言人");
             if (obsidianAutoSave && notebookSettings?.obsidianConfigured) {
               void saveMeetingToObsidian(value, { automatic: true });
             }
@@ -2852,7 +2858,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                         ? "录音约 30 秒后开始生成，并随会议内容持续更新。"
                         : meeting?.status === "summarizing"
                           ? "MiniMax 正在流式生成正式报告，请稍候。"
-                          : "结束听记后，会先在本地校正发言人，再用 MiniMax 生成完整会议报告。"}
+                          : "结束听记后，会直接用 MiniMax 生成完整会议报告；发言人校正可按需手动运行。"}
                     </p>
                     {!miniMaxSettings?.configured && meeting?.status !== "recording" && (
                       <button className="empty-summary-configure" onClick={() => void openSettingsDialog()}>
@@ -3129,7 +3135,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
               value={miniMaxModelDraft}
               disabled={!miniMaxSettings?.managedByApp || settingsSaving}
               onChange={(event) => setMiniMaxModelDraft(event.target.value)}
-              placeholder="MiniMax-M2.7"
+              placeholder="MiniMax-M3"
             />
             {settingsError && <p className="settings-error"><WarningCircle size={14} />{settingsError}</p>}
             <div className="settings-security-note">
@@ -3164,7 +3170,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             <div className="settings-dialog-actions">
               <button type="button" onClick={() => setSettingsDialogOpen(false)} disabled={settingsSaving}>取消</button>
               <button className="primary" type="submit" disabled={!miniMaxSettings?.managedByApp || settingsSaving}>
-                {settingsSaving ? "正在保存…" : "保存并重启"}
+                {settingsSaving ? "正在保存…" : "保存并立即生效"}
               </button>
             </div>
           </form>
