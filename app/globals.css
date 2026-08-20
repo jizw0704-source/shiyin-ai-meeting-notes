@@ -256,6 +256,10 @@ button:active:not(:disabled) { transform:scale(.97); }
 .settings-button b,.settings-button small { display:block; }
 .settings-button b { color:inherit; font-size:11px; }
 .settings-button small { margin-top:2px; color:#77746d; font-size:9px; }
+.update-button.status-available,.update-button.status-downloaded { color:#4569cc; background:rgba(79,111,220,.09); }
+.update-button.status-error { color:#b45c4e; }
+.update-button.status-checking svg,.update-button.status-downloading svg { animation:update-spin 1.1s linear infinite; }
+@keyframes update-spin { to { transform:rotate(360deg); } }
 .profile { display:flex; align-items:center; gap:10px; padding:12px 8px 0; }
 .profile > span { width:30px; height:30px; display:grid; place-items:center; border-radius:50%; background:#e6a44d; color:#33291a; font-weight:700; }
 .profile p { margin:0; flex:1; }

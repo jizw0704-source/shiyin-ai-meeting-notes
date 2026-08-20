@@ -4,7 +4,7 @@
 
 本地转写不消耗云端语音时长。原始录音、逐字稿、发言人声纹、历史版本和会议列表默认保存在自己的电脑上；只有主动生成 AI 总结时，会议文本才会发送给 MiniMax。
 
-> 当前版本：`0.5.4`<br>
+> 当前版本：`0.5.5`<br>
 > 使用阶段：个人使用与团队内部测试<br>
 > 支持平台：Apple Silicon macOS、Windows x64<br>
 > 授权状态：`UNLICENSED`，不是开源许可证；公开分发或商业使用前请先确认授权条件
@@ -248,6 +248,14 @@ npm run test:native-models
 - [macOS build and smoke test](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/macos-build.yml)：模型校验、DMG/ZIP 构建、安装版启动、覆盖升级、移除应用和数据保留验证。
 - [Windows build and smoke test](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/windows-build.yml)：模型校验、EXE 构建、安装、启动、覆盖升级、卸载和数据保留验证。
 - `Create internal draft release`：要求手动输入 `CREATE_DRAFT`，重新验证两端后创建未公开的 Draft + Prerelease，不会自动公开发布。
+
+## 应用内更新
+
+桌面安装版会在启动约 12 秒后检查新版本，并在持续运行时每 4 小时检查一次。左侧底部的“版本更新”也可以随时手动检查。发现更新后，由用户确认下载；下载完成后，再由用户点击“重启并更新”，会议进行中不会安装更新。
+
+更新来源是本仓库的 GitHub Releases。只有正式公开、版本号更高且带有对应更新元数据的 Release 才会被用户端发现；Draft Release 和 Prerelease 不会进入默认稳定更新通道。发布时必须同时保留安装包、`latest.yml` / `latest-mac.yml` 和对应的 `.blockmap` 文件。
+
+当前自动更新功能处于内部测试阶段。macOS 正式自动更新前必须使用稳定的 Developer ID 完成签名与公证；Windows 面向用户发布前也应完成代码签名。更新只替换应用程序，会议记录、录音、声纹库、MiniMax 配置和 Obsidian 设置仍保存在原有本机数据目录中。
 
 真实设备验收请参考：
 

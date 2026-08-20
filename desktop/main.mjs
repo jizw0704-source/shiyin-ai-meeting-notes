@@ -84,6 +84,16 @@ let powerBlockerId = null;
 let recordingActive = false;
 let shortcutRegistration = { openWindow: false, toggleRecording: false };
 const managedServices = [];
+let applicationUpdater = null;
+let updateStartupTimer = null;
+let updateIntervalTimer = null;
+let applicationUpdateState = {
+  status: app.isPackaged ? "idle" : "unavailable",
+  currentVersion: app.getVersion(),
+  availableVersion: null,
+  percent: null,
+  message: app.isPackaged ? "准备检查新版本" : "开发模式不检查更新",
+};
 
 if (process.platform === "win32") app.setAppUserModelId("com.phenosola.shiyin");
 const singleInstance = process.env.SHIYIN_ALLOW_MULTIPLE_INSTANCES === "1"
@@ -391,6 +401,138 @@ function showAbout() {
   });
 }
 
+function updaterSupported() {
+  return app.isPackaged && (process.platform === "darwin" || process.platform === "win32");
+}
+
+function publicApplicationUpdateState() {
+  const busy = ["checking", "downloading"].includes(applicationUpdateState.status);
+  return {
+    ...applicationUpdateState,
+    supported: updaterSupported(),
+    canCheck: updaterSupported() && !busy,
+    canDownload: applicationUpdateState.status === "available",
+    canInstall: applicationUpdateState.status === "downloaded" && !recordingActive,
+  };
+}
+
+function broadcastApplicationUpdateState(next = {}) {
+  applicationUpdateState = { ...applicationUpdateState, ...next };
+  const state = publicApplicationUpdateState();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("application-update-state", state);
+  }
+  return state;
+}
+
+function friendlyUpdateError(error) {
+  const detail = String(error?.message || error || "");
+  if (/404|latest(?:-mac)?\.yml|release.*not found/i.test(detail)) {
+    return "暂未找到可用的正式版本";
+  }
+  if (/net::|network|ENOTFOUND|ECONN|ETIMEDOUT|timeout/i.test(detail)) {
+    return "网络连接失败，请稍后重试";
+  }
+  if (/signature|code sign|not signed|validation/i.test(detail)) {
+    return "更新包签名校验失败";
+  }
+  return "检查更新失败，请稍后重试";
+}
+
+async function checkForApplicationUpdates() {
+  if (!updaterSupported() || !applicationUpdater) {
+    return broadcastApplicationUpdateState({
+      status: "unavailable",
+      message: app.isPackaged ? "当前系统暂不支持自动更新" : "安装版才能检查更新",
+    });
+  }
+  if (["checking", "downloading"].includes(applicationUpdateState.status)) {
+    return publicApplicationUpdateState();
+  }
+  try {
+    await applicationUpdater.checkForUpdates();
+  } catch (error) {
+    if (applicationUpdateState.status !== "error") {
+      console.error("Application update check failed", error);
+      broadcastApplicationUpdateState({ status: "error", percent: null, message: friendlyUpdateError(error) });
+    }
+  }
+  return publicApplicationUpdateState();
+}
+
+async function initializeApplicationUpdater() {
+  if (!updaterSupported()) return publicApplicationUpdateState();
+  try {
+    const electronUpdater = (await import("electron-updater")).default;
+    applicationUpdater = electronUpdater.autoUpdater;
+    applicationUpdater.autoDownload = false;
+    applicationUpdater.autoInstallOnAppQuit = false;
+    applicationUpdater.allowPrerelease = false;
+
+    applicationUpdater.on("checking-for-update", () => {
+      broadcastApplicationUpdateState({ status: "checking", percent: null, message: "正在检查新版本…" });
+    });
+    applicationUpdater.on("update-available", (info) => {
+      broadcastApplicationUpdateState({
+        status: "available",
+        availableVersion: info.version,
+        percent: null,
+        message: `发现新版本 ${info.version}`,
+      });
+    });
+    applicationUpdater.on("update-not-available", () => {
+      broadcastApplicationUpdateState({
+        status: "not-available",
+        availableVersion: null,
+        percent: null,
+        message: `当前已是最新版 ${app.getVersion()}`,
+      });
+    });
+    applicationUpdater.on("download-progress", (progress) => {
+      const percent = Math.max(0, Math.min(100, Math.round(progress.percent || 0)));
+      broadcastApplicationUpdateState({
+        status: "downloading",
+        percent,
+        message: `正在下载新版本 ${percent}%`,
+      });
+    });
+    applicationUpdater.on("update-downloaded", (info) => {
+      broadcastApplicationUpdateState({
+        status: "downloaded",
+        availableVersion: info.version,
+        percent: 100,
+        message: `版本 ${info.version} 已下载，点击重启安装`,
+      });
+    });
+    applicationUpdater.on("error", (error) => {
+      console.error("Application update failed", error);
+      broadcastApplicationUpdateState({
+        status: "error",
+        percent: null,
+        message: friendlyUpdateError(error),
+      });
+    });
+
+    broadcastApplicationUpdateState({ status: "idle", message: "自动检查更新已开启" });
+    updateStartupTimer = setTimeout(() => {
+      checkForApplicationUpdates().catch((error) => {
+        console.error("Startup update check failed", error);
+      });
+    }, 12000);
+    updateStartupTimer.unref?.();
+    updateIntervalTimer = setInterval(() => {
+      checkForApplicationUpdates().catch((error) => {
+        console.error("Periodic update check failed", error);
+      });
+    }, 4 * 60 * 60 * 1000);
+    updateIntervalTimer.unref?.();
+  } catch (error) {
+    console.error("Application updater initialization failed", error);
+    broadcastApplicationUpdateState({ status: "error", message: friendlyUpdateError(error) });
+  }
+  return publicApplicationUpdateState();
+}
+
 function openSettings() {
   sendWindowCommand("open-settings");
 }
@@ -402,6 +544,7 @@ function rebuildApplicationMenu() {
           label: app.name,
           submenu: [
             { label: "关于拾音 AI", click: showAbout },
+            { label: "检查更新…", click: () => checkForApplicationUpdates() },
             { type: "separator" },
             { role: "services" },
             { type: "separator" },
@@ -419,6 +562,9 @@ function rebuildApplicationMenu() {
         { label: `打开主窗口（${openWindowShortcutLabel}）`, click: showWindow },
         { label: `开始/结束听记（${toggleRecordingShortcutLabel}）`, click: toggleRecordingFromShortcut },
         { label: "设置…", accelerator: "CmdOrCtrl+,", click: openSettings },
+        ...(process.platform === "darwin"
+          ? []
+          : [{ label: "检查更新…", click: () => checkForApplicationUpdates() }]),
         { type: "separator" },
         ...(process.platform === "darwin"
           ? [{ role: "close" }]
@@ -745,6 +891,32 @@ ipcMain.handle("minimax-settings:save", (_event, payload) => {
 });
 ipcMain.handle("notebook-settings:get", () => publicNotebookSettings());
 ipcMain.handle("notebook-settings:connect-obsidian", () => connectObsidianVault());
+ipcMain.handle("application-update:get", () => publicApplicationUpdateState());
+ipcMain.handle("application-update:check", () => checkForApplicationUpdates());
+ipcMain.handle("application-update:download", async () => {
+  if (!applicationUpdater || applicationUpdateState.status !== "available") {
+    return publicApplicationUpdateState();
+  }
+  broadcastApplicationUpdateState({ status: "downloading", percent: 0, message: "准备下载新版本…" });
+  try {
+    await applicationUpdater.downloadUpdate();
+  } catch (error) {
+    if (applicationUpdateState.status !== "error") {
+      console.error("Application update download failed", error);
+      broadcastApplicationUpdateState({ status: "error", percent: null, message: friendlyUpdateError(error) });
+    }
+  }
+  return publicApplicationUpdateState();
+});
+ipcMain.handle("application-update:install", () => {
+  if (!applicationUpdater || applicationUpdateState.status !== "downloaded") {
+    return publicApplicationUpdateState();
+  }
+  if (recordingActive) throw new Error("请先结束当前听记，再安装更新");
+  quitting = true;
+  setImmediate(() => applicationUpdater.quitAndInstall(false, true));
+  return publicApplicationUpdateState();
+});
 
 app.on("second-instance", showWindow);
 app.on("activate", () => {
@@ -762,6 +934,7 @@ app.whenReady().then(async () => {
     installDisplayMediaHandler();
     if (!mainWindow) createWindow();
     registerGlobalShortcuts();
+    await initializeApplicationUpdater();
   } catch (error) {
     dialog.showErrorBox("拾音 AI 无法启动", error.message);
     quitting = true;
@@ -773,6 +946,8 @@ app.on("window-all-closed", () => {
 });
 app.on("before-quit", () => {
   quitting = true;
+  if (updateStartupTimer) clearTimeout(updateStartupTimer);
+  if (updateIntervalTimer) clearInterval(updateIntervalTimer);
   globalShortcut.unregisterAll();
   if (powerBlockerId !== null && powerSaveBlocker.isStarted(powerBlockerId)) {
     powerSaveBlocker.stop(powerBlockerId);

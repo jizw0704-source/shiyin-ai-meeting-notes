@@ -42,6 +42,23 @@ contextBridge.exposeInMainWorld("shiyinDesktop", {
   saveMiniMaxSettings(settings) {
     return ipcRenderer.invoke("minimax-settings:save", settings);
   },
+  getApplicationUpdateState() {
+    return ipcRenderer.invoke("application-update:get");
+  },
+  checkForApplicationUpdates() {
+    return ipcRenderer.invoke("application-update:check");
+  },
+  downloadApplicationUpdate() {
+    return ipcRenderer.invoke("application-update:download");
+  },
+  installApplicationUpdate() {
+    return ipcRenderer.invoke("application-update:install");
+  },
+  onApplicationUpdateState(callback) {
+    const listener = (_event, state) => callback(state);
+    ipcRenderer.on("application-update-state", listener);
+    return () => ipcRenderer.removeListener("application-update-state", listener);
+  },
   onCommand(callback) {
     const listener = (_event, command) => callback(command);
     ipcRenderer.on("tray-command", listener);

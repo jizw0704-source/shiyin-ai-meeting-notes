@@ -1,0 +1,2 @@
+package.json whitespace=cr-at-eol
+package-lock.json whitespace=cr-at-eol

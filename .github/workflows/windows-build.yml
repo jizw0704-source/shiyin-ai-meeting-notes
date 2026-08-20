@@ -158,6 +158,7 @@ jobs:
           path: |
             release/*Setup*.exe
             release/*.blockmap
+            release/latest.yml
             release/SHA256SUMS-windows.txt
             release/windows-smoke-result.json
           if-no-files-found: warn

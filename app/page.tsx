@@ -3,11 +3,13 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowRight,
+  ArrowClockwise,
   Brain,
   ChartBar,
   CheckCircle,
   Clock,
   Compass,
+  DownloadSimple,
   Flag,
   FolderOpen,
   GearSix,
@@ -50,6 +52,18 @@ type GlobalShortcutStatus = {
   recordingAccelerator: string;
   openLabel: string;
   recordingLabel: string;
+};
+type ApplicationUpdateStatus = "unavailable" | "idle" | "checking" | "available" | "not-available" | "downloading" | "downloaded" | "error";
+type ApplicationUpdateState = {
+  status: ApplicationUpdateStatus;
+  currentVersion: string;
+  availableVersion: string | null;
+  percent: number | null;
+  message: string;
+  supported: boolean;
+  canCheck: boolean;
+  canDownload: boolean;
+  canInstall: boolean;
 };
 type MiniMaxSettings = {
   configured: boolean;
@@ -243,6 +257,11 @@ declare global {
       relaunch: () => void;
       getMiniMaxSettings: () => Promise<MiniMaxSettings>;
       saveMiniMaxSettings: (settings: { apiKey: string; model: string }) => Promise<MiniMaxSettings>;
+      getApplicationUpdateState: () => Promise<ApplicationUpdateState>;
+      checkForApplicationUpdates: () => Promise<ApplicationUpdateState>;
+      downloadApplicationUpdate: () => Promise<ApplicationUpdateState>;
+      installApplicationUpdate: () => Promise<ApplicationUpdateState>;
+      onApplicationUpdateState: (callback: (state: ApplicationUpdateState) => void) => () => void;
       onCommand: (callback: (command: string) => void) => () => void;
       setRecording: (active: boolean) => void;
     };
@@ -465,6 +484,7 @@ export default function Home() {
   const [systemAudioAvailable, setSystemAudioAvailable] = useState(false);
   const [audioCaptureCapabilities, setAudioCaptureCapabilities] = useState<AudioCaptureCapabilities | null>(null);
   const [globalShortcutStatus, setGlobalShortcutStatus] = useState<GlobalShortcutStatus | null>(null);
+  const [applicationUpdate, setApplicationUpdate] = useState<ApplicationUpdateState | null>(null);
   const [sourceWarning, setSourceWarning] = useState("");
   const [captureSettingsOpened, setCaptureSettingsOpened] = useState(false);
   const [audioInputs, setAudioInputs] = useState<AudioInput[]>([]);
@@ -578,9 +598,21 @@ export default function Home() {
         if (active) setGlobalShortcutStatus(status);
       })
       .catch(() => undefined);
+    desktop.getApplicationUpdateState()
+      .then((state) => {
+        if (active) setApplicationUpdate(state);
+      })
+      .catch(() => undefined);
+    const removeUpdateListener = desktop.onApplicationUpdateState((state) => {
+      if (!active) return;
+      setApplicationUpdate(state);
+      if (state.status === "available") setNotice(state.message);
+      if (state.status === "downloaded") setNotice("新版本已下载，方便时可重启安装");
+    });
     return () => {
       active = false;
       window.clearTimeout(capabilityTimer);
+      removeUpdateListener();
     };
   }, [refreshCaptureCapabilities]);
 
@@ -641,6 +673,25 @@ export default function Home() {
       setNotebookConnecting(false);
     }
   }, []);
+
+  const handleApplicationUpdate = useCallback(async () => {
+    const desktop = window.shiyinDesktop;
+    if (!desktop || !applicationUpdate) return;
+    try {
+      let state: ApplicationUpdateState;
+      if (applicationUpdate.status === "downloaded") {
+        setNotice("应用正在重新启动并安装更新…");
+        state = await desktop.installApplicationUpdate();
+      } else if (applicationUpdate.status === "available") {
+        state = await desktop.downloadApplicationUpdate();
+      } else {
+        state = await desktop.checkForApplicationUpdates();
+      }
+      setApplicationUpdate(state);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "更新操作失败，请稍后重试");
+    }
+  }, [applicationUpdate]);
 
   const saveSettings = useCallback(async () => {
     const desktop = window.shiyinDesktop;
@@ -2111,6 +2162,24 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
         </div>
         <div className="sidebar-bottom">
           <div className="privacy-state"><span>●</span> 本地后台已连接</div>
+          {applicationUpdate?.supported && (
+            <button
+              type="button"
+              className={`settings-button update-button status-${applicationUpdate.status}`}
+              disabled={recording || processing || applicationUpdate.status === "checking" || applicationUpdate.status === "downloading"}
+              onClick={() => void handleApplicationUpdate()}
+            >
+              {applicationUpdate.status === "available" ? <DownloadSimple size={17} weight="duotone" />
+                : applicationUpdate.status === "downloaded" ? <CheckCircle size={17} weight="duotone" />
+                : <ArrowClockwise size={17} weight="duotone" />}
+              <span>
+                <b>{applicationUpdate.status === "available" ? "下载新版本"
+                  : applicationUpdate.status === "downloaded" ? "重启并更新"
+                  : "版本更新"}</b>
+                <small>{applicationUpdate.message}</small>
+              </span>
+            </button>
+          )}
           <button className={`settings-button ${miniMaxSettings?.configured ? "" : "needs-attention"}`} disabled={recording || processing} onClick={() => void openSettingsDialog()}>
             <GearSix size={17} weight="duotone" />
             <span><b>MiniMax 设置</b><small>{miniMaxSettings?.configured ? "密钥已配置" : "配置密钥与模型"}</small></span>

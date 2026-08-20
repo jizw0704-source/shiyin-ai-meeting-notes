@@ -117,6 +117,9 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(page, /connectObsidianVault/);
   assert.match(page, /结束后自动同步/);
   assert.match(page, /saveMeetingToObsidian/);
+  assert.match(page, /checkForApplicationUpdates/);
+  assert.match(page, /下载新版本/);
+  assert.match(page, /重启并更新/);
   assert.match(page, /shiyin\.obsidianAutoSave/);
   assert.match(page, /开始 \/ 结束/);
   assert.match(page, /getGlobalShortcutStatus/);
@@ -162,6 +165,10 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(desktopMain, /Privacy_ScreenCapture/);
   assert.match(desktopMain, /shell\.openExternal/);
   assert.match(desktopMain, /application:relaunch/);
+  assert.match(desktopMain, /electron-updater/);
+  assert.match(desktopMain, /application-update:check/);
+  assert.match(desktopMain, /autoDownload = false/);
+  assert.match(desktopMain, /quitAndInstall/);
   assert.match(desktopMain, /titleBarStyle: process\.platform === "darwin" \? "hiddenInset" : "hidden"/);
   assert.match(desktopMain, /trafficLightPosition: \{ x: 18, y: 18 \}/);
   assert.match(desktopMain, /nativeTheme\.themeSource = "system"/);
@@ -192,6 +199,8 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(preload, /notebook-settings:connect-obsidian/);
   assert.match(preload, /global-shortcuts:get/);
   assert.match(preload, /application:relaunch/);
+  assert.match(preload, /application-update-state/);
+  assert.match(packageJson, /"provider": "github"/);
   assert.match(preload, /platform-\$\{process\.platform\}/);
   assert.match(preload, /saveMiniMaxSettings/);
   assert.match(packageJson, /NSAudioCaptureUsageDescription/);
