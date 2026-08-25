@@ -532,6 +532,7 @@ websocketServer.on("connection", (client, request) => {
     summaryTemplate: requestUrl.searchParams.get("template"),
     reportStyle: requestUrl.searchParams.get("reportStyle"),
     maxSpeakers: requestUrl.searchParams.get("maxSpeakers"),
+    speakerLimitMode: requestUrl.searchParams.get("speakerLimitMode"),
   });
   const meetingId = meeting.id;
   const audio = new AudioSession(dataRoot, meetingId);
@@ -585,9 +586,13 @@ websocketServer.on("connection", (client, request) => {
     const pcm = audio.readRange(startMs, endMs);
     const assignment = speakerEngine.classifySegment(meetingId, pcm, storage, {
       maxSpeakers: meeting.maxSpeakers,
+      speakerLimitMode: meeting.speakerLimitMode,
     });
     const overlap = assignment?.overlap || { suspected: false, confidence: null, candidateIds: [] };
-    const speakerId = overlap.suspected ? null : assignment?.speaker?.id || lastSpeakerId;
+    const needsSpeakerConfirmation = assignment?.pendingNewSpeaker || assignment?.limitReached;
+    const speakerId = overlap.suspected || needsSpeakerConfirmation
+      ? null
+      : assignment?.speaker?.id || lastSpeakerId;
     if (speakerId) lastSpeakerId = speakerId;
     if (previousSegment && previousSegment.endMs !== null) {
       storage.setPauseAfter(previousSegment.id, Math.max(0, startMs - previousSegment.endMs));
@@ -613,6 +618,14 @@ websocketServer.on("connection", (client, request) => {
       segment,
       speaker: speakerId ? storage.getSpeaker(speakerId) : null,
       speakers: storage.listSpeakers(meetingId),
+      speakerDetection: {
+        mode: meeting.speakerLimitMode,
+        recognizedCount: storage.listSpeakers(meetingId).length,
+        effectiveMaxSpeakers: assignment?.effectiveMaxSpeakers ?? meeting.maxSpeakers,
+        expandedTo: assignment?.expandedTo ?? null,
+        pendingNewSpeaker: Boolean(assignment?.pendingNewSpeaker),
+        limitReached: Boolean(assignment?.limitReached),
+      },
     });
     scheduleLiveSummary();
   }

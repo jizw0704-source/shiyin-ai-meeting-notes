@@ -1,7 +1,7 @@
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { normalizeMaxSpeakers } from "./speaker-settings.mjs";
+import { normalizeMaxSpeakers, normalizeSpeakerLimitMode } from "./speaker-settings.mjs";
 import { cosineSimilarity, detectPotentialOverlap } from "./overlap-detection.mjs";
 
 const require = createRequire(import.meta.url);
@@ -32,8 +32,13 @@ export class SpeakerEngine {
     this.profileAutoMargin = options.profileAutoMargin ?? 0.05;
     this.profileSuggestionThreshold = options.profileSuggestionThreshold ?? 0.78;
     this.profileSuggestionMargin = options.profileSuggestionMargin ?? 0.025;
+    this.autoExpansionSamples = options.autoExpansionSamples ?? 3;
+    this.autoExpansionDurationMs = options.autoExpansionDurationMs ?? 3600;
+    this.autoExpansionSimilarity = options.autoExpansionSimilarity ?? 0.72;
     this.extractor = null;
     this.clusters = new Map();
+    this.autoLimits = new Map();
+    this.pendingNovelVoices = new Map();
     if (existsSync(this.modelPath)) {
       const sherpa = require("sherpa-onnx-node");
       this.extractor = new sherpa.SpeakerEmbeddingExtractor({
@@ -67,6 +72,42 @@ export class SpeakerEngine {
       speechDurationMs: 0,
       lastProfileCheckCount: speaker.profileId || speaker.manuallyNamed ? speaker.sampleCount || 1 : 0,
     })));
+    const count = speakers.length;
+    this.autoLimits.set(meetingId, count > 12 ? 20 : count > 6 ? 12 : 6);
+  }
+
+  createCluster(meetingId, embedding, storage, options = {}) {
+    const clusters = this.clusters.get(meetingId);
+    const label = `发言人${clusters.length + 1}`;
+    const speaker = storage.ensureSpeaker(meetingId, label, embedding);
+    const sampleCount = options.sampleCount || 1;
+    clusters.push({
+      speakerId: speaker.id,
+      label,
+      centroid: embedding,
+      sampleCount,
+      speechDurationMs: options.durationMs || 0,
+      lastProfileCheckCount: 0,
+    });
+    if (sampleCount > 1) storage.updateSpeakerCentroid(speaker.id, embedding, sampleCount);
+    return speaker;
+  }
+
+  trackNovelVoice(meetingId, embedding, durationMs) {
+    const current = this.pendingNovelVoices.get(meetingId);
+    const similar = current && cosineSimilarity(embedding, current.centroid) >= this.autoExpansionSimilarity;
+    if (!similar) {
+      const pending = { centroid: embedding, sampleCount: 1, durationMs: durationMs || 0 };
+      this.pendingNovelVoices.set(meetingId, pending);
+      return pending;
+    }
+    const count = current.sampleCount + 1;
+    const weight = Math.min(0.34, 1 / count);
+    current.centroid = normalize(Float32Array.from(current.centroid, (value, index) =>
+      value * (1 - weight) + embedding[index] * weight));
+    current.sampleCount = count;
+    current.durationMs += durationMs || 0;
+    return current;
   }
 
   evaluateProfileMatch(meetingId, cluster, storage, options = {}) {
@@ -113,21 +154,47 @@ export class SpeakerEngine {
     })));
     if (overlap.suspected) return { speaker: null, score: null, created: false, overlap };
     const maxSpeakers = normalizeMaxSpeakers(options.maxSpeakers ?? this.maxSpeakers);
-    if ((!best || best.score < this.threshold) && clusters.length < maxSpeakers) {
-      const label = `发言人${clusters.length + 1}`;
-      const speaker = storage.ensureSpeaker(meetingId, label, embedding);
-      const cluster = {
-        speakerId: speaker.id,
-        label,
-        centroid: embedding,
-        sampleCount: 1,
-        speechDurationMs: options.durationMs || 0,
-        lastProfileCheckCount: 0,
+    const speakerLimitMode = normalizeSpeakerLimitMode(options.speakerLimitMode, "manual");
+    const effectiveMaxSpeakers = speakerLimitMode === "auto"
+      ? Math.min(maxSpeakers, this.autoLimits.get(meetingId) || 6)
+      : maxSpeakers;
+    if ((!best || best.score < this.threshold) && clusters.length < effectiveMaxSpeakers) {
+      this.pendingNovelVoices.delete(meetingId);
+      const speaker = this.createCluster(meetingId, embedding, storage, options);
+      return { speaker, score: 1, created: true, effectiveMaxSpeakers };
+    }
+    if ((!best || best.score < this.threshold) && speakerLimitMode === "auto") {
+      if (effectiveMaxSpeakers >= maxSpeakers) {
+        return { speaker: null, score: best?.score ?? null, created: false, limitReached: true, effectiveMaxSpeakers };
+      }
+      const pending = this.trackNovelVoice(meetingId, embedding, options.durationMs);
+      if (pending.sampleCount >= this.autoExpansionSamples
+        && pending.durationMs >= this.autoExpansionDurationMs) {
+        const expandedTo = effectiveMaxSpeakers < 12 ? 12 : 20;
+        this.autoLimits.set(meetingId, Math.min(maxSpeakers, expandedTo));
+        this.pendingNovelVoices.delete(meetingId);
+        const speaker = this.createCluster(meetingId, pending.centroid, storage, {
+          durationMs: pending.durationMs,
+          sampleCount: pending.sampleCount,
+        });
+        return {
+          speaker,
+          score: 1,
+          created: true,
+          expandedTo: Math.min(maxSpeakers, expandedTo),
+          effectiveMaxSpeakers: Math.min(maxSpeakers, expandedTo),
+        };
+      }
+      return {
+        speaker: null,
+        score: best?.score ?? null,
+        created: false,
+        pendingNewSpeaker: true,
+        effectiveMaxSpeakers,
       };
-      clusters.push(cluster);
-      return { speaker, score: 1, created: true };
     }
     if (!best) return null;
+    this.pendingNovelVoices.delete(meetingId);
     const cluster = best.cluster;
     const count = cluster.sampleCount + 1;
     const weight = Math.min(0.25, 1 / count);
@@ -157,5 +224,7 @@ export class SpeakerEngine {
 
   resetMeeting(meetingId) {
     this.clusters.delete(meetingId);
+    this.autoLimits.delete(meetingId);
+    this.pendingNovelVoices.delete(meetingId);
   }
 }

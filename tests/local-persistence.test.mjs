@@ -17,7 +17,7 @@ import {
 } from "../server/storage-maintenance.mjs";
 import { createWorkspaceBackup, restoreWorkspaceBackup } from "../server/workspace-backup.mjs";
 import { findAvailableLocalPort } from "../server/local-port.mjs";
-import { normalizeMaxSpeakers } from "../server/speaker-settings.mjs";
+import { normalizeMaxSpeakers, normalizeSpeakerLimitMode } from "../server/speaker-settings.mjs";
 import { SpeakerEngine } from "../server/speaker-engine.mjs";
 import { detectPotentialOverlap } from "../server/overlap-detection.mjs";
 import { cleanTranscriptText, replaceTranscriptText } from "../server/transcript-cleaning.mjs";
@@ -181,6 +181,7 @@ test("persists meetings, speakers, timestamps, pauses, and manual names", () => 
       summaryTemplate: "project-sync",
       reportStyle: "visual",
       maxSpeakers: 12,
+      speakerLimitMode: "manual",
     });
     const speaker = storage.ensureSpeaker(meeting.id, "发言人1", new Float32Array([1, 0, 0]));
     const first = storage.addSegment(meeting.id, {
@@ -221,6 +222,7 @@ test("persists meetings, speakers, timestamps, pauses, and manual names", () => 
     assert.equal(saved.templateVersion, 1);
     assert.equal(saved.reportStyle, "visual");
     assert.equal(saved.maxSpeakers, 12);
+    assert.equal(saved.speakerLimitMode, "manual");
     assert.equal(saved.segments.length, 2);
     assert.equal(saved.segments[0].pauseAfterMs, 1450);
     assert.equal(saved.liveSummary.headline, "实时草稿");
@@ -230,6 +232,68 @@ test("persists meetings, speakers, timestamps, pauses, and manual names", () => 
     assert.equal(renamed.autoMatched, false);
     assert.ok(renamed.profileId);
     assert.equal(storage.listSpeakerProfiles().length, 1);
+  } finally {
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("defaults new meetings to automatic speaker detection with a 20-person safety ceiling", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-auto-speakers-"));
+  const storage = new MeetingStorage(root);
+  try {
+    const meeting = storage.createMeeting("自动识别会议");
+    assert.equal(meeting.speakerLimitMode, "auto");
+    assert.equal(meeting.maxSpeakers, 20);
+    assert.equal(normalizeSpeakerLimitMode("unexpected", "manual"), "manual");
+  } finally {
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("automatic speaker detection expands only after a stable seventh voice repeats", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-auto-expansion-"));
+  const storage = new MeetingStorage(root);
+  try {
+    const meeting = storage.createMeeting("自动扩容会议");
+    const engine = new SpeakerEngine({
+      modelPath: path.join(root, "missing-speaker-model.onnx"),
+      autoExpansionSamples: 3,
+      autoExpansionDurationMs: 3600,
+    });
+    for (let index = 0; index < 6; index += 1) {
+      const voice = new Float32Array(7);
+      voice[index] = 1;
+      const assignment = engine.assign(meeting.id, voice, storage, {
+        durationMs: 1500,
+        maxSpeakers: meeting.maxSpeakers,
+        speakerLimitMode: meeting.speakerLimitMode,
+      });
+      assert.equal(assignment.created, true);
+    }
+    const seventhVoice = new Float32Array([0, 0, 0, 0, 0, 0, 1]);
+    const firstEvidence = engine.assign(meeting.id, seventhVoice, storage, {
+      durationMs: 1500,
+      maxSpeakers: 20,
+      speakerLimitMode: "auto",
+    });
+    const secondEvidence = engine.assign(meeting.id, seventhVoice, storage, {
+      durationMs: 1500,
+      maxSpeakers: 20,
+      speakerLimitMode: "auto",
+    });
+    const expanded = engine.assign(meeting.id, seventhVoice, storage, {
+      durationMs: 1500,
+      maxSpeakers: 20,
+      speakerLimitMode: "auto",
+    });
+    assert.equal(firstEvidence.pendingNewSpeaker, true);
+    assert.equal(secondEvidence.pendingNewSpeaker, true);
+    assert.equal(storage.listSpeakers(meeting.id).length, 7);
+    assert.equal(expanded.created, true);
+    assert.equal(expanded.expandedTo, 12);
+    assert.equal(expanded.speaker.displayName, "发言人7");
   } finally {
     storage.close();
     rmSync(root, { recursive: true, force: true });

@@ -10,7 +10,7 @@ import {
   normalizeSummaryTemplateId,
 } from "./summary-templates.mjs";
 import { cleanTranscriptText, replaceTranscriptText } from "./transcript-cleaning.mjs";
-import { normalizeMaxSpeakers } from "./speaker-settings.mjs";
+import { normalizeMaxSpeakers, normalizeSpeakerLimitMode } from "./speaker-settings.mjs";
 
 const speakerPalette = [
   "green", "violet", "amber", "blue", "rose", "teal", "orange", "indigo", "cyan", "lime",
@@ -63,7 +63,8 @@ export class MeetingStorage {
         filler_filter_enabled INTEGER NOT NULL DEFAULT 0,
         summary_stale INTEGER NOT NULL DEFAULT 0,
         active_transcript_version_id TEXT,
-        max_speakers INTEGER NOT NULL DEFAULT 6
+        max_speakers INTEGER NOT NULL DEFAULT 6,
+        speaker_limit_mode TEXT NOT NULL DEFAULT 'manual'
       );
       CREATE TABLE IF NOT EXISTS speakers (
         id TEXT PRIMARY KEY,
@@ -171,6 +172,9 @@ export class MeetingStorage {
     if (!meetingColumns.has("max_speakers")) {
       this.db.exec("ALTER TABLE meetings ADD COLUMN max_speakers INTEGER NOT NULL DEFAULT 6");
     }
+    if (!meetingColumns.has("speaker_limit_mode")) {
+      this.db.exec("ALTER TABLE meetings ADD COLUMN speaker_limit_mode TEXT NOT NULL DEFAULT 'manual'");
+    }
     const segmentColumns = new Set(
       this.db.prepare("PRAGMA table_info(segments)").all().map((column) => column.name),
     );
@@ -209,7 +213,10 @@ export class MeetingStorage {
     const now = new Date().toISOString();
     const summaryTemplate = normalizeSummaryTemplateId(options.summaryTemplate);
     const reportStyle = normalizeReportStyle(options.reportStyle);
-    const maxSpeakers = normalizeMaxSpeakers(options.maxSpeakers);
+    const speakerLimitMode = normalizeSpeakerLimitMode(options.speakerLimitMode);
+    const maxSpeakers = normalizeMaxSpeakers(
+      options.maxSpeakers ?? (speakerLimitMode === "auto" ? 20 : undefined),
+    );
     const templateVersion = Number.isInteger(options.templateVersion)
       ? options.templateVersion
       : SUMMARY_TEMPLATE_VERSION;
@@ -217,9 +224,10 @@ export class MeetingStorage {
     mkdirSync(directory, { recursive: true });
     this.db.prepare(`
       INSERT INTO meetings
-      (id, title, status, created_at, started_at, summary_template, template_version, report_style, max_speakers)
-      VALUES (?, ?, 'recording', ?, ?, ?, ?, ?, ?)
-    `).run(id, title, now, now, summaryTemplate, templateVersion, reportStyle, maxSpeakers);
+      (id, title, status, created_at, started_at, summary_template, template_version, report_style,
+       max_speakers, speaker_limit_mode)
+      VALUES (?, ?, 'recording', ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, title, now, now, summaryTemplate, templateVersion, reportStyle, maxSpeakers, speakerLimitMode);
     return this.getMeeting(id);
   }
 
@@ -254,6 +262,7 @@ export class MeetingStorage {
       summaryStale: Boolean(meeting.summary_stale),
       activeTranscriptVersionId: meeting.active_transcript_version_id || null,
       maxSpeakers: normalizeMaxSpeakers(meeting.max_speakers),
+      speakerLimitMode: normalizeSpeakerLimitMode(meeting.speaker_limit_mode, "manual"),
     };
     if (!includeDetails) return value;
     value.speakers = this.listSpeakers(meeting.id);
@@ -280,10 +289,14 @@ export class MeetingStorage {
       reportStyle: "report_style",
       activeTranscriptVersionId: "active_transcript_version_id",
       maxSpeakers: "max_speakers",
+      speakerLimitMode: "speaker_limit_mode",
     };
     const normalizedPatch = {
       ...patch,
       ...(Object.hasOwn(patch, "maxSpeakers") ? { maxSpeakers: normalizeMaxSpeakers(patch.maxSpeakers) } : {}),
+      ...(Object.hasOwn(patch, "speakerLimitMode")
+        ? { speakerLimitMode: normalizeSpeakerLimitMode(patch.speakerLimitMode) }
+        : {}),
     };
     const entries = Object.entries(normalizedPatch).filter(([key]) => map[key]);
     if (entries.length) {
@@ -1014,8 +1027,9 @@ export class MeetingStorage {
         INSERT INTO meetings
         (id, title, status, created_at, started_at, ended_at, duration_ms, audio_path,
          summary_json, live_summary_json, error, summary_template, template_version,
-         report_style, filler_filter_enabled, summary_stale, active_transcript_version_id, max_speakers)
-        VALUES (?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
+         report_style, filler_filter_enabled, summary_stale, active_transcript_version_id, max_speakers,
+         speaker_limit_mode)
+        VALUES (?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         meetingId,
         String(snapshot.title || "已恢复会议").slice(0, 80),
@@ -1033,6 +1047,7 @@ export class MeetingStorage {
         snapshot.summaryStale ? 1 : 0,
         snapshot.activeTranscriptVersionId || null,
         normalizeMaxSpeakers(snapshot.maxSpeakers),
+        normalizeSpeakerLimitMode(snapshot.speakerLimitMode, "manual"),
       );
       for (const speaker of snapshot.speakers || []) {
         const profileId = this.profileImportAliases.get(speaker.profileId) || speaker.profileId || null;

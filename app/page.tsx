@@ -36,6 +36,7 @@ type SummaryTemplateId = "meeting-minutes" | "daily-log" | "project-sync" | "bra
 type ReportStyle = "detailed" | "visual";
 type AudioSourceMode = "microphone" | "system" | "mixed";
 type SpeakerLimit = 6 | 12 | 20;
+type SpeakerLimitMode = "auto" | "manual";
 type TranscriptMode = "organized" | "original";
 type TranscriptOrder = "ascending" | "descending";
 type AudioCaptureCapabilities = {
@@ -233,6 +234,7 @@ type MeetingBrief = {
   fillerFilterEnabled: boolean;
   summaryStale: boolean;
   maxSpeakers: SpeakerLimit;
+  speakerLimitMode: SpeakerLimitMode;
 };
 type Meeting = MeetingBrief & {
   speakers: Speaker[];
@@ -510,6 +512,7 @@ export default function Home() {
   const [defaultSummaryTemplate, setDefaultSummaryTemplate] = useState<SummaryTemplateId>(DEFAULT_SUMMARY_TEMPLATE);
   const [defaultReportStyle, setDefaultReportStyle] = useState<ReportStyle>(DEFAULT_REPORT_STYLE);
   const [speakerLimit, setSpeakerLimit] = useState<SpeakerLimit>(DEFAULT_SPEAKER_LIMIT);
+  const [speakerLimitMode, setSpeakerLimitMode] = useState<SpeakerLimitMode>("auto");
   const [templateDraft, setTemplateDraft] = useState<SummaryTemplateId>(DEFAULT_SUMMARY_TEMPLATE);
   const [reportStyleDraft, setReportStyleDraft] = useState<ReportStyle>(DEFAULT_REPORT_STYLE);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
@@ -594,6 +597,7 @@ export default function Home() {
       const savedTemplate = window.localStorage.getItem("shiyin.summaryTemplate") as SummaryTemplateId | null;
       const savedStyle = window.localStorage.getItem("shiyin.reportStyle");
       const savedSpeakerLimit = Number(window.localStorage.getItem("shiyin.maxSpeakers"));
+      const savedSpeakerLimitMode = window.localStorage.getItem("shiyin.speakerLimitMode");
       const savedObsidianAutoSave = window.localStorage.getItem("shiyin.obsidianAutoSave");
       const savedTranscriptOrder = window.localStorage.getItem("shiyin.transcriptOrder");
       if (summaryTemplates.some((template) => template.id === savedTemplate)) {
@@ -603,6 +607,7 @@ export default function Home() {
       if (speakerLimitOptions.some((option) => option.value === savedSpeakerLimit)) {
         setSpeakerLimit(savedSpeakerLimit as SpeakerLimit);
       }
+      if (savedSpeakerLimitMode === "manual") setSpeakerLimitMode("manual");
       setObsidianAutoSave(savedObsidianAutoSave === "true");
       if (savedTranscriptOrder === "descending") setTranscriptOrder("descending");
     }, 0);
@@ -1166,6 +1171,8 @@ export default function Home() {
       socketUrl.searchParams.set("template", defaultSummaryTemplate);
       socketUrl.searchParams.set("reportStyle", defaultReportStyle);
       socketUrl.searchParams.set("maxSpeakers", String(speakerLimit));
+      socketUrl.searchParams.set("speakerLimitMode", speakerLimitMode);
+      if (speakerLimitMode === "auto") socketUrl.searchParams.set("maxSpeakers", "20");
       const socket = new WebSocket(socketUrl.toString());
       socket.binaryType = "arraybuffer";
       socketRef.current = socket;
@@ -1200,6 +1207,13 @@ export default function Home() {
             setLiveText("");
             setLiveConfirmedText(message.segment.cleanedText || message.segment.text || "");
             updateLiveSegment(message.segment, message.speakers);
+            if (message.speakerDetection?.expandedTo) {
+              setNotice(`检测到持续出现的新声音，已自动扩展到最多 ${message.speakerDetection.expandedTo} 位发言人`);
+            } else if (message.speakerDetection?.pendingNewSpeaker) {
+              setConnectionStatus(`${sessionAsrLabel} · 正在确认新的发言人…`);
+            } else if (message.speakerDetection?.limitReached) {
+              setNotice("已达到 20 位发言人上限，新的声音暂标记为待确认");
+            }
           } else if (message.type === "speaker.profiles.updated") {
             setMeeting((current) => {
               if (!current || current.id !== message.meetingId) return current;
@@ -2175,19 +2189,34 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
         <section className="speaker-limit-picker" aria-labelledby="speaker-limit-title">
           <div className="speaker-limit-heading">
             <UsersThree size={15} weight="duotone" />
-            <span><b id="speaker-limit-title">预计参会人数</b><small>用于区分发言人</small></span>
+            <span><b id="speaker-limit-title">发言人数识别</b><small>默认自动检测，也可设置手动上限</small></span>
           </div>
           <div className="speaker-limit-options" role="radiogroup" aria-label="选择新会议的发言人数上限">
+            <button
+              type="button"
+              className={speakerLimitMode === "auto" ? "active" : ""}
+              aria-pressed={speakerLimitMode === "auto"}
+              disabled={recording || processing}
+              onClick={() => {
+                setSpeakerLimitMode("auto");
+                window.localStorage.setItem("shiyin.speakerLimitMode", "auto");
+                setNotice("下一场会议将自动检测发言人数");
+              }}
+            >
+              <b>自动</b><small>推荐</small>
+            </button>
             {speakerLimitOptions.map((option) => (
               <button
                 type="button"
                 key={option.value}
-                className={speakerLimit === option.value ? "active" : ""}
-                aria-pressed={speakerLimit === option.value}
+                className={speakerLimitMode === "manual" && speakerLimit === option.value ? "active" : ""}
+                aria-pressed={speakerLimitMode === "manual" && speakerLimit === option.value}
                 disabled={recording || processing}
                 onClick={() => {
                   setSpeakerLimit(option.value);
+                  setSpeakerLimitMode("manual");
                   window.localStorage.setItem("shiyin.maxSpeakers", String(option.value));
+                  window.localStorage.setItem("shiyin.speakerLimitMode", "manual");
                   setNotice(`下一场会议最多区分 ${option.value} 位发言人`);
                 }}
               >
@@ -2195,7 +2224,9 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
               </button>
             ))}
           </div>
-          {speakerLimit > 12 && <p>人数较多时，建议会后检查并合并误分的发言人。</p>}
+          {speakerLimitMode === "auto"
+            ? <p>先识别 6 位；持续检测到可信的新声纹后，再逐级扩展到 12、20 位。</p>
+            : speakerLimit > 12 && <p>人数较多时，建议会后检查并合并误分的发言人。</p>}
         </section>
         <button className="template-quick-button" onClick={openTemplateDialog} disabled={recording || processing}>
           <span className={`template-quick-icon ${(meeting?.summaryTemplate || defaultSummaryTemplate).replace("meeting-", "")}`}>
@@ -2283,7 +2314,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             <GearSix size={17} weight="duotone" />
             <span><b>MiniMax 设置</b><small>{miniMaxSettings?.configured ? "密钥已配置" : "配置密钥与模型"}</small></span>
           </button>
-          <div className="profile"><span>本</span><p><b>本机工作区</b><small>新会议最多 {speakerLimit} 人</small></p></div>
+          <div className="profile"><span>本</span><p><b>本机工作区</b><small>{speakerLimitMode === "auto" ? "新会议自动检测发言人" : `新会议最多 ${speakerLimit} 人`}</small></p></div>
         </div>
       </aside>
 
@@ -2297,8 +2328,8 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             <h1>{meeting?.title || "拾音 AI 会议听记"}</h1>
             <p>
               {meeting
-                ? `${meeting.speakers.length || "待识别"} 位发言人 · 上限 ${meeting.maxSpeakers} 人 · ${formatClock(meeting.durationMs || seconds * 1000)}`
-                : "选择录音来源与参会人数，然后开始本地会议听记"}
+                ? `${meeting.speakers.length ? `已识别 ${meeting.speakers.length}` : "待识别"} 位发言人 · ${meeting.speakerLimitMode === "auto" ? "自动检测" : `上限 ${meeting.maxSpeakers} 人`} · ${formatClock(meeting.durationMs || seconds * 1000)}`
+                : "选择录音来源，发言人数可自动检测，然后开始本地会议听记"}
             </p>
           </div>
           {meeting ? <div className="top-actions">
@@ -2391,7 +2422,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                   <strong>{recording ? "正在启动…" : "开始会议"}</strong>
                   <small>
                     {audioSourceMode === "mixed" ? "电脑声音 + 麦克风" : audioSourceMode === "system" ? "电脑声音" : "麦克风"}
-                    {` · 最多 ${speakerLimit} 人`}
+                    {speakerLimitMode === "auto" ? " · 自动检测发言人" : ` · 最多 ${speakerLimit} 人`}
                   </small>
                 </button>
                 <div className="meeting-start-features" aria-label="会议处理方式">

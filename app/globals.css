@@ -731,7 +731,7 @@ button:active:not(:disabled) { transform:scale(.97); }
 .speaker-limit-heading span,.speaker-limit-heading b,.speaker-limit-heading small { display:block; min-width:0; }
 .speaker-limit-heading b { font-size:9px; }
 .speaker-limit-heading small { margin-top:1px; font-size:7px; }
-.speaker-limit-options { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:4px; margin-top:7px; }
+.speaker-limit-options { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:4px; margin-top:7px; }
 .speaker-limit-options button { min-width:0; padding:5px 2px; border:1px solid rgba(73,87,115,.09); border-radius:8px; color:#697486; background:rgba(255,255,255,.5); box-shadow:none; text-align:center; transform:none; }
 .speaker-limit-options button b,.speaker-limit-options button small { display:block; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
 .speaker-limit-options button b { font-size:9px; }
