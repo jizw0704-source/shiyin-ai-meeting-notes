@@ -460,6 +460,18 @@ const httpServer = createServer(async (request, response) => {
       const speaker = storage.renameSpeaker(speakerMatch[1], body.displayName);
       return jsonResponse(response, 200, speaker);
     }
+    const segmentSpeakerMatch = url.pathname.match(/^\/api\/segments\/([^/]+)\/speaker$/);
+    if (request.method === "PATCH" && segmentSpeakerMatch) {
+      const segment = storage.getSegment(segmentSpeakerMatch[1]);
+      if (!segment) return jsonResponse(response, 404, { error: "逐字稿片段不存在" });
+      const currentMeeting = storage.getMeeting(segment.meetingId);
+      if (meetingIsBusy(currentMeeting)) {
+        return jsonResponse(response, 409, { error: "会议仍在处理中，请稍后再确认发言人" });
+      }
+      const body = await readJson(request);
+      if (!body.speakerId) return jsonResponse(response, 400, { error: "请选择发言人" });
+      return jsonResponse(response, 200, storage.assignSegmentSpeaker(segmentSpeakerMatch[1], body.speakerId));
+    }
     const versionRestoreMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/transcript-versions\/([^/]+)\/restore$/);
     if (request.method === "POST" && versionRestoreMatch) {
       const currentMeeting = storage.getMeeting(versionRestoreMatch[1]);
@@ -574,7 +586,8 @@ websocketServer.on("connection", (client, request) => {
     const assignment = speakerEngine.classifySegment(meetingId, pcm, storage, {
       maxSpeakers: meeting.maxSpeakers,
     });
-    const speakerId = assignment?.speaker?.id || lastSpeakerId;
+    const overlap = assignment?.overlap || { suspected: false, confidence: null, candidateIds: [] };
+    const speakerId = overlap.suspected ? null : assignment?.speaker?.id || lastSpeakerId;
     if (speakerId) lastSpeakerId = speakerId;
     if (previousSegment && previousSegment.endMs !== null) {
       storage.setPauseAfter(previousSegment.id, Math.max(0, startMs - previousSegment.endMs));
@@ -589,6 +602,9 @@ websocketServer.on("connection", (client, request) => {
       source: asrMode === "local" ? "local-realtime" : "realtime",
       confidence: assignment?.score ?? null,
       words: result.words || [],
+      overlapSuspected: overlap.suspected,
+      overlapConfidence: overlap.confidence,
+      overlapSpeakerIds: overlap.candidateIds,
     });
     previousSegment = segment;
     sendJson(client, {
@@ -690,6 +706,12 @@ websocketServer.on("connection", (client, request) => {
         status: miniMaxApiKey ? "summarizing" : "completed",
         error: asrError,
       });
+      try {
+        const speakers = speakerEngine.finalizeProfileMatches(meetingId, storage);
+        sendJson(client, { type: "speaker.profiles.updated", meetingId, speakers });
+      } catch {
+        // A lightweight name match must never block saving or summarizing the meeting.
+      }
       activeSessions.delete(meetingId);
       await runSummaryAfterMeeting(meetingId, client);
     } catch (error) {

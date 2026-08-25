@@ -18,6 +18,8 @@ import {
 import { createWorkspaceBackup, restoreWorkspaceBackup } from "../server/workspace-backup.mjs";
 import { findAvailableLocalPort } from "../server/local-port.mjs";
 import { normalizeMaxSpeakers } from "../server/speaker-settings.mjs";
+import { SpeakerEngine } from "../server/speaker-engine.mjs";
+import { detectPotentialOverlap } from "../server/overlap-detection.mjs";
 import { cleanTranscriptText, replaceTranscriptText } from "../server/transcript-cleaning.mjs";
 import { punctuateTranscriptText } from "../server/transcript-punctuation.mjs";
 import {
@@ -113,6 +115,62 @@ test("normalizes supported meeting sizes without allowing unbounded speaker clus
   assert.equal(normalizeMaxSpeakers("12"), 12);
   assert.equal(normalizeMaxSpeakers(20), 20);
   assert.equal(normalizeMaxSpeakers(99), 6);
+});
+
+test("conservatively detects an embedding between two established speakers", () => {
+  const overlap = detectPotentialOverlap(
+    new Float32Array([Math.SQRT1_2, Math.SQRT1_2]),
+    [
+      { id: "speaker-a", centroid: new Float32Array([1, 0]) },
+      { id: "speaker-b", centroid: new Float32Array([0, 1]) },
+    ],
+  );
+  assert.equal(overlap.suspected, true);
+  assert.deepEqual(overlap.candidateIds, ["speaker-a", "speaker-b"]);
+  assert.ok(overlap.confidence >= 0.55 && overlap.confidence <= 0.92);
+
+  const clearVoice = detectPotentialOverlap(
+    new Float32Array([0.995, 0.1]),
+    [
+      { id: "speaker-a", centroid: new Float32Array([1, 0]) },
+      { id: "speaker-b", centroid: new Float32Array([0, 1]) },
+    ],
+  );
+  assert.equal(clearVoice.suspected, false);
+});
+
+test("persists overlap warnings and clears them after manual speaker confirmation", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-overlap-"));
+  const storage = new MeetingStorage(root);
+  try {
+    const meeting = storage.createMeeting("重叠发言测试");
+    const first = storage.ensureSpeaker(meeting.id, "发言人1", new Float32Array([1, 0]));
+    const second = storage.ensureSpeaker(meeting.id, "发言人2", new Float32Array([0, 1]));
+    const segment = storage.addSegment(meeting.id, {
+      seq: 0,
+      startMs: 1200,
+      endMs: 3600,
+      text: "两个人同时回应了这个问题",
+      speakerId: null,
+      overlapSuspected: true,
+      overlapConfidence: 0.76,
+      overlapSpeakerIds: [first.id, second.id],
+    });
+    const saved = storage.getSegment(segment.id);
+    assert.equal(saved.overlapSuspected, true);
+    assert.equal(saved.overlapConfidence, 0.76);
+    assert.deepEqual(saved.overlapSpeakerIds, [first.id, second.id]);
+
+    const updated = storage.assignSegmentSpeaker(segment.id, second.id);
+    assert.equal(updated.segments[0].speakerId, second.id);
+    assert.equal(updated.segments[0].overlapSuspected, false);
+    assert.equal(updated.segments[0].overlapConfidence, null);
+    assert.deepEqual(updated.segments[0].overlapSpeakerIds, []);
+    assert.equal(updated.summaryStale, true);
+  } finally {
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("persists meetings, speakers, timestamps, pauses, and manual names", () => {
@@ -211,6 +269,76 @@ test("remembers manually named voices and conservatively matches them across mee
       ambiguityMargin: 0.04,
     });
     assert.equal(ambiguous, null);
+  } finally {
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("progressively matches a known voice during the meeting and performs a lightweight final retry", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-progressive-speaker-"));
+  const storage = new MeetingStorage(root);
+  try {
+    const knownMeeting = storage.createMeeting("已知发言人");
+    const known = storage.ensureSpeaker(knownMeeting.id, "发言人1", new Float32Array([1, 0, 0]));
+    storage.renameSpeaker(known.id, "王工");
+
+    const activeMeeting = storage.createMeeting("实时匹配");
+    const engine = new SpeakerEngine({
+      modelPath: path.join(root, "missing-speaker-model.onnx"),
+      profileMinimumSamples: 3,
+      profileMinimumDurationMs: 6000,
+    });
+    const voice = new Float32Array([0.99, 0.08, 0]);
+    const first = engine.assign(activeMeeting.id, voice, storage, { durationMs: 2500 });
+    assert.equal(first.speaker.displayName, "发言人1");
+    const second = engine.assign(activeMeeting.id, voice, storage, { durationMs: 2500 });
+    assert.equal(second.speaker.displayName, "发言人1");
+    const third = engine.assign(activeMeeting.id, voice, storage, { durationMs: 2500 });
+    assert.equal(third.speaker.displayName, "王工");
+    assert.equal(third.speaker.autoMatched, true);
+
+    const finalMeeting = storage.createMeeting("结束时复核");
+    const finalEngine = new SpeakerEngine({ modelPath: path.join(root, "missing-final-model.onnx") });
+    const plausibleVoice = new Float32Array([0.8, 0.6, 0]);
+    finalEngine.assign(finalMeeting.id, plausibleVoice, storage, { durationMs: 2200 });
+    finalEngine.assign(finalMeeting.id, plausibleVoice, storage, { durationMs: 2200 });
+    const suggested = finalEngine.assign(finalMeeting.id, plausibleVoice, storage, { durationMs: 2200 });
+    assert.equal(suggested.speaker.suggestedName, "王工");
+    finalEngine.assign(finalMeeting.id, voice, storage, { durationMs: 2200 });
+    assert.equal(storage.listSpeakers(finalMeeting.id)[0].displayName, "发言人1");
+    const finalized = finalEngine.finalizeProfileMatches(finalMeeting.id, storage);
+    assert.equal(finalized[0].displayName, "王工");
+    assert.equal(finalized[0].autoMatched, true);
+  } finally {
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("offers a one-click candidate when a voice is plausible but not safe to auto-name", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-speaker-suggestion-"));
+  const storage = new MeetingStorage(root);
+  try {
+    const knownMeeting = storage.createMeeting("候选声纹来源");
+    const known = storage.ensureSpeaker(knownMeeting.id, "发言人1", new Float32Array([1, 0]));
+    storage.renameSpeaker(known.id, "李工");
+
+    const meeting = storage.createMeeting("候选匹配");
+    const engine = new SpeakerEngine({ modelPath: path.join(root, "missing-speaker-model.onnx") });
+    const plausibleVoice = new Float32Array([0.8, 0.6]);
+    engine.assign(meeting.id, plausibleVoice, storage, { durationMs: 2500 });
+    engine.assign(meeting.id, plausibleVoice, storage, { durationMs: 2500 });
+    const candidate = engine.assign(meeting.id, plausibleVoice, storage, { durationMs: 2500 }).speaker;
+    assert.equal(candidate.displayName, "发言人1");
+    assert.equal(candidate.autoMatched, false);
+    assert.equal(candidate.suggestedName, "李工");
+    assert.ok(candidate.suggestedScore >= 0.78 && candidate.suggestedScore < 0.84);
+
+    const confirmed = storage.renameSpeaker(candidate.id, candidate.suggestedName);
+    assert.equal(confirmed.displayName, "李工");
+    assert.equal(confirmed.manuallyNamed, true);
+    assert.equal(confirmed.suggestedProfileId, null);
   } finally {
     storage.close();
     rmSync(root, { recursive: true, force: true });
@@ -523,14 +651,23 @@ test("creates a verified workspace backup and safely merges it into another work
   try {
     const meeting = sourceStorage.createMeeting("需要备份的会议", { maxSpeakers: 20 });
     const backedUpSpeaker = sourceStorage.ensureSpeaker(meeting.id, "发言人1", new Float32Array([1, 0, 0]));
-    sourceStorage.renameSpeaker(backedUpSpeaker.id, "王工");
+    const namedSpeaker = sourceStorage.renameSpeaker(backedUpSpeaker.id, "王工");
+    const candidateSpeaker = sourceStorage.ensureSpeaker(meeting.id, "发言人2", new Float32Array([0.8, 0.6, 0]));
+    sourceStorage.setSpeakerProfileSuggestion(
+      candidateSpeaker.id,
+      sourceStorage.getSpeakerProfile(namedSpeaker.profileId),
+      0.8,
+    );
     sourceStorage.addSegment(meeting.id, {
       seq: 0,
       startMs: 0,
       endMs: 1000,
       text: "备份需要保留这段文字。",
-      speakerId: backedUpSpeaker.id,
+      speakerId: null,
       source: "local-realtime",
+      overlapSuspected: true,
+      overlapConfidence: 0.76,
+      overlapSpeakerIds: [backedUpSpeaker.id],
     });
     sourceStorage.saveSummary(meeting.id, {
       overview: "备份总结",
@@ -569,10 +706,15 @@ test("creates a verified workspace backup and safely merges it into another work
     const restoredMeeting = targetStorage.getMeeting(meeting.id);
     assert.equal(restoredMeeting.title, "需要备份的会议");
     assert.equal(restoredMeeting.segments[0].text, "备份需要保留这段文字。");
+    assert.equal(restoredMeeting.segments[0].overlapSuspected, true);
+    assert.equal(restoredMeeting.segments[0].overlapConfidence, 0.76);
+    assert.deepEqual(restoredMeeting.segments[0].overlapSpeakerIds, [backedUpSpeaker.id]);
     assert.equal(restoredMeeting.summary.overview, "备份总结");
     assert.equal(restoredMeeting.maxSpeakers, 20);
     assert.equal(restoredMeeting.transcriptVersions.length, 1);
     assert.equal(restoredMeeting.speakers[0].displayName, "王工");
+    assert.equal(restoredMeeting.speakers[1].suggestedName, "王工");
+    assert.equal(restoredMeeting.speakers[1].suggestedScore, 0.8);
     assert.equal(targetStorage.listSpeakerProfiles()[0].displayName, "王工");
     assert.equal(existsSync(path.join(targetRoot, "meetings", meeting.id, "audio.wav")), true);
 
@@ -764,19 +906,30 @@ test("uses a distinct MiniMax system prompt for the selected content template", 
       title: "创意讨论",
       summaryTemplate: "brainstorm",
       durationMs: 1000,
-      speakers: [{ id: "speaker-1", displayName: "发言人1" }],
+      speakers: [
+        { id: "speaker-1", displayName: "发言人1" },
+        { id: "speaker-2", displayName: "发言人2" },
+      ],
       segments: [{
         seq: 0,
-        speakerId: "speaker-1",
+        speakerId: null,
         startMs: 0,
         endMs: 1000,
         pauseAfterMs: 0,
         text: "先提出三个方向，再分别验证关键假设。",
+        overlapSuspected: true,
+        overlapConfidence: 0.74,
+        overlapSpeakerIds: ["speaker-1", "speaker-2"],
       }],
     }, "test-key");
     assert.match(requestBody.messages[0].content, /当前内容模板：头脑风暴/);
     assert.match(requestBody.messages[0].content, /候选方向、优缺点、关键假设/);
+    assert.match(requestBody.messages[0].content, /speaker_uncertain为true/);
     assert.match(requestBody.messages[1].content, /"summaryTemplate":"brainstorm"/);
+    assert.match(requestBody.messages[1].content, /"speaker":"疑似重叠发言（归属待确认）"/);
+    assert.match(requestBody.messages[1].content, /"speaker_uncertain":true/);
+    assert.match(requestBody.messages[1].content, /"overlap_confidence":0.74/);
+    assert.match(requestBody.messages[1].content, /"possible_speakers":\["发言人1","发言人2"\]/);
     assert.equal(requestBody.reasoning_split, true);
     assert.equal(requestBody.max_completion_tokens, 16000);
   } finally {

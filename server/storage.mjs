@@ -76,6 +76,8 @@ export class MeetingStorage {
         manually_named INTEGER NOT NULL DEFAULT 0,
         profile_id TEXT,
         auto_matched INTEGER NOT NULL DEFAULT 0,
+        suggested_profile_id TEXT,
+        suggested_profile_score REAL,
         UNIQUE(meeting_id, label)
       );
       CREATE TABLE IF NOT EXISTS speaker_profiles (
@@ -99,6 +101,9 @@ export class MeetingStorage {
         confidence REAL,
         words_json TEXT,
         edited_text TEXT,
+        overlap_suspected INTEGER NOT NULL DEFAULT 0,
+        overlap_confidence REAL,
+        overlap_speaker_ids_json TEXT,
         created_at TEXT NOT NULL,
         UNIQUE(meeting_id, seq)
       );
@@ -172,6 +177,15 @@ export class MeetingStorage {
     if (!segmentColumns.has("edited_text")) {
       this.db.exec("ALTER TABLE segments ADD COLUMN edited_text TEXT");
     }
+    if (!segmentColumns.has("overlap_suspected")) {
+      this.db.exec("ALTER TABLE segments ADD COLUMN overlap_suspected INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!segmentColumns.has("overlap_confidence")) {
+      this.db.exec("ALTER TABLE segments ADD COLUMN overlap_confidence REAL");
+    }
+    if (!segmentColumns.has("overlap_speaker_ids_json")) {
+      this.db.exec("ALTER TABLE segments ADD COLUMN overlap_speaker_ids_json TEXT");
+    }
     const speakerColumns = new Set(
       this.db.prepare("PRAGMA table_info(speakers)").all().map((column) => column.name),
     );
@@ -180,6 +194,12 @@ export class MeetingStorage {
     }
     if (!speakerColumns.has("auto_matched")) {
       this.db.exec("ALTER TABLE speakers ADD COLUMN auto_matched INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!speakerColumns.has("suggested_profile_id")) {
+      this.db.exec("ALTER TABLE speakers ADD COLUMN suggested_profile_id TEXT");
+    }
+    if (!speakerColumns.has("suggested_profile_score")) {
+      this.db.exec("ALTER TABLE speakers ADD COLUMN suggested_profile_score REAL");
     }
     this.bootstrapSpeakerProfiles();
   }
@@ -292,8 +312,9 @@ export class MeetingStorage {
       : (segment.originalText !== undefined && segment.text !== originalText ? segment.text : null);
     this.db.prepare(`
       INSERT INTO segments
-      (id, meeting_id, seq, start_ms, end_ms, pause_after_ms, text, speaker_id, source, confidence, words_json, edited_text, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, meeting_id, seq, start_ms, end_ms, pause_after_ms, text, speaker_id, source, confidence,
+       words_json, edited_text, overlap_suspected, overlap_confidence, overlap_speaker_ids_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       meetingId,
@@ -307,6 +328,9 @@ export class MeetingStorage {
       segment.confidence ?? null,
       segment.words ? JSON.stringify(segment.words) : null,
       editedText,
+      segment.overlapSuspected ? 1 : 0,
+      segment.overlapConfidence ?? null,
+      segment.overlapSpeakerIds?.length ? JSON.stringify(segment.overlapSpeakerIds) : null,
       now,
     );
     return this.getSegment(id);
@@ -338,8 +362,25 @@ export class MeetingStorage {
       source: row.source,
       confidence: row.confidence,
       words: row.words_json ? JSON.parse(row.words_json) : [],
+      overlapSuspected: Boolean(row.overlap_suspected),
+      overlapConfidence: row.overlap_confidence,
+      overlapSpeakerIds: row.overlap_speaker_ids_json ? JSON.parse(row.overlap_speaker_ids_json) : [],
       createdAt: row.created_at,
     };
+  }
+
+  assignSegmentSpeaker(segmentId, speakerId) {
+    const segment = this.getSegment(segmentId);
+    if (!segment) throw new Error("逐字稿片段不存在");
+    const speaker = this.getSpeaker(String(speakerId || ""));
+    if (!speaker || speaker.meetingId !== segment.meetingId) throw new Error("发言人不属于当前会议");
+    this.db.prepare(`
+      UPDATE segments
+      SET speaker_id = ?, overlap_suspected = 0, overlap_confidence = NULL, overlap_speaker_ids_json = NULL
+      WHERE id = ?
+    `).run(speaker.id, segmentId);
+    this.db.prepare("UPDATE meetings SET summary_stale = 1 WHERE id = ?").run(segment.meetingId);
+    return this.getMeeting(segment.meetingId);
   }
 
   setPauseAfter(segmentId, pauseMs) {
@@ -462,8 +503,9 @@ export class MeetingStorage {
       for (const speaker of snapshot.speakers || []) {
         this.db.prepare(`
           INSERT INTO speakers
-          (id, meeting_id, label, display_name, color, centroid_json, sample_count, manually_named, profile_id, auto_matched)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (id, meeting_id, label, display_name, color, centroid_json, sample_count, manually_named, profile_id,
+           auto_matched, suggested_profile_id, suggested_profile_score)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           speaker.id,
           meetingId,
@@ -475,13 +517,16 @@ export class MeetingStorage {
           speaker.manuallyNamed ? 1 : 0,
           speaker.profileId || null,
           speaker.autoMatched ? 1 : 0,
+          speaker.suggestedProfileId || null,
+          speaker.suggestedScore ?? null,
         );
       }
       for (const segment of snapshot.segments || []) {
         this.db.prepare(`
           INSERT INTO segments
-          (id, meeting_id, seq, start_ms, end_ms, pause_after_ms, text, speaker_id, source, confidence, words_json, edited_text, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (id, meeting_id, seq, start_ms, end_ms, pause_after_ms, text, speaker_id, source, confidence,
+           words_json, edited_text, overlap_suspected, overlap_confidence, overlap_speaker_ids_json, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           segment.id || randomUUID(),
           meetingId,
@@ -495,6 +540,9 @@ export class MeetingStorage {
           segment.confidence ?? null,
           JSON.stringify(segment.words || []),
           segment.editedText ?? null,
+          segment.overlapSuspected ? 1 : 0,
+          segment.overlapConfidence ?? null,
+          segment.overlapSpeakerIds?.length ? JSON.stringify(segment.overlapSpeakerIds) : null,
           segment.createdAt || new Date().toISOString(),
         );
       }
@@ -685,6 +733,9 @@ export class MeetingStorage {
       manuallyNamed: Boolean(row.manually_named),
       profileId: row.profile_id || null,
       autoMatched: Boolean(row.auto_matched),
+      suggestedProfileId: row.suggested_profile_id || null,
+      suggestedName: row.suggested_profile_id ? this.getSpeakerProfile(row.suggested_profile_id)?.displayName || null : null,
+      suggestedScore: row.suggested_profile_score ?? null,
     };
   }
 
@@ -703,7 +754,8 @@ export class MeetingStorage {
     this.db.prepare(`
       UPDATE speakers
       SET display_name = ?, manually_named = 1, auto_matched = 0,
-          profile_id = CASE WHEN display_name = ? THEN profile_id ELSE NULL END
+          profile_id = CASE WHEN display_name = ? THEN profile_id ELSE NULL END,
+          suggested_profile_id = NULL, suggested_profile_score = NULL
       WHERE id = ?
     `).run(clean, clean, id);
     this.learnSpeakerProfile(id);
@@ -731,27 +783,54 @@ export class MeetingStorage {
     };
   }
 
-  matchSpeakerProfile(centroid, options = {}) {
+  rankSpeakerProfiles(centroid, options = {}) {
     const vector = normalizeVoiceVector(centroid);
-    if (!vector) return null;
+    if (!vector) return { best: null, runnerUp: null, margin: -1 };
     const excluded = new Set(options.excludeProfileIds || []);
     const matches = this.listSpeakerProfiles()
       .filter((profile) => !excluded.has(profile.id))
-      .map((profile) => ({ ...profile, score: voiceSimilarity(vector, profile.centroid) }))
-      .filter((profile) => profile.score >= -1)
+      .map((profile) => ({ profile, score: voiceSimilarity(vector, profile.centroid) }))
+      .filter((match) => match.score >= -1)
       .sort((left, right) => right.score - left.score);
     const best = matches[0];
-    if (!best || best.score < (options.threshold ?? 0.78)) return null;
     const runnerUp = matches[1];
-    if (runnerUp && best.score - runnerUp.score < (options.ambiguityMargin ?? 0.04)) return null;
-    return best;
+    return {
+      best: best || null,
+      runnerUp: runnerUp || null,
+      margin: best ? best.score - (runnerUp?.score ?? -1) : -1,
+    };
+  }
+
+  matchSpeakerProfile(centroid, options = {}) {
+    const ranked = this.rankSpeakerProfiles(centroid, options);
+    if (!ranked.best || ranked.best.score < (options.threshold ?? 0.78)) return null;
+    if (ranked.runnerUp && ranked.margin < (options.ambiguityMargin ?? 0.04)) return null;
+    return ranked.best.profile;
+  }
+
+  setSpeakerProfileSuggestion(speakerId, profile, score) {
+    if (!profile || !Number.isFinite(score)) return this.clearSpeakerProfileSuggestion(speakerId);
+    this.db.prepare(`
+      UPDATE speakers
+      SET suggested_profile_id = ?, suggested_profile_score = ?
+      WHERE id = ? AND manually_named = 0 AND auto_matched = 0
+    `).run(profile.id, score, speakerId);
+    return this.getSpeaker(speakerId);
+  }
+
+  clearSpeakerProfileSuggestion(speakerId) {
+    this.db.prepare(`
+      UPDATE speakers SET suggested_profile_id = NULL, suggested_profile_score = NULL WHERE id = ?
+    `).run(speakerId);
+    return this.getSpeaker(speakerId);
   }
 
   applySpeakerProfile(speakerId, profile) {
     if (!profile) return this.getSpeaker(speakerId);
     this.db.prepare(`
       UPDATE speakers
-      SET display_name = ?, profile_id = ?, auto_matched = 1
+      SET display_name = ?, profile_id = ?, auto_matched = 1,
+          suggested_profile_id = NULL, suggested_profile_score = NULL
       WHERE id = ? AND manually_named = 0
     `).run(profile.displayName, profile.id, speakerId);
     return this.getSpeaker(speakerId);
@@ -761,7 +840,8 @@ export class MeetingStorage {
     this.db.prepare(`
       UPDATE speakers
       SET profile_id = NULL, auto_matched = 0,
-          display_name = CASE WHEN manually_named = 0 THEN label ELSE display_name END
+          display_name = CASE WHEN manually_named = 0 THEN label ELSE display_name END,
+          suggested_profile_id = NULL, suggested_profile_score = NULL
       WHERE id = ?
     `).run(speakerId);
     return this.getSpeaker(speakerId);
@@ -956,10 +1036,14 @@ export class MeetingStorage {
       );
       for (const speaker of snapshot.speakers || []) {
         const profileId = this.profileImportAliases.get(speaker.profileId) || speaker.profileId || null;
+        const suggestedProfileId = this.profileImportAliases.get(speaker.suggestedProfileId)
+          || speaker.suggestedProfileId
+          || null;
         this.db.prepare(`
           INSERT INTO speakers
-          (id, meeting_id, label, display_name, color, centroid_json, sample_count, manually_named, profile_id, auto_matched)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (id, meeting_id, label, display_name, color, centroid_json, sample_count, manually_named, profile_id,
+           auto_matched, suggested_profile_id, suggested_profile_score)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           speaker.id || randomUUID(),
           meetingId,
@@ -971,13 +1055,16 @@ export class MeetingStorage {
           speaker.manuallyNamed ? 1 : 0,
           profileId,
           speaker.autoMatched && profileId ? 1 : 0,
+          suggestedProfileId && this.getSpeakerProfile(suggestedProfileId) ? suggestedProfileId : null,
+          suggestedProfileId ? speaker.suggestedScore ?? null : null,
         );
       }
       for (const segment of snapshot.segments || []) {
         this.db.prepare(`
           INSERT INTO segments
-          (id, meeting_id, seq, start_ms, end_ms, pause_after_ms, text, speaker_id, source, confidence, words_json, edited_text, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (id, meeting_id, seq, start_ms, end_ms, pause_after_ms, text, speaker_id, source, confidence,
+           words_json, edited_text, overlap_suspected, overlap_confidence, overlap_speaker_ids_json, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           segment.id || randomUUID(),
           meetingId,
@@ -991,6 +1078,9 @@ export class MeetingStorage {
           segment.confidence ?? null,
           JSON.stringify(segment.words || []),
           segment.editedText ?? null,
+          segment.overlapSuspected ? 1 : 0,
+          segment.overlapConfidence ?? null,
+          segment.overlapSpeakerIds?.length ? JSON.stringify(segment.overlapSpeakerIds) : null,
           segment.createdAt || now,
         );
       }

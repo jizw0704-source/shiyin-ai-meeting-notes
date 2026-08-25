@@ -4,6 +4,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import {
   ArrowRight,
   ArrowClockwise,
+  ArrowUp,
   Brain,
   ChartBar,
   CheckCircle,
@@ -119,6 +120,9 @@ type Speaker = {
   manuallyNamed: boolean;
   profileId: string | null;
   autoMatched: boolean;
+  suggestedProfileId: string | null;
+  suggestedName: string | null;
+  suggestedScore: number | null;
 };
 type Segment = {
   id: string;
@@ -134,6 +138,9 @@ type Segment = {
   speakerId: string | null;
   source: "realtime" | "local-realtime" | "local-retranscribed" | "corrected" | "restored";
   confidence: number | null;
+  overlapSuspected: boolean;
+  overlapConfidence: number | null;
+  overlapSpeakerIds: string[];
 };
 type Summary = {
   headline?: string;
@@ -520,6 +527,10 @@ export default function Home() {
   const [transcriptionDialogOpen, setTranscriptionDialogOpen] = useState(false);
   const [retranscriptionStarting, setRetranscriptionStarting] = useState(false);
   const [versionRestoringId, setVersionRestoringId] = useState<string | null>(null);
+  const [segmentSpeakerSavingId, setSegmentSpeakerSavingId] = useState<string | null>(null);
+  const [speakerSuggestionSavingId, setSpeakerSuggestionSavingId] = useState<string | null>(null);
+  const [showBackToTop, setShowBackToTop] = useState(false);
+  const workspaceRef = useRef<HTMLElement | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const playbackRef = useRef<HTMLAudioElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -530,6 +541,28 @@ export default function Home() {
   const lastLevelUpdateRef = useRef(0);
   const silenceWarningShownRef = useRef(false);
   const commandHandlerRef = useRef<(command: string) => void>(() => undefined);
+
+  useEffect(() => {
+    const workspace = workspaceRef.current;
+    const updateVisibility = () => {
+      setShowBackToTop(Math.max(workspace?.scrollTop || 0, window.scrollY) > 420);
+    };
+    workspace?.addEventListener("scroll", updateVisibility, { passive: true });
+    window.addEventListener("scroll", updateVisibility, { passive: true });
+    updateVisibility();
+    return () => {
+      workspace?.removeEventListener("scroll", updateVisibility);
+      window.removeEventListener("scroll", updateVisibility);
+    };
+  }, []);
+
+  const scrollWorkspaceToTop = useCallback(() => {
+    const behavior: ScrollBehavior = window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      ? "auto"
+      : "smooth";
+    workspaceRef.current?.scrollTo({ top: 0, behavior });
+    window.scrollTo({ top: 0, behavior });
+  }, []);
 
   const refreshCaptureCapabilities = useCallback(async () => {
     const desktop = window.shiyinDesktop;
@@ -932,6 +965,10 @@ export default function Home() {
     () => new Map(meeting?.speakers.map((speaker) => [speaker.id, speaker]) || []),
     [meeting?.speakers],
   );
+  const overlapCount = useMemo(
+    () => meeting?.segments.filter((segment) => segment.overlapSuspected).length || 0,
+    [meeting?.segments],
+  );
   const finalSummaryInvalid = summaryLooksInvalid(meeting?.summary);
   const liveSummaryInvalid = summaryLooksInvalid(meeting?.liveSummary);
   const finalSummary = finalSummaryInvalid ? null : meeting?.summary;
@@ -1163,6 +1200,11 @@ export default function Home() {
             setLiveText("");
             setLiveConfirmedText(message.segment.cleanedText || message.segment.text || "");
             updateLiveSegment(message.segment, message.speakers);
+          } else if (message.type === "speaker.profiles.updated") {
+            setMeeting((current) => {
+              if (!current || current.id !== message.meetingId) return current;
+              return { ...current, speakers: message.speakers };
+            });
           } else if (message.type === "summary.preview.started") {
             setConnectionStatus("MiniMax 正在整理实时草稿…");
           } else if (message.type === "summary.preview.progress") {
@@ -1375,6 +1417,25 @@ export default function Home() {
       setRenamingSpeaker(null);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "重命名失败");
+    }
+  }
+
+  async function confirmSuggestedSpeaker(speaker: Speaker) {
+    if (!speaker.suggestedName || speakerSuggestionSavingId) return;
+    setSpeakerSuggestionSavingId(speaker.id);
+    try {
+      const updated = await api<Speaker>(`/api/speakers/${speaker.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ displayName: speaker.suggestedName }),
+      });
+      setMeeting((current) => current
+        ? { ...current, speakers: current.speakers.map((item) => item.id === updated.id ? updated : item) }
+        : current);
+      setNotice(`已确认 ${updated.displayName}，后续会议会继续使用本机声纹匹配`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法确认声纹候选");
+    } finally {
+      setSpeakerSuggestionSavingId(null);
     }
   }
 
@@ -1591,6 +1652,24 @@ export default function Home() {
     else audio.addEventListener("loadedmetadata", seek, { once: true });
   }
 
+  async function confirmSegmentSpeaker(segment: Segment, speakerId: string) {
+    if (!meeting || !speakerId || segmentSpeakerSavingId) return;
+    setSegmentSpeakerSavingId(segment.id);
+    try {
+      const updated = await api<Meeting>(`/api/segments/${segment.id}/speaker`, {
+        method: "PATCH",
+        body: JSON.stringify({ speakerId }),
+      });
+      setMeeting(updated);
+      mergeMeetingList(updated);
+      setNotice("已确认该段发言人；AI 总结已标记为需要重新生成");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法确认该段发言人");
+    } finally {
+      setSegmentSpeakerSavingId(null);
+    }
+  }
+
   function jumpToEvidence(seq: number) {
     setView("transcript");
     setHighlightedSeq(seq);
@@ -1756,8 +1835,13 @@ export default function Home() {
 
     lines.push("", "## 完整逐字稿（整理稿）");
     if (sourceMeeting.fillerFilterEnabled) lines.push("", "> 已应用保守口语过滤；原始识别文本仍保存在拾音 AI 中。");
+    const overlapTotal = sourceMeeting.segments.filter((segment) => segment.overlapSuspected).length;
+    if (overlapTotal) lines.push("", `> ⚠ 检测到 ${overlapTotal} 处疑似重叠发言；相关内容没有强行归属给具体个人。`);
     for (const segment of sourceMeeting.segments) {
-      const name = names.get(segment.speakerId || "") || "待确认发言人";
+      const possibleNames = segment.overlapSpeakerIds.map((id) => names.get(id)).filter(Boolean).join(" / ");
+      const name = segment.overlapSuspected
+        ? `疑似重叠发言（归属待确认${possibleNames ? `：${possibleNames}` : ""}）`
+        : names.get(segment.speakerId || "") || "待确认发言人";
       lines.push("", `### ${formatClock(segment.startMs)}–${formatClock(segment.endMs)} ${name}`, "", segment.cleanedText);
     }
     return `${lines.join("\n").trim()}\n`;
@@ -1840,11 +1924,20 @@ export default function Home() {
     const summary = usableSummary;
     const list = (items: string[]) =>
       items.length ? `<ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : "<p class=\"muted\">无</p>";
-    const transcript = meeting.segments.map((segment) => `
-      <div class="transcript-row">
-        <time>${formatClock(segment.startMs)}–${formatClock(segment.endMs)}</time>
-        <div><b>${escapeHtml(names.get(segment.speakerId || "") || "待确认发言人")}</b><p>${escapeHtml(segment.cleanedText)}</p></div>
-      </div>`).join("");
+    const transcript = meeting.segments.map((segment) => {
+      const possibleNames = segment.overlapSpeakerIds.map((id) => names.get(id)).filter(Boolean).join(" / ");
+      const speakerName = segment.overlapSuspected
+        ? `疑似重叠发言 · 归属待确认${possibleNames ? `（可能涉及：${possibleNames}）` : ""}`
+        : names.get(segment.speakerId || "") || "待确认发言人";
+      const confidence = segment.overlapSuspected && segment.overlapConfidence
+        ? `<small class="overlap-note">重叠可能 ${Math.round(segment.overlapConfidence * 100)}%</small>`
+        : "";
+      return `
+        <div class="transcript-row">
+          <time>${formatClock(segment.startMs)}–${formatClock(segment.endMs)}</time>
+          <div><b>${escapeHtml(speakerName)}</b>${confidence}<p>${escapeHtml(segment.cleanedText)}</p></div>
+        </div>`;
+    }).join("");
     const overviewMapHtml = (summary?.overviewCards || []).map((card, index) => `
       <article class="map-card">
         <span>${String(index + 1).padStart(2, "0")}</span>
@@ -2194,7 +2287,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
         </div>
       </aside>
 
-      <section className="workspace">
+      <section className="workspace" ref={workspaceRef}>
         <header className="topbar">
           <div>
             <div className="eyebrow">
@@ -2358,9 +2451,21 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                   {meeting?.summaryStale && <span className="summary-stale-badge">逐字稿已更新 · 建议重新总结</span>}
                 </div>
                 <div className="transcript">
+                {overlapCount > 0 && (
+                  <div className="overlap-summary" role="status">
+                    <WarningCircle size={19} weight="duotone" />
+                    <p>
+                      <b>发现 {overlapCount} 处疑似重叠发言</b>
+                      <span>系统没有强行归属；可点击时间回听，或在对应记录中确认发言人。</span>
+                    </p>
+                  </div>
+                )}
                 {filteredSegments.map((segment) => {
                   const speaker = segment.speakerId ? speakerMap.get(segment.speakerId) : null;
-                  const name = speaker?.displayName || "待确认发言人";
+                  const name = segment.overlapSuspected ? "疑似重叠发言" : speaker?.displayName || "待确认发言人";
+                  const possibleSpeakers = segment.overlapSpeakerIds
+                    .map((id) => speakerMap.get(id)?.displayName)
+                    .filter(Boolean) as string[];
                   const pauseMarker = (segment.pauseAfterMs || 0) >= 1000
                     ? <div className="pause-marker"><span>停顿 {(segment.pauseAfterMs! / 1000).toFixed(1)} 秒</span></div>
                     : null;
@@ -2371,10 +2476,14 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                         id={`segment-${segment.seq}`}
                         className={`utterance ${highlightedSeq === segment.seq ? "highlighted" : ""}`}
                       >
-                        <div className={`avatar ${speaker?.color || "neutral"}`}>{name.slice(0, 1)}</div>
+                        <div className={`avatar ${segment.overlapSuspected ? "overlap" : speaker?.color || "neutral"}`}>
+                          {segment.overlapSuspected ? "叠" : name.slice(0, 1)}
+                        </div>
                         <div>
                           <div className="speaker">
-                            {speaker
+                            {segment.overlapSuspected
+                              ? <b className="overlap-speaker-name">{name}</b>
+                              : speaker
                               ? <button title="点击修改姓名" onClick={() => beginRenameSpeaker(speaker)}>{name}<i>✎</i></button>
                               : <b>{name}</b>}
                             <button
@@ -2386,8 +2495,44 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                             </button>
                             {segment.source === "corrected" && <em>已校正</em>}
                             {speaker?.autoMatched && <em className="speaker-auto-match">声纹匹配</em>}
+                            {speaker?.suggestedName && !speaker.autoMatched && !speaker.manuallyNamed && (
+                              <button
+                                type="button"
+                                className="speaker-suggestion"
+                                disabled={speakerSuggestionSavingId === speaker.id}
+                                onClick={() => void confirmSuggestedSpeaker(speaker)}
+                                title="声纹相似度尚不足以自动命名，点击确认后会记住"
+                              >
+                                {speakerSuggestionSavingId === speaker.id
+                                  ? "正在确认…"
+                                  : `可能是 ${speaker.suggestedName} ${Math.round((speaker.suggestedScore || 0) * 100)}% · 确认`}
+                              </button>
+                            )}
+                            {segment.overlapSuspected && (
+                              <em className="overlap-confidence">
+                                {segment.overlapConfidence === null
+                                  ? "重叠风险"
+                                  : `重叠可能 ${Math.round(segment.overlapConfidence * 100)}%`}
+                              </em>
+                            )}
                           </div>
                           <p>{displayedSegmentText(segment, transcriptMode)}</p>
+                          {segment.overlapSuspected && (
+                            <div className="overlap-review">
+                              <span>{possibleSpeakers.length ? `可能涉及：${possibleSpeakers.join(" / ")}` : "发言归属待确认"}</span>
+                              <select
+                                aria-label={`确认 ${formatClock(segment.startMs)} 的发言人`}
+                                value=""
+                                disabled={segmentSpeakerSavingId === segment.id || recording || processing}
+                                onChange={(event) => void confirmSegmentSpeaker(segment, event.target.value)}
+                              >
+                                <option value="">{segmentSpeakerSavingId === segment.id ? "正在保存…" : "确认发言人"}</option>
+                                {meeting.speakers.map((candidate) => (
+                                  <option value={candidate.id} key={candidate.id}>{candidate.displayName}</option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
                         </div>
                       </div>
                       {transcriptOrder === "ascending" && pauseMarker}
@@ -2912,10 +3057,21 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
               <h3>发言人</h3>
               <div className="speaker-list">
                 {(meeting?.speakers || []).map((speaker) => (
-                  <button key={speaker.id} onClick={() => beginRenameSpeaker(speaker)}>
-                    <i className={`avatar ${speaker.color}`}>{speaker.displayName.slice(0, 1)}</i>
-                    <span>{speaker.displayName}<small>{speaker.manuallyNamed ? "已确认并记住" : speaker.autoMatched ? "本机声纹自动匹配" : "点击重命名"}</small></span>
-                  </button>
+                  <div className="speaker-list-item" key={speaker.id}>
+                    <button className="speaker-list-main" onClick={() => beginRenameSpeaker(speaker)}>
+                      <i className={`avatar ${speaker.color}`}>{speaker.displayName.slice(0, 1)}</i>
+                      <span>{speaker.displayName}<small>{speaker.manuallyNamed ? "已确认并记住" : speaker.autoMatched ? "本机声纹自动匹配" : speaker.suggestedName ? `声纹候选：${speaker.suggestedName}` : "点击重命名"}</small></span>
+                    </button>
+                    {speaker.suggestedName && !speaker.autoMatched && !speaker.manuallyNamed && (
+                      <button
+                        className="speaker-list-confirm"
+                        disabled={speakerSuggestionSavingId === speaker.id}
+                        onClick={() => void confirmSuggestedSpeaker(speaker)}
+                      >
+                        {speakerSuggestionSavingId === speaker.id ? "确认中" : `确认是${speaker.suggestedName}`}
+                      </button>
+                    )}
+                  </div>
                 ))}
                 {!meeting?.speakers.length && <p>有效语音出现后自动编号</p>}
               </div>
@@ -2926,6 +3082,18 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
           </aside>}
         </div>
       </section>
+      {showBackToTop && (
+        <button
+          type="button"
+          className="back-to-top"
+          onClick={scrollWorkspaceToTop}
+          aria-label="回到页面顶部"
+          title="回到顶部"
+        >
+          <ArrowUp size={16} weight="bold" />
+          <span>回到顶部</span>
+        </button>
+      )}
       {storageDialogOpen && (
         <div
           className="dialog-backdrop"

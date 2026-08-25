@@ -1,18 +1,13 @@
 import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import path from "node:path";
 import { normalizeMaxSpeakers } from "./speaker-settings.mjs";
+import { cosineSimilarity, detectPotentialOverlap } from "./overlap-detection.mjs";
 
 function normalize(vector) {
   let sum = 0;
   for (const value of vector) sum += value * value;
   const scale = Math.sqrt(sum) || 1;
   return Float32Array.from(vector, (value) => value / scale);
-}
-
-function cosine(a, b) {
-  let value = 0;
-  for (let i = 0; i < a.length; i += 1) value += a[i] * b[i];
-  return value;
 }
 
 function readPcmRange(fd, fileSize, dataOffset, startMs, endMs) {
@@ -84,7 +79,7 @@ function buildClusters(items, threshold = 0.64, maxSpeakers = 6) {
     if (!item.embedding) continue;
     let best = null;
     for (const cluster of clusters) {
-      const score = cosine(item.embedding, cluster.centroid);
+      const score = cosineSimilarity(item.embedding, cluster.centroid);
       if (!best || score > best.score) best = { cluster, score };
     }
     if ((!best || best.score < threshold) && clusters.length < maxSpeakers) {
@@ -105,7 +100,7 @@ function buildClusters(items, threshold = 0.64, maxSpeakers = 6) {
     if (!item.embedding || !clusters.length) continue;
     let best = { index: 0, score: -1 };
     for (const cluster of clusters) {
-      const score = cosine(item.embedding, cluster.centroid);
+      const score = cosineSimilarity(item.embedding, cluster.centroid);
       if (score > best.score) best = { index: cluster.index, score };
     }
     item.clusterIndex = best.index;
@@ -179,6 +174,23 @@ export async function correctMeetingSpeakers({ meetingId, dataRoot, storage, spe
     }
   }
 
+  const overlapSpeakers = clusters.map((cluster) => ({
+    id: clusterSpeaker.get(cluster.index)?.id,
+    centroid: cluster.centroid,
+  }));
+  for (const item of items) {
+    const overlap = item.embedding
+      ? detectPotentialOverlap(item.embedding, overlapSpeakers)
+      : {
+          suspected: Boolean(item.overlapSuspected),
+          confidence: item.overlapConfidence ?? null,
+          candidateIds: item.overlapSpeakerIds || [],
+        };
+    item.overlapSuspected = overlap.suspected;
+    item.overlapConfidence = overlap.confidence;
+    item.overlapSpeakerIds = overlap.candidateIds;
+  }
+
   const corrected = items.map((item, index) => {
     const next = items[index + 1];
     return {
@@ -189,9 +201,14 @@ export async function correctMeetingSpeakers({ meetingId, dataRoot, storage, spe
       text: item.text,
       originalText: item.originalText,
       editedText: item.editedText,
-      speakerId: clusterSpeaker.get(item.clusterIndex)?.id || item.originalSpeakerId || null,
+      speakerId: item.overlapSuspected
+        ? null
+        : clusterSpeaker.get(item.clusterIndex)?.id || item.originalSpeakerId || null,
       confidence: item.speakerConfidence ?? item.confidence,
       words: item.words,
+      overlapSuspected: item.overlapSuspected,
+      overlapConfidence: item.overlapConfidence,
+      overlapSpeakerIds: item.overlapSpeakerIds,
     };
   });
   onProgress(90);

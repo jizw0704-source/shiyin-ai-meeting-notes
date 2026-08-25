@@ -135,8 +135,17 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(page, /过滤“嗯、啊、呃”/);
   assert.match(page, /原始记录/);
   assert.match(page, /记录排列顺序/);
+  assert.match(page, /回到页面顶部/);
+  assert.match(page, /scrollWorkspaceToTop/);
+  assert.match(page, /疑似重叠发言/);
+  assert.match(page, /确认发言人/);
+  assert.match(page, /overlapConfidence/);
   assert.match(page, /shiyin\.transcriptOrder/);
   assert.match(page, /声纹匹配/);
+  assert.match(page, /speaker\.profiles\.updated/);
+  assert.match(page, /可能是 /);
+  assert.match(page, /confirmSuggestedSpeaker/);
+  assert.match(page, /确认是/);
   assert.match(page, /本机发言人声纹库/);
   assert.match(page, /撤销上次替换/);
   assert.match(page, /重命名会议/);
@@ -152,6 +161,9 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(page, /searchParams\.set\("maxSpeakers"/);
   assert.match(page, /shiyin\.maxSpeakers/);
   assert.match(proxy, /transcriptActionMatch/);
+  assert.match(proxy, /segmentSpeakerMatch/);
+  assert.match(proxy, /overlapSuspected/);
+  assert.match(proxy, /finalizeProfileMatches/);
   assert.match(proxy, /\/api\/storage\/cleanup/);
   assert.match(proxy, /recoverInterruptedMeetings/);
   assert.match(proxy, /runHistoricalRetranscription/);

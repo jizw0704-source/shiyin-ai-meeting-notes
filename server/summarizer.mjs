@@ -244,7 +244,10 @@ function transcriptRows(meeting) {
   const speakers = new Map(meeting.speakers.map((speaker) => [speaker.id, speaker.displayName]));
   return meeting.segments.map((segment) => ({
     seq: segment.seq,
-    speaker: speakers.get(segment.speakerId) || "待确认发言人",
+    speaker: segment.overlapSuspected ? "疑似重叠发言（归属待确认）" : speakers.get(segment.speakerId) || "待确认发言人",
+    speaker_uncertain: Boolean(segment.overlapSuspected),
+    overlap_confidence: segment.overlapConfidence,
+    possible_speakers: (segment.overlapSpeakerIds || []).map((id) => speakers.get(id)).filter(Boolean),
     start_ms: segment.startMs,
     end_ms: segment.endMs,
     pause_after_ms: segment.pauseAfterMs,
@@ -478,7 +481,7 @@ const EXTRACTION_PROMPT = `你是中文会议纪要的事实抽取员。只能�
   "facts":[{"value":"数字或关键名词","label":"含义","context":"上下文","evidenceSeqs":[0]}],
   "chapters":[{"title":"时间段标题","startMs":0,"endMs":1000,"summary":"详细摘要","highlights":["具体要点"],"evidenceSeqs":[0]}]
 }
-每个topicSections保留2到8条具体要点；quotes必须逐字复制；没有明确结论或任务时留空，不得虚构。`;
+每个topicSections保留2到8条具体要点；quotes必须逐字复制；没有明确结论或任务时留空，不得虚构。speaker_uncertain为true的内容不得归属给具体个人，应写为“发言归属待确认”。`;
 
 const LIVE_SUMMARY_PROMPT = `你是正在旁听会议的中文记录员。根据截至当前的逐字稿生成“实时草稿”，只写已经出现的信息，不预测会议后续，不把提议写成已决定事项。
 输出纯JSON，不要Markdown或解释：
@@ -492,7 +495,7 @@ const LIVE_SUMMARY_PROMPT = `你是正在旁听会议的中文记录员。根据
   "actionItems":[{"owner":"责任人或待确认","task":"明确提出的后续任务","due":"时间或待确认","priority":"高/中/低","evidenceSeqs":[0]}],
   "keywords":["关键词"]
 }
-overviewCards最多4个；没有决定或任务时返回空数组。evidenceSeqs只能引用输入中的真实seq。`;
+overviewCards最多4个；没有决定或任务时返回空数组。evidenceSeqs只能引用输入中的真实seq。speaker_uncertain为true时不得推断具体发言人。`;
 
 const FINAL_PROMPT = `你是资深中文会议分析师，要制作接近钉钉AI听记深度的专业会议报告。只能依据输入材料，不得编造；模型推断必须放进aiInsights并写明依据，不能冒充会议原话。
 输出纯JSON，不要Markdown或思考过程，严格使用：
@@ -521,7 +524,8 @@ const FINAL_PROMPT = `你是资深中文会议分析师，要制作接近钉钉A
 5. keyFacts优先保留人数、金额、日期、时长、数量、版本和命名机制，最多10条。
 6. notableMoments最多8条，text必须是材料中的短句原文，不得润色伪造。
 7. evidenceSeqs只能引用输入中真实出现的seq；所有板块都要尽量提供原文证据。
-8. 信息密度优先，不要把不同主题压成空泛短句，不要重复同一内容凑数。`;
+8. 信息密度优先，不要把不同主题压成空泛短句，不要重复同一内容凑数。
+9. speaker_uncertain为true表示疑似多人同时发言：不得把该内容、观点、引语或行动责任强行归给具体个人，并在risks中保留“发言归属待确认”。`;
 
 async function extractLongMeeting(transcript, apiKey, model, options = {}) {
   const chunks = splitTranscript(transcript);
