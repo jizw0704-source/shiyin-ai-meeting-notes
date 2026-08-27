@@ -66,7 +66,7 @@ install_from_dmg() {
 }
 
 start_and_verify() {
-  local version executable health_file app_origin
+  local version executable health_file app_origin app_html
   version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$installed_app/Contents/Info.plist")"
   if [[ "$version" != "$expected_version" ]]; then
     echo "安装版本不符：期望 ${expected_version}，实际 ${version}" >&2
@@ -104,8 +104,9 @@ start_and_verify() {
   ' "$health_file" >"$temporary_root/app-origin.txt"
 
   app_origin="$(cat "$temporary_root/app-origin.txt")"
-  curl --fail --silent --show-error --max-time 10 "$app_origin" \
-    | grep -q '<title>拾音 AI'
+  app_html="$temporary_root/app.html"
+  curl --fail --silent --show-error --max-time 10 "$app_origin" >"$app_html"
+  grep -q '<title>拾音 AI' "$app_html"
 }
 
 install_from_dmg
