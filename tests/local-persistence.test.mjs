@@ -17,6 +17,7 @@ import {
 } from "../server/storage-maintenance.mjs";
 import { createWorkspaceBackup, restoreWorkspaceBackup } from "../server/workspace-backup.mjs";
 import { findAvailableLocalPort } from "../server/local-port.mjs";
+import { deriveAutomaticMeetingTitle, normalizeAutomaticMeetingTitle } from "../server/meeting-title.mjs";
 import { normalizeMaxSpeakers, normalizeSpeakerLimitMode } from "../server/speaker-settings.mjs";
 import { SpeakerEngine } from "../server/speaker-engine.mjs";
 import { detectPotentialOverlap } from "../server/overlap-detection.mjs";
@@ -51,6 +52,39 @@ test("selects another local port when the preferred desktop port is occupied", a
     assert.notEqual(selected, address.port);
   } finally {
     await new Promise((resolve) => blocker.close(resolve));
+  }
+});
+
+test("automatically names summarized meetings without overwriting manual titles", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-title-"));
+  const storage = new MeetingStorage(root);
+  try {
+    const meeting = storage.createMeeting("会议 08/27 16:20");
+    assert.equal(meeting.titleSource, "default");
+    const summary = {
+      headline: "Pulse 项目竞标流程与界面设计讨论，明确下一阶段安排",
+      topics: ["竞标流程", "界面设计"],
+    };
+    const automatic = storage.applyAutomaticTitle(meeting.id, summary);
+    assert.equal(automatic.changed, true);
+    assert.equal(automatic.meeting.title, "Pulse 项目竞标流程与界面设计讨论");
+    assert.equal(automatic.meeting.titleSource, "automatic");
+
+    const manual = storage.renameMeeting(meeting.id, "我自己确定的会议名称");
+    assert.equal(manual.titleSource, "manual");
+    const protectedResult = storage.applyAutomaticTitle(meeting.id, { headline: "新的 AI 标题" });
+    assert.equal(protectedResult.changed, false);
+    assert.equal(protectedResult.reason, "manual");
+    assert.equal(protectedResult.meeting.title, "我自己确定的会议名称");
+
+    const forced = storage.applyAutomaticTitle(meeting.id, { headline: "产品发布计划讨论" }, { force: true });
+    assert.equal(forced.changed, true);
+    assert.equal(forced.meeting.title, "产品发布计划讨论");
+    assert.equal(normalizeAutomaticMeetingTitle("会议主题：供应链风险复盘。"), "供应链风险复盘");
+    assert.equal(deriveAutomaticMeetingTitle({}, { topics: ["预算", "交付"] }), "预算与交付讨论");
+  } finally {
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

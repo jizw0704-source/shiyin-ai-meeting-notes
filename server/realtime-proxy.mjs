@@ -178,6 +178,7 @@ async function runSummary(meetingId, client = null) {
       },
     });
     storage.saveSummary(meetingId, summary);
+    storage.applyAutomaticTitle(meetingId, summary);
     storage.updateJob(summaryJob.id, { status: "completed", progress: 100 });
     storage.updateMeeting(meetingId, { status: "completed", error: null });
   } catch (error) {
@@ -472,17 +473,20 @@ const httpServer = createServer(async (request, response) => {
     if (request.method === "PATCH" && meetingMatch) {
       const body = await readJson(request);
       const patch = {};
+      let renamedMeeting = null;
       if (Object.hasOwn(body, "title")) {
         const title = String(body.title || "").trim();
         if (!title) return jsonResponse(response, 400, { error: "会议名称不能为空" });
-        patch.title = title.slice(0, 80);
+        renamedMeeting = storage.renameMeeting(meetingMatch[1], title);
       }
       if (Object.hasOwn(body, "summaryTemplate")) {
         patch.summaryTemplate = normalizeSummaryTemplateId(body.summaryTemplate);
         patch.templateVersion = SUMMARY_TEMPLATE_VERSION;
       }
       if (Object.hasOwn(body, "reportStyle")) patch.reportStyle = normalizeReportStyle(body.reportStyle);
-      let meeting = storage.updateMeeting(meetingMatch[1], patch);
+      let meeting = Object.keys(patch).length
+        ? storage.updateMeeting(meetingMatch[1], patch)
+        : renamedMeeting || storage.getMeeting(meetingMatch[1]);
       if (meeting && Object.hasOwn(body, "fillerFilterEnabled")) {
         if (meetingIsBusy(meeting)) {
           return jsonResponse(response, 409, { error: "会议仍在处理中，请稍后再整理逐字稿" });
@@ -490,6 +494,24 @@ const httpServer = createServer(async (request, response) => {
         meeting = storage.setFillerFilterEnabled(meeting.id, Boolean(body.fillerFilterEnabled));
       }
       return jsonResponse(response, meeting ? 200 : 404, meeting || { error: "会议不存在" });
+    }
+    const automaticTitleMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/auto-title$/);
+    if (request.method === "POST" && automaticTitleMatch) {
+      const meetingId = automaticTitleMatch[1];
+      const currentMeeting = storage.getMeeting(meetingId);
+      if (!currentMeeting) return jsonResponse(response, 404, { error: "会议不存在" });
+      if (meetingIsBusy(currentMeeting)) {
+        return jsonResponse(response, 409, { error: "会议仍在处理中，请稍后再命名" });
+      }
+      const result = storage.applyAutomaticTitle(
+        meetingId,
+        currentMeeting.summary || currentMeeting.liveSummary,
+        { force: true },
+      );
+      if (!result.meeting || result.reason === "unavailable") {
+        return jsonResponse(response, 422, { error: "这场会议还没有可用于命名的 AI 总结" });
+      }
+      return jsonResponse(response, 200, { meeting: result.meeting, changed: result.changed });
     }
     if (request.method === "DELETE" && meetingMatch) {
       const meetingId = meetingMatch[1];

@@ -156,6 +156,7 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(page, /本机发言人声纹库/);
   assert.match(page, /撤销上次替换/);
   assert.match(page, /重命名会议/);
+  assert.match(page, /智能命名/);
   assert.match(page, /setSelectedId\(\(current\) => preferredId \|\| current \|\| null\)/);
   assert.doesNotMatch(page, /result\.meetings\[0\]\?\.id/);
   assert.match(page, /会议名称不能为空/);
@@ -179,6 +180,7 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(proxy, /maxSpeakers: meeting\.maxSpeakers/);
   assert.match(proxy, /speakerLimitMode: meeting\.speakerLimitMode/);
   assert.match(proxy, /会议名称不能为空/);
+  assert.match(proxy, /applyAutomaticTitle/);
   assert.match(proxy, /\/api\/backups\/create/);
   assert.match(page, /summary\.preview/);
   assert.match(page, /\/api\/meetings\/\$\{encodeURIComponent\(meeting\.id\)\}\/audio/);

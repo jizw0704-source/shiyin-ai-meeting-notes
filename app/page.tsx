@@ -253,6 +253,7 @@ type MeetingBrief = {
   summaryStale: boolean;
   maxSpeakers: SpeakerLimit;
   speakerLimitMode: SpeakerLimitMode;
+  titleSource: "default" | "automatic" | "manual";
   deletedAt: string | null;
 };
 type Meeting = MeetingBrief & {
@@ -541,6 +542,7 @@ export default function Home() {
   const [meetingTitleDraft, setMeetingTitleDraft] = useState("");
   const [meetingRenameSaving, setMeetingRenameSaving] = useState(false);
   const [meetingRenameError, setMeetingRenameError] = useState("");
+  const [meetingAutoNaming, setMeetingAutoNaming] = useState(false);
   const [renamingSpeaker, setRenamingSpeaker] = useState<Speaker | null>(null);
   const [speakerNameDraft, setSpeakerNameDraft] = useState("");
   const [templateDialogOpen, setTemplateDialogOpen] = useState(false);
@@ -1782,6 +1784,23 @@ export default function Home() {
     }
   }
 
+  async function autoNameMeeting() {
+    if (!meeting || meetingAutoNaming || meetingIsBusy(meeting.status)) return;
+    setMeetingAutoNaming(true);
+    try {
+      const result = await api<{ meeting: Meeting; changed: boolean }>(`/api/meetings/${meeting.id}/auto-title`, {
+        method: "POST",
+      });
+      setMeeting(result.meeting);
+      mergeMeetingList(result.meeting);
+      setNotice(result.changed ? `已根据会议内容命名为“${result.meeting.title}”` : `当前名称“${result.meeting.title}”已经合适`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法智能命名会议");
+    } finally {
+      setMeetingAutoNaming(false);
+    }
+  }
+
   async function deleteMeeting() {
     if (!meeting || meeting.status === "recording") return;
     if (!window.confirm(`将“${meeting.title}”移入最近删除？之后可以恢复。`)) return;
@@ -2546,6 +2565,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             <button disabled={recording || processing} onClick={openTemplateDialog}><Compass size={15} /> 模板</button>
             <button disabled={!meeting || processing || meetingIsBusy(meeting.status)} onClick={rerunCorrection}>↻ 重新校正</button>
             <button disabled={!meeting || processing || meetingIsBusy(meeting.status)} onClick={rerunSummary}>✦ 重新总结</button>
+            <button disabled={!meeting || processing || meetingAutoNaming || meetingIsBusy(meeting.status)} onClick={() => void autoNameMeeting()}><Sparkle size={15} weight="fill" /> {meetingAutoNaming ? "正在命名" : "智能命名"}</button>
             <button disabled={!meeting || processing || meetingIsBusy(meeting?.status)} onClick={() => setTranscriptionDialogOpen(true)}><Waveform size={15} /> 转写版本</button>
             <div className="export-control">
               <button

@@ -11,6 +11,7 @@ import {
 } from "./summary-templates.mjs";
 import { cleanTranscriptText, replaceTranscriptText } from "./transcript-cleaning.mjs";
 import { normalizeMaxSpeakers, normalizeSpeakerLimitMode } from "./speaker-settings.mjs";
+import { deriveAutomaticMeetingTitle } from "./meeting-title.mjs";
 
 const speakerPalette = [
   "green", "violet", "amber", "blue", "rose", "teal", "orange", "indigo", "cyan", "lime",
@@ -65,6 +66,7 @@ export class MeetingStorage {
         active_transcript_version_id TEXT,
         max_speakers INTEGER NOT NULL DEFAULT 6,
         speaker_limit_mode TEXT NOT NULL DEFAULT 'manual',
+        title_source TEXT NOT NULL DEFAULT 'default',
         deleted_at TEXT
       );
       CREATE TABLE IF NOT EXISTS speakers (
@@ -190,6 +192,13 @@ export class MeetingStorage {
     if (!meetingColumns.has("deleted_at")) {
       this.db.exec("ALTER TABLE meetings ADD COLUMN deleted_at TEXT");
     }
+    if (!meetingColumns.has("title_source")) {
+      this.db.exec("ALTER TABLE meetings ADD COLUMN title_source TEXT NOT NULL DEFAULT 'manual'");
+      this.db.exec(`
+        UPDATE meetings SET title_source = 'default'
+        WHERE title = '未命名会议' OR title GLOB '会议 ??/?? ??:??'
+      `);
+    }
     const segmentColumns = new Set(
       this.db.prepare("PRAGMA table_info(segments)").all().map((column) => column.name),
     );
@@ -240,8 +249,8 @@ export class MeetingStorage {
     this.db.prepare(`
       INSERT INTO meetings
       (id, title, status, created_at, started_at, summary_template, template_version, report_style,
-       max_speakers, speaker_limit_mode)
-      VALUES (?, ?, 'recording', ?, ?, ?, ?, ?, ?, ?)
+       max_speakers, speaker_limit_mode, title_source)
+      VALUES (?, ?, 'recording', ?, ?, ?, ?, ?, ?, ?, 'default')
     `).run(id, title, now, now, summaryTemplate, templateVersion, reportStyle, maxSpeakers, speakerLimitMode);
     return this.getMeeting(id);
   }
@@ -284,6 +293,7 @@ export class MeetingStorage {
       activeTranscriptVersionId: meeting.active_transcript_version_id || null,
       maxSpeakers: normalizeMaxSpeakers(meeting.max_speakers),
       speakerLimitMode: normalizeSpeakerLimitMode(meeting.speaker_limit_mode, "manual"),
+      titleSource: ["default", "automatic", "manual"].includes(meeting.title_source) ? meeting.title_source : "manual",
       deletedAt: meeting.deleted_at || null,
     };
     if (!includeDetails) return value;
@@ -366,6 +376,7 @@ export class MeetingStorage {
       activeTranscriptVersionId: "active_transcript_version_id",
       maxSpeakers: "max_speakers",
       speakerLimitMode: "speaker_limit_mode",
+      titleSource: "title_source",
     };
     const normalizedPatch = {
       ...patch,
@@ -380,6 +391,27 @@ export class MeetingStorage {
       this.db.prepare(sql).run(...entries.map(([, value]) => value), id);
     }
     return this.getMeeting(id);
+  }
+
+  renameMeeting(id, title) {
+    const normalizedTitle = String(title || "").trim().slice(0, 80);
+    if (!normalizedTitle) throw new Error("会议名称不能为空");
+    this.db.prepare("UPDATE meetings SET title = ?, title_source = 'manual' WHERE id = ?")
+      .run(normalizedTitle, id);
+    return this.getMeeting(id);
+  }
+
+  applyAutomaticTitle(id, summary = null, options = {}) {
+    const meeting = this.getMeeting(id);
+    if (!meeting) return { changed: false, reason: "missing", meeting: null };
+    if (!options.force && meeting.titleSource === "manual") {
+      return { changed: false, reason: "manual", meeting };
+    }
+    const title = deriveAutomaticMeetingTitle(meeting, summary);
+    if (!title) return { changed: false, reason: "unavailable", meeting };
+    this.db.prepare("UPDATE meetings SET title = ?, title_source = 'automatic' WHERE id = ?")
+      .run(title, id);
+    return { changed: title !== meeting.title, reason: "automatic", meeting: this.getMeeting(id) };
   }
 
   saveSummary(meetingId, summary) {
@@ -1105,8 +1137,8 @@ export class MeetingStorage {
         (id, title, status, created_at, started_at, ended_at, duration_ms, audio_path,
          summary_json, live_summary_json, error, summary_template, template_version,
          report_style, filler_filter_enabled, summary_stale, active_transcript_version_id, max_speakers,
-         speaker_limit_mode, deleted_at)
-        VALUES (?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         speaker_limit_mode, title_source, deleted_at)
+        VALUES (?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         meetingId,
         String(snapshot.title || "已恢复会议").slice(0, 80),
@@ -1125,6 +1157,7 @@ export class MeetingStorage {
         snapshot.activeTranscriptVersionId || null,
         normalizeMaxSpeakers(snapshot.maxSpeakers),
         normalizeSpeakerLimitMode(snapshot.speakerLimitMode, "manual"),
+        ["default", "automatic", "manual"].includes(snapshot.titleSource) ? snapshot.titleSource : "manual",
         snapshot.deletedAt || null,
       );
       for (const speaker of snapshot.speakers || []) {
