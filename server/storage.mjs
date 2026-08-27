@@ -138,12 +138,23 @@ export class MeetingStorage {
         created_at TEXT NOT NULL,
         UNIQUE(meeting_id, version_no)
       );
+      CREATE TABLE IF NOT EXISTS meeting_attachments (
+        id TEXT PRIMARY KEY,
+        meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+        original_name TEXT NOT NULL,
+        stored_name TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        extracted_text TEXT,
+        created_at TEXT NOT NULL
+      );
       CREATE INDEX IF NOT EXISTS idx_segments_meeting_seq ON segments(meeting_id, seq);
       CREATE INDEX IF NOT EXISTS idx_speakers_meeting ON speakers(meeting_id);
       CREATE INDEX IF NOT EXISTS idx_speaker_profiles_name ON speaker_profiles(display_name);
       CREATE INDEX IF NOT EXISTS idx_jobs_meeting ON jobs(meeting_id);
       CREATE INDEX IF NOT EXISTS idx_transcript_edits_meeting ON transcript_edits(meeting_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_transcript_versions_meeting ON transcript_versions(meeting_id, version_no);
+      CREATE INDEX IF NOT EXISTS idx_meeting_attachments_meeting ON meeting_attachments(meeting_id, created_at);
     `);
     const meetingColumns = new Set(
       this.db.prepare("PRAGMA table_info(meetings)").all().map((column) => column.name),
@@ -271,9 +282,63 @@ export class MeetingStorage {
       cleanedText: value.fillerFilterEnabled ? cleanTranscriptText(segment.text) : segment.text,
     }));
     value.jobs = this.listJobs(meeting.id);
+    value.attachments = this.listAttachments(meeting.id);
     value.transcriptVersions = this.listTranscriptVersions(meeting.id);
     value.canUndoTranscriptEdit = Boolean(this.latestTranscriptEdit(meeting.id));
     return value;
+  }
+
+  addAttachment(meetingId, attachment) {
+    if (!this.getMeeting(meetingId)) throw new Error("会议不存在");
+    const id = String(attachment.id || randomUUID());
+    const createdAt = attachment.createdAt || new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO meeting_attachments
+      (id, meeting_id, original_name, stored_name, mime_type, size_bytes, extracted_text, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      meetingId,
+      String(attachment.originalName || "会议资料").slice(0, 180),
+      String(attachment.storedName || id).slice(0, 220),
+      String(attachment.mimeType || "application/octet-stream").slice(0, 160),
+      Math.max(0, Number(attachment.sizeBytes) || 0),
+      attachment.extractedText ? String(attachment.extractedText).slice(0, 80000) : null,
+      createdAt,
+    );
+    return this.getAttachment(id);
+  }
+
+  getAttachment(id) {
+    const row = this.db.prepare("SELECT * FROM meeting_attachments WHERE id = ?").get(id);
+    return row ? this.hydrateAttachment(row) : null;
+  }
+
+  listAttachments(meetingId) {
+    return this.db.prepare(`
+      SELECT * FROM meeting_attachments WHERE meeting_id = ? ORDER BY created_at
+    `).all(meetingId).map((row) => this.hydrateAttachment(row));
+  }
+
+  hydrateAttachment(row) {
+    return {
+      id: row.id,
+      meetingId: row.meeting_id,
+      originalName: row.original_name,
+      storedName: row.stored_name,
+      mimeType: row.mime_type,
+      sizeBytes: row.size_bytes,
+      extractedText: row.extracted_text || null,
+      aiReadable: Boolean(row.extracted_text),
+      createdAt: row.created_at,
+    };
+  }
+
+  deleteAttachment(id) {
+    const attachment = this.getAttachment(id);
+    if (!attachment) return null;
+    this.db.prepare("DELETE FROM meeting_attachments WHERE id = ?").run(id);
+    return attachment;
   }
 
   updateMeeting(id, patch) {
@@ -1011,6 +1076,7 @@ export class MeetingStorage {
       ...meeting,
       jobs: [],
       transcriptEdits,
+      attachments: this.listAttachments(meetingId),
       transcriptVersions: this.listTranscriptVersions(meetingId, true),
     };
   }
@@ -1113,6 +1179,9 @@ export class MeetingStorage {
           edit.createdAt || now,
           edit.undoneAt || null,
         );
+      }
+      for (const attachment of snapshot.attachments || []) {
+        this.addAttachment(meetingId, attachment);
       }
       for (const version of snapshot.transcriptVersions || []) {
         if (!version.snapshot) continue;

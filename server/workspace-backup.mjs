@@ -4,8 +4,8 @@ import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/
 import path from "node:path";
 
 const BACKUP_FORMAT = "shiyin-ai-backup";
-const BACKUP_VERSION = 2;
-const SUPPORTED_BACKUP_VERSIONS = new Set([1, BACKUP_VERSION]);
+const BACKUP_VERSION = 3;
+const SUPPORTED_BACKUP_VERSIONS = new Set([1, 2, BACKUP_VERSION]);
 
 function inside(root, candidate) {
   const resolvedRoot = path.resolve(root);
@@ -75,11 +75,22 @@ export async function createWorkspaceBackup({ storage, dataRoot, destinationRoot
         files.push(await fileRecord(temporaryPath, audioPath));
         audioRelativePath = path.relative(temporaryPath, audioPath).split(path.sep).join("/");
       }
+      const attachmentPaths = [];
+      for (const attachment of storage.listAttachments(meeting.id)) {
+        const sourceAttachmentPath = path.join(dataRoot, "meetings", meeting.id, "attachments", attachment.storedName);
+        if (!existsSync(sourceAttachmentPath)) continue;
+        const attachmentPath = path.join(meetingDirectory, "attachments", attachment.storedName);
+        await mkdir(path.dirname(attachmentPath), { recursive: true });
+        await copyFile(sourceAttachmentPath, attachmentPath);
+        files.push(await fileRecord(temporaryPath, attachmentPath));
+        attachmentPaths.push(path.relative(temporaryPath, attachmentPath).split(path.sep).join("/"));
+      }
       meetings.push({
         id: meeting.id,
         title: meeting.title,
         snapshotPath: path.relative(temporaryPath, snapshotPath).split(path.sep).join("/"),
         audioPath: audioRelativePath,
+        attachmentPaths,
       });
     }
 
@@ -160,6 +171,14 @@ export async function restoreWorkspaceBackup({ storage, dataRoot, backupPath }) 
         if (!sourceAudioPath) throw new Error(`备份缺少会议录音：${entry.id}`);
         await copyFile(sourceAudioPath, temporaryAudioPath);
         await rename(temporaryAudioPath, targetAudioPath);
+      }
+      for (const relativeAttachmentPath of entry.attachmentPaths || []) {
+        const sourceAttachmentPath = validatedFiles.get(relativeAttachmentPath);
+        if (!sourceAttachmentPath) throw new Error(`备份缺少会议资料：${entry.id}`);
+        const storedName = path.basename(relativeAttachmentPath);
+        const targetAttachmentPath = path.join(meetingDirectory, "attachments", storedName);
+        await mkdir(path.dirname(targetAttachmentPath), { recursive: true });
+        await copyFile(sourceAttachmentPath, targetAttachmentPath);
       }
       const result = storage.importMeetingSnapshot(snapshot, { audioPath: targetAudioPath });
       if (result.imported) importedMeetings += 1;

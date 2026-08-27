@@ -22,7 +22,12 @@ test("server-renders the meeting transcription product", async () => {
   const html = await response.text();
   assert.match(html, /<title>拾音 AI｜MiniMax 智能会议听记<\/title>/i);
   assert.match(html, /开始新听记/);
-  assert.match(html, /开始一场新的会议/);
+  assert.match(html, /让讨论留下清晰结论/);
+  assert.match(html, /本次会议设置/);
+  assert.match(html, /添加会议资料/);
+  assert.match(html, /录音界面背景/);
+  assert.match(html, /界面外观/);
+  assert.match(html, /跟随系统|系统/);
   assert.match(html, /开始会议/);
   assert.match(html, /本地听记已准备就绪/);
   assert.match(html, /本地实时转写/);
@@ -37,7 +42,7 @@ test("server-renders the meeting transcription product", async () => {
   assert.match(html, /搜索历史会议/);
   assert.match(html, /12 人/);
   assert.match(html, /20 人/);
-  assert.match(html, /录音和转写会保存在这台电脑/);
+  assert.match(html, /保存原始录音/);
   assert.doesNotMatch(html, /录音和转写会保存在这台 Mac/);
   assert.doesNotMatch(html, /转写版本|完整记录|会议速览/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/);

@@ -1,6 +1,6 @@
 {
   "name": "shiyin-minimax-meeting-notes",
-  "version": "0.5.8",
+  "version": "0.5.9",
   "description": "基于 Sherpa-ONNX 本地实时转写、CAM++ 本地声纹识别与 MiniMax 的 AI 会议听记工具",
   "author": "LightningFlashEvE",
   "license": "UNLICENSED",

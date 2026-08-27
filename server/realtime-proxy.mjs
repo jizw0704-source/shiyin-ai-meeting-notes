@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import path from "node:path";
 import process from "node:process";
@@ -126,6 +126,31 @@ function meetingTitle() {
   return `会议 ${new Intl.DateTimeFormat("zh-CN", {
     month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
   }).format(new Date())}`;
+}
+
+const attachmentTextExtensions = new Set([".txt", ".md", ".markdown", ".csv", ".json", ".log"]);
+const attachmentAllowedExtensions = new Set([
+  ...attachmentTextExtensions,
+  ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx",
+  ".png", ".jpg", ".jpeg", ".webp", ".heic",
+]);
+const attachmentMaxBytes = 12 * 1024 * 1024;
+const attachmentMaxCount = 12;
+
+function safeAttachmentName(value) {
+  return path.basename(String(value || "会议资料")).replace(/[\u0000-\u001f<>:"/\\|?*]/g, "_").slice(0, 180) || "会议资料";
+}
+
+function attachmentDirectory(meetingId) {
+  const root = path.resolve(dataRoot, "meetings", meetingId, "attachments");
+  const meetingsRoot = path.resolve(dataRoot, "meetings") + path.sep;
+  if (!root.startsWith(meetingsRoot)) throw new Error("无效会议资料目录");
+  return root;
+}
+
+function extractedAttachmentText(buffer, extension, mimeType) {
+  if (!attachmentTextExtensions.has(extension) && !String(mimeType || "").startsWith("text/")) return null;
+  return buffer.toString("utf8").replace(/\u0000/g, "").trim().slice(0, 80000) || null;
 }
 
 async function runSummary(meetingId, client = null) {
@@ -384,6 +409,57 @@ const httpServer = createServer(async (request, response) => {
       const meeting = storage.getMeeting(audioMatch[1]);
       if (!meeting) return jsonResponse(response, 404, { error: "会议不存在" });
       return streamMeetingAudio(request, response, { meeting, dataRoot, appOrigin });
+    }
+    const attachmentCollectionMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/attachments$/);
+    if (request.method === "POST" && attachmentCollectionMatch) {
+      const meetingId = attachmentCollectionMatch[1];
+      const meeting = storage.getMeeting(meetingId);
+      if (!meeting) return jsonResponse(response, 404, { error: "会议不存在" });
+      if (meeting.attachments.length >= attachmentMaxCount) {
+        return jsonResponse(response, 400, { error: `每场会议最多添加 ${attachmentMaxCount} 份资料` });
+      }
+      const body = await readJson(request);
+      const originalName = safeAttachmentName(body.name);
+      const extension = path.extname(originalName).toLowerCase();
+      if (!attachmentAllowedExtensions.has(extension)) {
+        return jsonResponse(response, 400, { error: "暂不支持这种资料格式" });
+      }
+      const buffer = Buffer.from(String(body.base64 || ""), "base64");
+      if (!buffer.length) return jsonResponse(response, 400, { error: "资料内容为空" });
+      if (buffer.length > attachmentMaxBytes) {
+        return jsonResponse(response, 400, { error: "单份资料不能超过 12 MB" });
+      }
+      const id = randomUUID();
+      const storedName = `${id}${extension}`;
+      const directory = attachmentDirectory(meetingId);
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(path.join(directory, storedName), buffer, { flag: "wx" });
+      try {
+        const attachment = storage.addAttachment(meetingId, {
+          id,
+          originalName,
+          storedName,
+          mimeType: String(body.mimeType || "application/octet-stream"),
+          sizeBytes: buffer.length,
+          extractedText: extractedAttachmentText(buffer, extension, body.mimeType),
+        });
+        return jsonResponse(response, 201, { attachment, meeting: storage.getMeeting(meetingId) });
+      } catch (error) {
+        rmSync(path.join(directory, storedName), { force: true });
+        throw error;
+      }
+    }
+    const attachmentItemMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/attachments\/([^/]+)$/);
+    if (request.method === "DELETE" && attachmentItemMatch) {
+      const [meetingId, attachmentId] = attachmentItemMatch.slice(1);
+      const attachment = storage.getAttachment(attachmentId);
+      if (!attachment || attachment.meetingId !== meetingId) {
+        return jsonResponse(response, 404, { error: "会议资料不存在" });
+      }
+      storage.deleteAttachment(attachmentId);
+      const filePath = path.join(attachmentDirectory(meetingId), attachment.storedName);
+      if (existsSync(filePath)) unlinkSync(filePath);
+      return jsonResponse(response, 200, { meeting: storage.getMeeting(meetingId) });
     }
     const meetingMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)$/);
     if (request.method === "GET" && meetingMatch) {

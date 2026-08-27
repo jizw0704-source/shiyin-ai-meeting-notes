@@ -748,6 +748,18 @@ test("creates a verified workspace backup and safely merges it into another work
       durationMs: 1000,
       audioPath,
     });
+    const attachmentId = "attachment-backup-1";
+    const attachmentDirectory = path.join(sourceRoot, "meetings", meeting.id, "attachments");
+    mkdirSync(attachmentDirectory, { recursive: true });
+    writeFileSync(path.join(attachmentDirectory, `${attachmentId}.md`), "# 会前方案\n\n预算上限为 20 万元。\n");
+    sourceStorage.addAttachment(meeting.id, {
+      id: attachmentId,
+      originalName: "会前方案.md",
+      storedName: `${attachmentId}.md`,
+      mimeType: "text/markdown",
+      sizeBytes: 37,
+      extractedText: "# 会前方案\n\n预算上限为 20 万元。",
+    });
     sourceStorage.createTranscriptVersion(meeting.id, { label: "备份版本", active: true });
 
     const backup = await createWorkspaceBackup({
@@ -776,11 +788,15 @@ test("creates a verified workspace backup and safely merges it into another work
     assert.equal(restoredMeeting.summary.overview, "备份总结");
     assert.equal(restoredMeeting.maxSpeakers, 20);
     assert.equal(restoredMeeting.transcriptVersions.length, 1);
+    assert.equal(restoredMeeting.attachments.length, 1);
+    assert.equal(restoredMeeting.attachments[0].originalName, "会前方案.md");
+    assert.equal(restoredMeeting.attachments[0].aiReadable, true);
     assert.equal(restoredMeeting.speakers[0].displayName, "王工");
     assert.equal(restoredMeeting.speakers[1].suggestedName, "王工");
     assert.equal(restoredMeeting.speakers[1].suggestedScore, 0.8);
     assert.equal(targetStorage.listSpeakerProfiles()[0].displayName, "王工");
     assert.equal(existsSync(path.join(targetRoot, "meetings", meeting.id, "audio.wav")), true);
+    assert.equal(existsSync(path.join(targetRoot, "meetings", meeting.id, "attachments", `${attachmentId}.md`)), true);
 
     const duplicate = await restoreWorkspaceBackup({
       storage: targetStorage,

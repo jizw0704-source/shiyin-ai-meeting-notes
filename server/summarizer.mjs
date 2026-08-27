@@ -563,6 +563,17 @@ async function extractLongMeeting(transcript, apiKey, model, options = {}) {
   return digests;
 }
 
+function meetingMaterials(meeting) {
+  return (meeting.attachments || []).slice(0, 12).map((attachment) => ({
+    name: attachment.originalName,
+    mimeType: attachment.mimeType,
+    content: attachment.extractedText || null,
+    note: attachment.extractedText
+      ? "会议参考资料；如与现场讨论冲突，以逐字稿中的明确决定为准"
+      : "文件已随会议保存，但当前版本不能读取正文，不得推断其内容",
+  }));
+}
+
 export async function summarizeMeetingPreview(meeting, apiKey, model = "MiniMax-M3", options = {}) {
   if (!meeting.segments.length) return null;
   if (!apiKey) throw new Error("尚未配置 MINIMAX_API_KEY");
@@ -577,6 +588,7 @@ export async function summarizeMeetingPreview(meeting, apiKey, model = "MiniMax-
       title: meeting.title,
       durationMs: meeting.durationMs,
       summaryTemplate,
+      meetingMaterials: meetingMaterials(meeting),
       previousDraft: meeting.liveSummary || null,
       transcript,
     },
@@ -614,6 +626,7 @@ export async function summarizeMeeting(meeting, apiKey, model = "MiniMax-M3", op
       title: meeting.title,
       durationMs: meeting.durationMs,
       summaryTemplate,
+      meetingMaterials: meetingMaterials(meeting),
       speakers: meeting.speakers.map((speaker) => speaker.displayName),
       previousLiveDraft: meeting.liveSummary || null,
       chunkDigests: await extractLongMeeting(transcript, apiKey, model, options),
@@ -623,6 +636,7 @@ export async function summarizeMeeting(meeting, apiKey, model = "MiniMax-M3", op
       title: meeting.title,
       durationMs: meeting.durationMs,
       summaryTemplate,
+      meetingMaterials: meetingMaterials(meeting),
       previousLiveDraft: meeting.liveSummary || null,
       transcript,
     };

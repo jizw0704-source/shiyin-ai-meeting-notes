@@ -11,17 +11,23 @@ import {
   Clock,
   Compass,
   DownloadSimple,
+  Desktop,
+  FileText,
   Flag,
   FolderOpen,
   GearSix,
   HardDrives,
   Key,
   ListChecks,
+  Moon,
   MagnifyingGlass,
   PencilSimple,
+  Paperclip,
+  Palette,
   PushPin,
   Quotes,
   Sparkle,
+  Sun,
   Target,
   Trash,
   UsersThree,
@@ -39,6 +45,8 @@ type SpeakerLimit = 6 | 12 | 20;
 type SpeakerLimitMode = "auto" | "manual";
 type TranscriptMode = "organized" | "original";
 type TranscriptOrder = "ascending" | "descending";
+type ThemeMode = "system" | "light" | "dark";
+type RecordingBackdrop = "paper" | "focus" | "wave" | "midnight";
 type AudioCaptureCapabilities = {
   platform: string;
   macOSVersion: string;
@@ -110,6 +118,16 @@ type TranscriptVersion = {
   label: string;
   engine: string;
   segmentCount: number;
+  createdAt: string;
+};
+type MeetingAttachment = {
+  id: string;
+  meetingId: string;
+  originalName: string;
+  storedName: string;
+  mimeType: string;
+  sizeBytes: number;
+  aiReadable: boolean;
   createdAt: string;
 };
 type Speaker = {
@@ -243,6 +261,7 @@ type Meeting = MeetingBrief & {
   canUndoTranscriptEdit: boolean;
   activeTranscriptVersionId: string | null;
   transcriptVersions: TranscriptVersion[];
+  attachments: MeetingAttachment[];
 };
 
 declare global {
@@ -286,6 +305,12 @@ const speakerLimitOptions: Array<{ value: SpeakerLimit; label: string; detail: s
   { value: 6, label: "6 人", detail: "小型会议" },
   { value: 12, label: "12 人", detail: "内部会议" },
   { value: 20, label: "20 人", detail: "大型会议" },
+];
+const recordingBackdrops: Array<{ id: RecordingBackdrop; name: string; detail: string }> = [
+  { id: "paper", name: "清爽", detail: "浅灰留白" },
+  { id: "focus", name: "专注", detail: "柔和蓝光" },
+  { id: "wave", name: "声场", detail: "动态波纹" },
+  { id: "midnight", name: "夜间", detail: "深色低干扰" },
 ];
 const summaryTemplates: Array<{
   id: SummaryTemplateId;
@@ -460,6 +485,15 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return result;
 }
 
+function fileAsBase64(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`无法读取“${file.name}”`));
+    reader.onload = () => resolve(String(reader.result || "").split(",").at(-1) || "");
+    reader.readAsDataURL(file);
+  });
+}
+
 export default function Home() {
   const [view, setView] = useState<View>("transcript");
   const [meetings, setMeetings] = useState<MeetingBrief[]>([]);
@@ -533,7 +567,12 @@ export default function Home() {
   const [segmentSpeakerSavingId, setSegmentSpeakerSavingId] = useState<string | null>(null);
   const [speakerSuggestionSavingId, setSpeakerSuggestionSavingId] = useState<string | null>(null);
   const [showBackToTop, setShowBackToTop] = useState(false);
+  const [themeMode, setThemeMode] = useState<ThemeMode>("system");
+  const [recordingBackdrop, setRecordingBackdrop] = useState<RecordingBackdrop>("paper");
+  const [pendingAttachments, setPendingAttachments] = useState<File[]>([]);
+  const [attachmentUploading, setAttachmentUploading] = useState(false);
   const workspaceRef = useRef<HTMLElement | null>(null);
+  const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const playbackRef = useRef<HTMLAudioElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -600,6 +639,8 @@ export default function Home() {
       const savedSpeakerLimitMode = window.localStorage.getItem("shiyin.speakerLimitMode");
       const savedObsidianAutoSave = window.localStorage.getItem("shiyin.obsidianAutoSave");
       const savedTranscriptOrder = window.localStorage.getItem("shiyin.transcriptOrder");
+      const savedTheme = window.localStorage.getItem("shiyin.themeMode") as ThemeMode | null;
+      const savedBackdrop = window.localStorage.getItem("shiyin.recordingBackdrop") as RecordingBackdrop | null;
       if (summaryTemplates.some((template) => template.id === savedTemplate)) {
         setDefaultSummaryTemplate(savedTemplate!);
       }
@@ -610,9 +651,25 @@ export default function Home() {
       if (savedSpeakerLimitMode === "manual") setSpeakerLimitMode("manual");
       setObsidianAutoSave(savedObsidianAutoSave === "true");
       if (savedTranscriptOrder === "descending") setTranscriptOrder("descending");
+      if (["system", "light", "dark"].includes(savedTheme || "")) setThemeMode(savedTheme!);
+      if (recordingBackdrops.some((item) => item.id === savedBackdrop)) setRecordingBackdrop(savedBackdrop!);
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
+
+  useEffect(() => {
+    const systemPreference = window.matchMedia("(prefers-color-scheme: dark)");
+    const applyTheme = () => {
+      const effectiveTheme = themeMode === "system"
+        ? (systemPreference.matches ? "dark" : "light")
+        : themeMode;
+      document.documentElement.dataset.theme = effectiveTheme;
+      document.documentElement.dataset.themeMode = themeMode;
+    };
+    applyTheme();
+    systemPreference.addEventListener("change", applyTheme);
+    return () => systemPreference.removeEventListener("change", applyTheme);
+  }, [themeMode]);
 
   useEffect(() => {
     let active = true;
@@ -1054,6 +1111,90 @@ export default function Home() {
     setSourceWarning("");
   }
 
+  function selectTheme(mode: ThemeMode) {
+    setThemeMode(mode);
+    window.localStorage.setItem("shiyin.themeMode", mode);
+  }
+
+  function selectRecordingBackdrop(backdrop: RecordingBackdrop) {
+    setRecordingBackdrop(backdrop);
+    window.localStorage.setItem("shiyin.recordingBackdrop", backdrop);
+    setNotice(`录音界面已切换为“${recordingBackdrops.find((item) => item.id === backdrop)?.name}”背景`);
+  }
+
+  async function uploadAttachments(meetingId: string, files: File[]) {
+    if (!files.length || attachmentUploading) return;
+    setAttachmentUploading(true);
+    try {
+      let updatedMeeting: Meeting | null = null;
+      for (const file of files) {
+        const result = await api<{ attachment: MeetingAttachment; meeting: Meeting }>(
+          `/api/meetings/${meetingId}/attachments`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              name: file.name,
+              mimeType: file.type || "application/octet-stream",
+              base64: await fileAsBase64(file),
+            }),
+          },
+        );
+        updatedMeeting = result.meeting;
+      }
+      if (updatedMeeting) {
+        setMeeting((current) => current?.id === updatedMeeting?.id ? updatedMeeting : current);
+        mergeMeetingList(updatedMeeting);
+      }
+      setPendingAttachments([]);
+      setNotice(`已将 ${files.length} 份会议资料保存在本地${updatedMeeting?.summary ? "；重新总结后会引用可读取的文本资料" : ""}`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法保存会议资料");
+    } finally {
+      setAttachmentUploading(false);
+    }
+  }
+
+  function handleAttachmentFiles(fileList: FileList | null) {
+    const files = Array.from(fileList || []);
+    if (attachmentInputRef.current) attachmentInputRef.current.value = "";
+    if (!files.length) return;
+    const tooLarge = files.find((file) => file.size > 12 * 1024 * 1024);
+    if (tooLarge) {
+      setNotice(`“${tooLarge.name}”超过 12 MB，请压缩后再添加`);
+      return;
+    }
+    const existingCount = meeting?.attachments.length || pendingAttachments.length;
+    if (existingCount + files.length > 12) {
+      setNotice("每场会议最多添加 12 份资料");
+      return;
+    }
+    if (meeting) {
+      void uploadAttachments(meeting.id, files);
+      return;
+    }
+    setPendingAttachments((items) => [...items, ...files]);
+    setNotice(`已选择 ${files.length} 份资料，开始会议后会自动保存在本地`);
+  }
+
+  async function removeAttachment(attachment: MeetingAttachment) {
+    if (!meeting || attachmentUploading) return;
+    if (!window.confirm(`从本次会议中移除“${attachment.originalName}”？`)) return;
+    setAttachmentUploading(true);
+    try {
+      const result = await api<{ meeting: Meeting }>(
+        `/api/meetings/${meeting.id}/attachments/${attachment.id}`,
+        { method: "DELETE" },
+      );
+      setMeeting(result.meeting);
+      mergeMeetingList(result.meeting);
+      setNotice("会议资料已移除；原有 AI 总结不会自动改变");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法移除会议资料");
+    } finally {
+      setAttachmentUploading(false);
+    }
+  }
+
   async function openAudioPrivacySettings(kind: "microphone" | "screen") {
     const opened = await window.shiyinDesktop?.openAudioPrivacySettings(kind);
     if (!opened) return;
@@ -1195,6 +1336,7 @@ export default function Home() {
             setMeeting(value);
             setSelectedId(value.id);
             mergeMeetingList(value);
+            if (pendingAttachments.length) void uploadAttachments(value.id, pendingAttachments);
             setConnectionStatus(
               message.speakerModelAvailable
                 ? `${sessionAsrLabel} · 本地声纹分离`
@@ -2051,7 +2193,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
       : "点击开始后，macOS 会弹出共享面板，请选择会议所在屏幕并开启系统音频。";
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell recording-backdrop-${recordingBackdrop} ${recording ? "is-recording" : ""}`}>
       <header className="window-chrome" aria-label="拾音 AI 软件窗口">
         <div className="window-chrome-safe-area">
           <div className="window-chrome-brand">
@@ -2063,6 +2205,14 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
           <div className="window-chrome-state"><i /> 本地运行</div>
         </div>
       </header>
+      <input
+        ref={attachmentInputRef}
+        className="visually-hidden"
+        type="file"
+        multiple
+        accept=".txt,.md,.markdown,.csv,.json,.log,.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.png,.jpg,.jpeg,.webp,.heic"
+        onChange={(event) => handleAttachmentFiles(event.target.files)}
+      />
       <aside className="sidebar">
         <div className="brand"><span className="brand-mark">听</span><span>拾音</span><em>AI</em></div>
         <button className="new-note" disabled={processing} onClick={toggleRecording}>
@@ -2239,6 +2389,17 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
           </span>
           <ArrowRight size={15} />
         </button>
+        <section className="appearance-picker" aria-labelledby="appearance-picker-title">
+          <div className="appearance-picker-heading">
+            <Palette size={15} weight="duotone" />
+            <span id="appearance-picker-title">界面外观</span>
+          </div>
+          <div role="radiogroup" aria-label="界面颜色模式">
+            <button type="button" className={themeMode === "system" ? "active" : ""} aria-pressed={themeMode === "system"} onClick={() => selectTheme("system")}><Desktop size={14} />系统</button>
+            <button type="button" className={themeMode === "light" ? "active" : ""} aria-pressed={themeMode === "light"} onClick={() => selectTheme("light")}><Sun size={14} />浅色</button>
+            <button type="button" className={themeMode === "dark" ? "active" : ""} aria-pressed={themeMode === "dark"} onClick={() => selectTheme("dark")}><Moon size={14} />深色</button>
+          </div>
+        </section>
         {globalShortcutStatus && (
           <div className={`shortcut-hint ${globalShortcutStatus.openWindow && globalShortcutStatus.toggleRecording ? "" : "warning"}`}>
             <span><b>{globalShortcutStatus.openLabel}</b><small>打开应用</small></span>
@@ -2333,6 +2494,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             </p>
           </div>
           {meeting ? <div className="top-actions">
+            <button disabled={attachmentUploading} onClick={() => attachmentInputRef.current?.click()}><Paperclip size={15} /> 资料 {meeting.attachments.length || ""}</button>
             <button disabled={recording || processing} onClick={openTemplateDialog}><Compass size={15} /> 模板</button>
             <button disabled={!meeting || processing || meetingIsBusy(meeting.status)} onClick={rerunCorrection}>↻ 重新校正</button>
             <button disabled={!meeting || processing || meetingIsBusy(meeting.status)} onClick={rerunSummary}>✦ 重新总结</button>
@@ -2404,33 +2566,95 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                 </audio>
               </section>
             )}
+            {meeting && (
+              <section className="meeting-materials" aria-labelledby="meeting-materials-title">
+                <div className="meeting-materials-heading">
+                  <span><Paperclip size={17} weight="duotone" /><b id="meeting-materials-title">会议资料</b><small>{meeting.attachments.length} 份</small></span>
+                  <button type="button" disabled={attachmentUploading} onClick={() => attachmentInputRef.current?.click()}>{attachmentUploading ? "正在保存…" : "+ 添加资料"}</button>
+                </div>
+                {meeting.attachments.length ? (
+                  <div className="meeting-material-list">
+                    {meeting.attachments.map((attachment) => (
+                      <article key={attachment.id}>
+                        <FileText size={16} weight="duotone" />
+                        <span><b>{attachment.originalName}</b><small>{formatBytes(attachment.sizeBytes)} · {attachment.aiReadable ? "AI 可读取正文" : "作为本地附件保存"}</small></span>
+                        <button type="button" disabled={attachmentUploading} onClick={() => void removeAttachment(attachment)} aria-label={`移除 ${attachment.originalName}`}><X size={12} /></button>
+                      </article>
+                    ))}
+                  </div>
+                ) : <p>可添加议程、方案或参考文档；文本类资料会参与下一次 AI 总结。</p>}
+              </section>
+            )}
             {!meeting ? (
               <section className="meeting-start-page" aria-labelledby="meeting-start-title">
-                <div className="meeting-start-orb" aria-hidden="true">
-                  <Waveform size={42} weight="duotone" />
+                <div className="meeting-start-copy">
+                  <span className="meeting-start-kicker"><i /> 本地听记已准备就绪</span>
+                  <h2 id="meeting-start-title">让讨论留下清晰结论</h2>
+                  <p>开始后实时转写、识别发言人并保存原始录音。会议结束时，MiniMax 会整理决策、风险和行动项。</p>
+                  <div className="meeting-material-prep">
+                    <button type="button" disabled={attachmentUploading} onClick={() => attachmentInputRef.current?.click()}>
+                      <Paperclip size={16} weight="duotone" />
+                      <span><b>{pendingAttachments.length ? `已选择 ${pendingAttachments.length} 份资料` : "添加会议资料"}</b><small>PDF、Office、Markdown、图片等 · 单份不超过 12 MB</small></span>
+                    </button>
+                    {pendingAttachments.length > 0 && (
+                      <div className="pending-materials" aria-label="待添加的会议资料">
+                        {pendingAttachments.map((file, index) => (
+                          <span key={`${file.name}-${file.lastModified}-${index}`}><FileText size={12} />{file.name}<button type="button" aria-label={`移除 ${file.name}`} onClick={() => setPendingAttachments((items) => items.filter((_, itemIndex) => itemIndex !== index))}><X size={10} /></button></span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    className="meeting-start-button"
+                    disabled={recording || processing}
+                    onClick={() => void startRecording()}
+                  >
+                    <span><Waveform size={22} weight="fill" /></span>
+                    <strong>{recording ? "正在启动…" : "开始会议"}</strong>
+                    <small>
+                      {audioSourceMode === "mixed" ? "电脑声音 + 麦克风" : audioSourceMode === "system" ? "电脑声音" : "麦克风"}
+                      {speakerLimitMode === "auto" ? " · 自动检测发言人" : ` · 最多 ${speakerLimit} 人`}
+                    </small>
+                  </button>
+                  <div className="meeting-start-features" aria-label="会议处理方式">
+                    <span><CheckCircle size={15} weight="fill" /> 本地实时转写</span>
+                    <span><HardDrives size={15} weight="duotone" /> 数据保存在本机</span>
+                    <span><Sparkle size={15} weight="fill" /> MiniMax 整理纪要</span>
+                  </div>
+                  {meetings.length > 0 && <small className="meeting-start-history-hint">需要回看旧内容？请从左侧“历史会议”中选择。</small>}
                 </div>
-                <span className="meeting-start-kicker"><i /> 本地听记已准备就绪</span>
-                <h2 id="meeting-start-title">开始一场新的会议</h2>
-                <p>录音和转写会保存在这台电脑；会议结束后，再由 MiniMax 自动整理纪要与行动项。</p>
-                <button
-                  type="button"
-                  className="meeting-start-button"
-                  disabled={recording || processing}
-                  onClick={() => void startRecording()}
-                >
-                  <span><Waveform size={22} weight="fill" /></span>
-                  <strong>{recording ? "正在启动…" : "开始会议"}</strong>
-                  <small>
-                    {audioSourceMode === "mixed" ? "电脑声音 + 麦克风" : audioSourceMode === "system" ? "电脑声音" : "麦克风"}
-                    {speakerLimitMode === "auto" ? " · 自动检测发言人" : ` · 最多 ${speakerLimit} 人`}
-                  </small>
-                </button>
-                <div className="meeting-start-features" aria-label="会议处理方式">
-                  <span><CheckCircle size={15} weight="fill" /> 本地实时转写</span>
-                  <span><HardDrives size={15} weight="duotone" /> 录音保存在本机</span>
-                  <span><Sparkle size={15} weight="fill" /> MiniMax 生成纪要</span>
-                </div>
-                {meetings.length > 0 && <small className="meeting-start-history-hint">需要回看旧内容？请从左侧“历史会议”中选择。</small>}
+                <aside className="meeting-start-context" aria-label="本次会议设置">
+                  <div className="meeting-start-orb" aria-hidden="true">
+                    <Waveform size={38} weight="duotone" />
+                  </div>
+                  <div className="meeting-start-context-heading">
+                    <span>本次会议设置</span>
+                    <b>已准备</b>
+                  </div>
+                  <dl>
+                    <div><dt>录音来源</dt><dd>{audioSourceMode === "mixed" ? "电脑声音 + 麦克风" : audioSourceMode === "system" ? "电脑声音" : "麦克风"}</dd></div>
+                    <div><dt>发言人</dt><dd>{speakerLimitMode === "auto" ? "自动检测" : `最多 ${speakerLimit} 人`}</dd></div>
+                    <div><dt>纪要模板</dt><dd>{summaryTemplateName(defaultSummaryTemplate)}</dd></div>
+                    <div><dt>会议资料</dt><dd>{pendingAttachments.length ? `${pendingAttachments.length} 份待归档` : "尚未添加"}</dd></div>
+                  </dl>
+                  <div className="recording-background-picker">
+                    <span><Palette size={14} /> 录音界面背景</span>
+                    <div role="radiogroup" aria-label="选择录音界面背景">
+                      {recordingBackdrops.map((backdrop) => (
+                        <button
+                          type="button"
+                          key={backdrop.id}
+                          className={`${backdrop.id} ${recordingBackdrop === backdrop.id ? "active" : ""}`}
+                          aria-pressed={recordingBackdrop === backdrop.id}
+                          title={`${backdrop.name}：${backdrop.detail}`}
+                          onClick={() => selectRecordingBackdrop(backdrop.id)}
+                        ><i /><b>{backdrop.name}</b></button>
+                      ))}
+                    </div>
+                  </div>
+                  <p><CheckCircle size={15} weight="fill" /> 录音、转写和声纹均在本地处理</p>
+                </aside>
               </section>
             ) : (
               <>
