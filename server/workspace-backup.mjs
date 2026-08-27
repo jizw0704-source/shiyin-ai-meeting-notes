@@ -56,7 +56,7 @@ export async function createWorkspaceBackup({ storage, dataRoot, destinationRoot
       "utf8",
     );
     files.push(await fileRecord(temporaryPath, speakerProfilesPath));
-    for (const meeting of storage.listMeetings()) {
+    for (const meeting of storage.listMeetings({ includeDeleted: true })) {
       const meetingDirectory = path.join(temporaryPath, "meetings", meeting.id);
       await mkdir(meetingDirectory, { recursive: true });
       const snapshotPath = path.join(meetingDirectory, "meeting.json");

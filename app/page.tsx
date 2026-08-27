@@ -253,6 +253,7 @@ type MeetingBrief = {
   summaryStale: boolean;
   maxSpeakers: SpeakerLimit;
   speakerLimitMode: SpeakerLimitMode;
+  deletedAt: string | null;
 };
 type Meeting = MeetingBrief & {
   speakers: Speaker[];
@@ -571,6 +572,9 @@ export default function Home() {
   const [recordingBackdrop, setRecordingBackdrop] = useState<RecordingBackdrop>("paper");
   const [pendingAttachments, setPendingAttachments] = useState<File[]>([]);
   const [attachmentUploading, setAttachmentUploading] = useState(false);
+  const [trashDialogOpen, setTrashDialogOpen] = useState(false);
+  const [deletedMeetings, setDeletedMeetings] = useState<MeetingBrief[]>([]);
+  const [trashLoading, setTrashLoading] = useState(false);
   const workspaceRef = useRef<HTMLElement | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
@@ -1780,15 +1784,59 @@ export default function Home() {
 
   async function deleteMeeting() {
     if (!meeting || meeting.status === "recording") return;
-    if (!window.confirm(`删除“${meeting.title}”及其本地录音？此操作无法撤销。`)) return;
+    if (!window.confirm(`将“${meeting.title}”移入最近删除？之后可以恢复。`)) return;
     try {
       await api(`/api/meetings/${meeting.id}`, { method: "DELETE" });
       setMeeting(null);
       setSelectedId(null);
       await refreshMeetings();
-      setNotice("会议及本地录音已删除");
+      setNotice("会议已移入最近删除，录音和资料仍保存在本机");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "删除失败");
+    }
+  }
+
+  async function openTrashDialog() {
+    setTrashDialogOpen(true);
+    setTrashLoading(true);
+    try {
+      const result = await api<{ meetings: MeetingBrief[] }>("/api/meetings/trash");
+      setDeletedMeetings(result.meetings);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法读取最近删除");
+    } finally {
+      setTrashLoading(false);
+    }
+  }
+
+  async function restoreDeletedMeeting(item: MeetingBrief) {
+    setTrashLoading(true);
+    try {
+      const restored = await api<Meeting>(`/api/meetings/${item.id}/restore`, { method: "POST" });
+      setDeletedMeetings((items) => items.filter((meetingItem) => meetingItem.id !== item.id));
+      await refreshMeetings(restored.id);
+      setMeeting(restored);
+      setSelectedId(restored.id);
+      setTrashDialogOpen(false);
+      setNotice(`已恢复“${restored.title}”及其录音、资料和总结`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法恢复会议");
+    } finally {
+      setTrashLoading(false);
+    }
+  }
+
+  async function permanentlyDeleteMeeting(item: MeetingBrief) {
+    if (!window.confirm(`永久删除“${item.title}”及其录音和资料？此操作无法撤销。`)) return;
+    setTrashLoading(true);
+    try {
+      await api(`/api/meetings/${item.id}/permanent`, { method: "DELETE" });
+      setDeletedMeetings((items) => items.filter((meetingItem) => meetingItem.id !== item.id));
+      setNotice("会议已永久删除，无法恢复");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法永久删除会议");
+    } finally {
+      setTrashLoading(false);
     }
   }
 
@@ -2409,7 +2457,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
         )}
         <div className="nav-label history-heading">
           <span>历史会议</span>
-          <b>{meetings.length}</b>
+          <span><b>{meetings.length}</b><button type="button" onClick={() => void openTrashDialog()}><Trash size={12} /> 最近删除</button></span>
         </div>
         <div className="history-search">
           <MagnifyingGlass size={13} />
@@ -3847,6 +3895,27 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
               </div>
             </footer>
           </form>
+        </div>
+      )}
+      {trashDialogOpen && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target && !trashLoading) setTrashDialogOpen(false); }}>
+          <section className="trash-dialog" role="dialog" aria-modal="true" aria-labelledby="trash-dialog-title">
+            <header>
+              <div><span><Trash size={20} weight="duotone" /></span><div><h2 id="trash-dialog-title">最近删除</h2><p>录音、逐字稿、资料和总结会一直保留，直到你永久删除。</p></div></div>
+              <button type="button" onClick={() => setTrashDialogOpen(false)} disabled={trashLoading} aria-label="关闭最近删除"><X size={17} /></button>
+            </header>
+            <div className="trash-meeting-list">
+              {deletedMeetings.map((item) => (
+                <article key={item.id}>
+                  <span><b>{item.title}</b><small>{item.deletedAt ? `删除于 ${formatMeetingDate(item.deletedAt)}` : "已删除"} · {formatClock(item.durationMs)}</small></span>
+                  <div><button type="button" disabled={trashLoading} onClick={() => void restoreDeletedMeeting(item)}><ArrowClockwise size={13} /> 恢复</button><button type="button" className="danger" disabled={trashLoading} onClick={() => void permanentlyDeleteMeeting(item)}>永久删除</button></div>
+                </article>
+              ))}
+              {!trashLoading && !deletedMeetings.length && <div className="trash-empty"><CheckCircle size={24} weight="duotone" /><b>最近没有删除的会议</b><small>从历史列表删除的会议会出现在这里。</small></div>}
+              {trashLoading && !deletedMeetings.length && <div className="trash-empty"><b>正在读取…</b></div>}
+            </div>
+            <footer><span>最近删除中的会议仍会占用本机存储空间。</span><button type="button" onClick={() => setTrashDialogOpen(false)}>完成</button></footer>
+          </section>
         </div>
       )}
       {notice && <button className="toast" onClick={() => setNotice("")}>{notice}<i>×</i></button>}

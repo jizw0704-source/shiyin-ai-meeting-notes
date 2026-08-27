@@ -375,6 +375,9 @@ const httpServer = createServer(async (request, response) => {
     if (request.method === "GET" && url.pathname === "/api/meetings") {
       return jsonResponse(response, 200, { meetings: storage.listMeetings() });
     }
+    if (request.method === "GET" && url.pathname === "/api/meetings/trash") {
+      return jsonResponse(response, 200, { meetings: storage.listDeletedMeetings() });
+    }
     if (request.method === "GET" && url.pathname === "/api/storage") {
       return jsonResponse(response, 200, getStorageStats({ storage, dataRoot }));
     }
@@ -494,6 +497,19 @@ const httpServer = createServer(async (request, response) => {
       if (activeSessions.has(meetingId) || meetingIsBusy(currentMeeting)) {
         return jsonResponse(response, 409, { error: "正在录音或处理的会议不能删除" });
       }
+      const meeting = storage.softDeleteMeeting(meetingId);
+      return jsonResponse(response, meeting ? 200 : 404, meeting ? { ok: true, meeting } : { error: "会议不存在" });
+    }
+    const restoreMeetingMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/restore$/);
+    if (request.method === "POST" && restoreMeetingMatch) {
+      const meeting = storage.restoreMeeting(restoreMeetingMatch[1]);
+      return jsonResponse(response, meeting ? 200 : 404, meeting || { error: "会议不存在" });
+    }
+    const permanentMeetingMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/permanent$/);
+    if (request.method === "DELETE" && permanentMeetingMatch) {
+      const meetingId = permanentMeetingMatch[1];
+      const currentMeeting = storage.getMeeting(meetingId);
+      if (!currentMeeting?.deletedAt) return jsonResponse(response, 409, { error: "请先将会议移入最近删除" });
       const directory = path.resolve(dataRoot, "meetings", meetingId);
       if (!directory.startsWith(path.resolve(dataRoot, "meetings") + path.sep)) {
         return jsonResponse(response, 400, { error: "无效会议目录" });

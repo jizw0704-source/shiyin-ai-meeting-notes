@@ -761,6 +761,9 @@ test("creates a verified workspace backup and safely merges it into another work
       extractedText: "# 会前方案\n\n预算上限为 20 万元。",
     });
     sourceStorage.createTranscriptVersion(meeting.id, { label: "备份版本", active: true });
+    const deletedMeeting = sourceStorage.createMeeting("误删除但仍需备份的会议");
+    sourceStorage.updateMeeting(deletedMeeting.id, { status: "completed", durationMs: 2400 });
+    sourceStorage.softDeleteMeeting(deletedMeeting.id);
 
     const backup = await createWorkspaceBackup({
       storage: sourceStorage,
@@ -768,7 +771,7 @@ test("creates a verified workspace backup and safely merges it into another work
       destinationRoot,
       appVersion: "test",
     });
-    assert.equal(backup.meetingCount, 1);
+    assert.equal(backup.meetingCount, 2);
     assert.equal(existsSync(path.join(backup.path, "manifest.json")), true);
     assert.equal(existsSync(path.join(backup.path, "speaker-profiles.json")), true);
 
@@ -777,7 +780,7 @@ test("creates a verified workspace backup and safely merges it into another work
       dataRoot: targetRoot,
       backupPath: backup.path,
     });
-    assert.equal(restored.importedMeetings, 1);
+    assert.equal(restored.importedMeetings, 2);
     assert.equal(restored.skippedMeetings, 0);
     const restoredMeeting = targetStorage.getMeeting(meeting.id);
     assert.equal(restoredMeeting.title, "需要备份的会议");
@@ -797,6 +800,10 @@ test("creates a verified workspace backup and safely merges it into another work
     assert.equal(targetStorage.listSpeakerProfiles()[0].displayName, "王工");
     assert.equal(existsSync(path.join(targetRoot, "meetings", meeting.id, "audio.wav")), true);
     assert.equal(existsSync(path.join(targetRoot, "meetings", meeting.id, "attachments", `${attachmentId}.md`)), true);
+    assert.equal(targetStorage.listMeetings().length, 1);
+    assert.equal(targetStorage.listDeletedMeetings().length, 1);
+    assert.equal(targetStorage.listDeletedMeetings()[0].title, "误删除但仍需备份的会议");
+    assert.ok(targetStorage.listDeletedMeetings()[0].deletedAt);
 
     const duplicate = await restoreWorkspaceBackup({
       storage: targetStorage,
@@ -804,7 +811,7 @@ test("creates a verified workspace backup and safely merges it into another work
       backupPath: backup.path,
     });
     assert.equal(duplicate.importedMeetings, 0);
-    assert.equal(duplicate.skippedMeetings, 1);
+    assert.equal(duplicate.skippedMeetings, 2);
     assert.equal(targetStorage.listSpeakerProfiles().length, 1);
     assert.equal(targetStorage.listSpeakerProfiles()[0].sampleCount, 1);
   } finally {
@@ -813,6 +820,50 @@ test("creates a verified workspace backup and safely merges it into another work
     rmSync(sourceRoot, { recursive: true, force: true });
     rmSync(targetRoot, { recursive: true, force: true });
     rmSync(destinationRoot, { recursive: true, force: true });
+  }
+});
+
+test("moves meetings to recently deleted and restores all meeting content", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-trash-"));
+  const storage = new MeetingStorage(root);
+  try {
+    const meeting = storage.createMeeting("可恢复的会议");
+    storage.addSegment(meeting.id, {
+      seq: 0,
+      startMs: 0,
+      endMs: 1200,
+      text: "这段逐字稿不能丢失。",
+      speakerId: null,
+      source: "local-realtime",
+    });
+    storage.saveSummary(meeting.id, {
+      overview: "这份总结也需要保留。",
+      decisions: [],
+      topics: [],
+      risks: [],
+      actionItems: [],
+    });
+    storage.updateMeeting(meeting.id, { status: "completed", durationMs: 1200 });
+
+    const deleted = storage.softDeleteMeeting(meeting.id);
+    assert.ok(deleted.deletedAt);
+    assert.equal(storage.listMeetings().length, 0);
+    assert.equal(storage.listDeletedMeetings().length, 1);
+    assert.equal(storage.getMeeting(meeting.id).segments[0].text, "这段逐字稿不能丢失。");
+    assert.equal(storage.getMeeting(meeting.id).summary.overview, "这份总结也需要保留。");
+
+    const restored = storage.restoreMeeting(meeting.id);
+    assert.equal(restored.deletedAt, null);
+    assert.equal(storage.listMeetings().length, 1);
+    assert.equal(storage.listDeletedMeetings().length, 0);
+    assert.equal(restored.segments[0].text, "这段逐字稿不能丢失。");
+
+    storage.softDeleteMeeting(meeting.id);
+    storage.deleteMeeting(meeting.id);
+    assert.equal(storage.getMeeting(meeting.id), null);
+  } finally {
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

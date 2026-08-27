@@ -38,6 +38,7 @@ test("server-renders the meeting transcription product", async () => {
   assert.match(html, /发言人数识别/);
   assert.match(html, /自动检测/);
   assert.match(html, /历史会议/);
+  assert.match(html, /最近删除/);
   assert.match(html, /aria-label="历史会议列表"/);
   assert.match(html, /搜索历史会议/);
   assert.match(html, /12 人/);
