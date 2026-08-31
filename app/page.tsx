@@ -17,7 +17,6 @@ import {
   FolderOpen,
   GearSix,
   HardDrives,
-  Key,
   ListChecks,
   Moon,
   MagnifyingGlass,
@@ -48,6 +47,7 @@ type TranscriptMode = "organized" | "original";
 type TranscriptOrder = "ascending" | "descending";
 type ThemeMode = "system" | "light" | "dark";
 type RecordingBackdrop = "paper" | "focus" | "wave" | "midnight";
+type SettingsSection = "general" | "meeting" | "ai" | "notebook" | "data" | "updates";
 type AudioCaptureCapabilities = {
   platform: string;
   macOSVersion: string;
@@ -585,7 +585,8 @@ export default function Home() {
   const [speakerLimitMode, setSpeakerLimitMode] = useState<SpeakerLimitMode>("auto");
   const [templateDraft, setTemplateDraft] = useState<SummaryTemplateId>(DEFAULT_SUMMARY_TEMPLATE);
   const [reportStyleDraft, setReportStyleDraft] = useState<ReportStyle>(DEFAULT_REPORT_STYLE);
-  const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
+  const [settingsPageOpen, setSettingsPageOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("general");
   const [miniMaxSettings, setMiniMaxSettings] = useState<MiniMaxSettings | null>(null);
   const [miniMaxKeyDraft, setMiniMaxKeyDraft] = useState("");
   const [miniMaxModelDraft, setMiniMaxModelDraft] = useState("MiniMax-M3");
@@ -605,6 +606,8 @@ export default function Home() {
   const [showBackToTop, setShowBackToTop] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>("system");
   const [recordingBackdrop, setRecordingBackdrop] = useState<RecordingBackdrop>("paper");
+  const [autoSummaryEnabled, setAutoSummaryEnabled] = useState(true);
+  const [autoTitleEnabled, setAutoTitleEnabled] = useState(true);
   const [pendingAttachments, setPendingAttachments] = useState<File[]>([]);
   const [attachmentUploading, setAttachmentUploading] = useState(false);
   const [audioImportStarting, setAudioImportStarting] = useState(false);
@@ -688,6 +691,8 @@ export default function Home() {
       const savedTranscriptOrder = window.localStorage.getItem("shiyin.transcriptOrder");
       const savedTheme = window.localStorage.getItem("shiyin.themeMode") as ThemeMode | null;
       const savedBackdrop = window.localStorage.getItem("shiyin.recordingBackdrop") as RecordingBackdrop | null;
+      const savedAutoSummary = window.localStorage.getItem("shiyin.autoSummary");
+      const savedAutoTitle = window.localStorage.getItem("shiyin.autoTitle");
       if (summaryTemplates.some((template) => template.id === savedTemplate)) {
         setDefaultSummaryTemplate(savedTemplate!);
       }
@@ -700,6 +705,8 @@ export default function Home() {
       if (savedTranscriptOrder === "descending") setTranscriptOrder("descending");
       if (["system", "light", "dark"].includes(savedTheme || "")) setThemeMode(savedTheme!);
       if (recordingBackdrops.some((item) => item.id === savedBackdrop)) setRecordingBackdrop(savedBackdrop!);
+      setAutoSummaryEnabled(savedAutoSummary !== "false");
+      setAutoTitleEnabled(savedAutoTitle !== "false");
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
@@ -776,10 +783,11 @@ export default function Home() {
     return () => document.removeEventListener("keydown", closeOnEscape);
   }, [templateDialogOpen]);
 
-  const openSettingsDialog = useCallback(async () => {
+  const openSettingsDialog = useCallback(async (section: SettingsSection = "general") => {
     const desktop = window.shiyinDesktop;
     if (!desktop) {
-      setNotice("MiniMax 密钥由桌面版管理");
+      setSettingsSection(section);
+      setSettingsPageOpen(true);
       return;
     }
     try {
@@ -792,9 +800,11 @@ export default function Home() {
       setMiniMaxModelDraft(settings.model);
       setMiniMaxKeyDraft("");
       setSettingsError("");
-      setSettingsDialogOpen(true);
+      setSettingsSection(section);
+      setSettingsPageOpen(true);
+      api<StorageInfo>("/api/storage").then(setStorageInfo).catch(() => undefined);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "无法读取 MiniMax 配置");
+      setNotice(error instanceof Error ? error.message : "无法读取应用设置");
     }
   }, []);
 
@@ -851,7 +861,6 @@ export default function Home() {
       });
       setMiniMaxSettings(settings);
       setMiniMaxKeyDraft("");
-      setSettingsDialogOpen(false);
       setNotice("配置已安全保存，现在可以直接生成 AI 总结");
     } catch (error) {
       setSettingsError(error instanceof Error ? error.message : "保存失败，请重试");
@@ -997,20 +1006,24 @@ export default function Home() {
         setView(value.summary || value.liveSummary ? "summary" : "transcript");
         setNotice(value.status === "failed"
           ? (value.error || "录音解析失败，请检查文件后重试")
-          : miniMaxSettings?.configured
+          : miniMaxSettings?.configured && autoSummaryEnabled
             ? "录音已完成本地转写、发言人识别与 AI 总结"
-            : "录音已完成本地转写；配置 MiniMax 后可生成 AI 总结");
+            : autoSummaryEnabled
+              ? "录音已完成本地转写；配置 MiniMax 后可生成 AI 总结"
+              : "录音已完成本地转写；本次已按设置跳过 AI 总结");
         break;
       }
     }
-  }, [loadMeeting, miniMaxSettings?.configured]);
+  }, [autoSummaryEnabled, loadMeeting, miniMaxSettings?.configured]);
 
   const audioImportOptions = useCallback(() => ({
     summaryTemplate: defaultSummaryTemplate,
     reportStyle: defaultReportStyle,
     maxSpeakers: speakerLimit,
     speakerLimitMode,
-  }), [defaultReportStyle, defaultSummaryTemplate, speakerLimit, speakerLimitMode]);
+    autoSummary: autoSummaryEnabled,
+    autoTitle: autoTitleEnabled,
+  }), [autoSummaryEnabled, autoTitleEnabled, defaultReportStyle, defaultSummaryTemplate, speakerLimit, speakerLimitMode]);
 
   const importMeetingAudio = useCallback(async (droppedFile?: File) => {
     const desktop = window.shiyinDesktop;
@@ -1085,15 +1098,15 @@ export default function Home() {
     setRecording(false);
     window.shiyinDesktop?.setRecording(false);
     setProcessing(true);
-    if (miniMaxSettings?.configured) setView("summary");
-    setConnectionStatus(miniMaxSettings?.configured
+    if (miniMaxSettings?.configured && autoSummaryEnabled) setView("summary");
+    setConnectionStatus(miniMaxSettings?.configured && autoSummaryEnabled
       ? "录音已保存，正在生成 AI 总结…"
       : "录音已保存，正在完成会议…");
     await stopAudioCapture();
     if (socketRef.current?.readyState === WebSocket.OPEN) {
       socketRef.current.send(JSON.stringify({ type: "session.stop" }));
     }
-  }, [miniMaxSettings?.configured, stopAudioCapture]);
+  }, [autoSummaryEnabled, miniMaxSettings?.configured, stopAudioCapture]);
 
   useEffect(() => {
     const unsubscribe = window.shiyinDesktop?.onCommand((command) => commandHandlerRef.current(command));
@@ -1227,6 +1240,20 @@ export default function Home() {
     setRecordingBackdrop(backdrop);
     window.localStorage.setItem("shiyin.recordingBackdrop", backdrop);
     setNotice(`录音界面已切换为“${recordingBackdrops.find((item) => item.id === backdrop)?.name}”背景`);
+  }
+
+  function selectAutoSummary(enabled: boolean) {
+    setAutoSummaryEnabled(enabled);
+    window.localStorage.setItem("shiyin.autoSummary", String(enabled));
+    if (!enabled) {
+      setAutoTitleEnabled(false);
+      window.localStorage.setItem("shiyin.autoTitle", "false");
+    }
+  }
+
+  function selectAutoTitle(enabled: boolean) {
+    setAutoTitleEnabled(enabled);
+    window.localStorage.setItem("shiyin.autoTitle", String(enabled));
   }
 
   async function uploadAttachments(meetingId: string, files: File[]) {
@@ -1484,6 +1511,8 @@ export default function Home() {
       socketUrl.searchParams.set("reportStyle", defaultReportStyle);
       socketUrl.searchParams.set("maxSpeakers", String(speakerLimit));
       socketUrl.searchParams.set("speakerLimitMode", speakerLimitMode);
+      socketUrl.searchParams.set("autoSummary", String(autoSummaryEnabled));
+      socketUrl.searchParams.set("autoTitle", String(autoTitleEnabled));
       if (speakerLimitMode === "auto") socketUrl.searchParams.set("maxSpeakers", "20");
       const socket = new WebSocket(socketUrl.toString());
       socket.binaryType = "arraybuffer";
@@ -1592,7 +1621,9 @@ export default function Home() {
             setProcessing(false);
             setConnectionStatus("处理完成");
             setNotice(message.summarySkipped
-              ? "会议和逐字稿已保存；配置 MiniMax 密钥后可生成 AI 总结"
+              ? message.summaryDisabled
+                ? "会议和逐字稿已保存；本次按设置跳过了 AI 总结"
+                : "会议和逐字稿已保存；配置 MiniMax 密钥后可生成 AI 总结"
               : value.error || "会议已保存，AI 总结已完成；如有需要可手动校正发言人");
             if (obsidianAutoSave && notebookSettings?.obsidianConfigured) {
               void saveMeetingToObsidian(value, { automatic: true });
@@ -1885,7 +1916,7 @@ export default function Home() {
     if (!meeting || meetingIsBusy(meeting.status)) return;
     if (!miniMaxSettings?.configured) {
       setNotice("请先配置 MiniMax，再重新生成 AI 总结");
-      await openSettingsDialog();
+      await openSettingsDialog("ai");
       return;
     }
     await regenerateSummary(meeting.id);
@@ -1893,7 +1924,10 @@ export default function Home() {
 
   async function regenerateSummary(meetingId: string) {
     try {
-      await api(`/api/meetings/${meetingId}/summarize`, { method: "POST" });
+      await api(`/api/meetings/${meetingId}/summarize`, {
+        method: "POST",
+        body: JSON.stringify({ autoTitle: autoTitleEnabled }),
+      });
       setProcessing(true);
       setConnectionStatus("正在重新生成 MiniMax 总结…");
       setMeeting((current) => current?.id === meetingId ? { ...current, status: "summarizing", error: null } : current);
@@ -2334,7 +2368,8 @@ export default function Home() {
 
   function toggleObsidianAutoSave() {
     if (!notebookSettings?.obsidianConfigured) {
-      setSettingsDialogOpen(true);
+      setSettingsSection("notebook");
+      setSettingsPageOpen(true);
       setNotice("请先连接 Obsidian AI 笔记本");
       return;
     }
@@ -2489,10 +2524,13 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
       />
       <aside className="sidebar">
         <div className="brand"><span className="brand-mark">听</span><span>拾音</span><em>AI</em></div>
-        <button className="new-note" disabled={processing} onClick={toggleRecording}>
+        <button className="new-note" disabled={processing} onClick={() => {
+          if (!recording) setSettingsPageOpen(false);
+          void toggleRecording();
+        }}>
           <span>{recording ? "■" : "●"}</span>{recording ? "结束听记" : "开始新听记"}
         </button>
-        <button type="button" className="local-storage-note" onClick={() => void openStorageDialog()}>
+        <button type="button" className="local-storage-note" onClick={() => void openSettingsDialog("data")}>
           <HardDrives size={17} weight="duotone" />
           <span><b>本机存储</b><small>管理录音与空间</small></span>
           <ArrowRight size={13} />
@@ -2701,7 +2739,10 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             <div className={`history-meeting-row ${selectedId === item.id ? "active" : ""}`} key={item.id}>
               <button
                 className={`meeting ${selectedId === item.id ? "active" : ""}`}
-                onClick={() => setSelectedId(item.id)}
+                onClick={() => {
+                  setSettingsPageOpen(false);
+                  setSelectedId(item.id);
+                }}
                 aria-label={`查看会议：${item.title}`}
               >
                 <span className="meeting-icon">▥</span>
@@ -2745,15 +2786,127 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
               </span>
             </button>
           )}
-          <button className={`settings-button ${miniMaxSettings?.configured ? "" : "needs-attention"}`} disabled={recording || processing} onClick={() => void openSettingsDialog()}>
+          <button className={`settings-button ${settingsPageOpen ? "active" : ""} ${miniMaxSettings?.configured ? "" : "needs-attention"}`} disabled={recording || processing} onClick={() => void openSettingsDialog("general")}>
             <GearSix size={17} weight="duotone" />
-            <span><b>MiniMax 设置</b><small>{miniMaxSettings?.configured ? "密钥已配置" : "配置密钥与模型"}</small></span>
+            <span><b>设置</b><small>{miniMaxSettings?.configured ? "偏好、AI 与数据" : "需要配置 MiniMax"}</small></span>
           </button>
           <div className="profile"><span>本</span><p><b>本机工作区</b><small>{speakerLimitMode === "auto" ? "新会议自动检测发言人" : `新会议最多 ${speakerLimit} 人`}</small></p></div>
         </div>
       </aside>
 
-      <section className="workspace" ref={workspaceRef}>
+      <section className={`workspace ${settingsPageOpen ? "settings-workspace" : ""}`} ref={workspaceRef}>
+        {settingsPageOpen ? (
+          <div className="settings-page">
+            <header className="settings-page-hero">
+              <div>
+                <span><GearSix size={16} weight="duotone" /> 个性化你的拾音工作流</span>
+                <h1>设置</h1>
+                <p>这里保存的是新会议的默认习惯；开始会议前仍可在左侧临时调整。</p>
+              </div>
+              <button type="button" onClick={() => setSettingsPageOpen(false)}><X size={17} /> 返回会议</button>
+            </header>
+            <div className="settings-page-layout">
+              <nav className="settings-page-nav" aria-label="设置分类">
+                <button className={settingsSection === "general" ? "active" : ""} onClick={() => setSettingsSection("general")}><Palette size={17} /><span><b>常规</b><small>外观与阅读习惯</small></span></button>
+                <button className={settingsSection === "meeting" ? "active" : ""} onClick={() => setSettingsSection("meeting")}><Waveform size={17} /><span><b>会议与转写</b><small>录音和发言人默认值</small></span></button>
+                <button className={settingsSection === "ai" ? "active" : ""} onClick={() => setSettingsSection("ai")}><Brain size={17} /><span><b>AI 与纪要</b><small>MiniMax 和整理方式</small></span></button>
+                <button className={settingsSection === "notebook" ? "active" : ""} onClick={() => setSettingsSection("notebook")}><FileText size={17} /><span><b>笔记与导出</b><small>Obsidian 与 Markdown</small></span></button>
+                <button className={settingsSection === "data" ? "active" : ""} onClick={() => setSettingsSection("data")}><HardDrives size={17} /><span><b>数据与隐私</b><small>本地文件和备份</small></span></button>
+                <button className={settingsSection === "updates" ? "active" : ""} onClick={() => setSettingsSection("updates")}><ArrowClockwise size={17} /><span><b>更新与快捷键</b><small>版本和桌面操作</small></span></button>
+              </nav>
+
+              <div className="settings-page-content">
+                {settingsSection === "general" && (
+                  <section className="settings-panel" aria-labelledby="settings-general-title">
+                    <header><span><Palette size={20} weight="duotone" /></span><div><h2 id="settings-general-title">常规</h2><p>调整界面外观和会议记录的阅读方式。</p></div></header>
+                    <div className="settings-row">
+                      <div><b>界面颜色</b><small>可固定主题，也可以跟随电脑系统。</small></div>
+                      <div className="settings-segmented" role="radiogroup" aria-label="界面颜色模式">
+                        <button className={themeMode === "system" ? "active" : ""} onClick={() => selectTheme("system")}><Desktop size={14} /> 系统</button>
+                        <button className={themeMode === "light" ? "active" : ""} onClick={() => selectTheme("light")}><Sun size={14} /> 浅色</button>
+                        <button className={themeMode === "dark" ? "active" : ""} onClick={() => selectTheme("dark")}><Moon size={14} /> 深色</button>
+                      </div>
+                    </div>
+                    <div className="settings-row">
+                      <div><b>逐字稿排列</b><small>设置打开会议记录时的默认顺序。</small></div>
+                      <div className="settings-segmented">
+                        <button className={transcriptOrder === "ascending" ? "active" : ""} onClick={() => { setTranscriptOrder("ascending"); window.localStorage.setItem("shiyin.transcriptOrder", "ascending"); }}>正序</button>
+                        <button className={transcriptOrder === "descending" ? "active" : ""} onClick={() => { setTranscriptOrder("descending"); window.localStorage.setItem("shiyin.transcriptOrder", "descending"); }}>倒序</button>
+                      </div>
+                    </div>
+                    <div className="settings-block">
+                      <div><b>默认录音背景</b><small>只改变录音页面的视觉氛围，不影响录音质量。</small></div>
+                      <div className="settings-backdrop-grid">
+                        {recordingBackdrops.map((backdrop) => <button key={backdrop.id} className={`${backdrop.id} ${recordingBackdrop === backdrop.id ? "active" : ""}`} onClick={() => selectRecordingBackdrop(backdrop.id)}><i /><span><b>{backdrop.name}</b><small>{backdrop.detail}</small></span>{recordingBackdrop === backdrop.id && <CheckCircle size={16} weight="fill" />}</button>)}
+                      </div>
+                    </div>
+                  </section>
+                )}
+
+                {settingsSection === "meeting" && (
+                  <section className="settings-panel" aria-labelledby="settings-meeting-title">
+                    <header><span><Waveform size={20} weight="duotone" /></span><div><h2 id="settings-meeting-title">会议与转写</h2><p>这些选项会作为下一场会议的默认值。</p></div></header>
+                    <label className="settings-select-row"><span><b>默认录音来源</b><small>开始前仍可在侧边栏切换。</small></span><select value={audioSourceMode} disabled={recording} onChange={(event) => selectAudioSource(event.target.value as AudioSourceMode)}><option value="microphone">仅麦克风</option><option value="system" disabled={!systemAudioAvailable}>仅电脑声音</option><option value="mixed" disabled={!systemAudioAvailable}>电脑声音 + 麦克风</option></select></label>
+                    <label className="settings-select-row"><span><b>默认麦克风</b><small>{audioSourceMode === "system" ? "仅电脑声音时不会启用麦克风。" : "使用系统当前可用的录音设备。"}</small></span><select value={selectedDeviceId} disabled={recording || audioSourceMode === "system"} onChange={(event) => { const deviceId = event.target.value; setSelectedDeviceId(deviceId); setActiveDeviceLabel(audioInputs.find((item) => item.deviceId === deviceId)?.label || "自动选择麦克风"); window.localStorage.setItem("shiyin.microphoneId", deviceId); }}>{audioInputs.map((input, index) => <option key={input.deviceId} value={input.deviceId}>{input.label || `麦克风 ${index + 1}`}</option>)}</select></label>
+                    <div className="settings-block">
+                      <div><b>发言人数识别</b><small>推荐自动检测；手动上限适合人数明确的固定会议。</small></div>
+                      <div className="settings-choice-grid speaker-choices">
+                        <button className={speakerLimitMode === "auto" ? "active" : ""} onClick={() => { setSpeakerLimitMode("auto"); window.localStorage.setItem("shiyin.speakerLimitMode", "auto"); }}><b>自动</b><small>从 6 人逐步扩展</small></button>
+                        {speakerLimitOptions.map((option) => <button key={option.value} className={speakerLimitMode === "manual" && speakerLimit === option.value ? "active" : ""} onClick={() => { setSpeakerLimitMode("manual"); setSpeakerLimit(option.value); window.localStorage.setItem("shiyin.speakerLimitMode", "manual"); window.localStorage.setItem("shiyin.maxSpeakers", String(option.value)); }}><b>{option.label}</b><small>{option.detail}</small></button>)}
+                      </div>
+                    </div>
+                    <div className="settings-info-note"><CheckCircle size={17} weight="fill" /><p><b>本地智能处理</b><span>标点恢复、实时声纹匹配和会后多人发言检查保持启用，原始识别文本不会被覆盖。</span></p></div>
+                  </section>
+                )}
+
+                {settingsSection === "ai" && (
+                  <section className="settings-panel" aria-labelledby="settings-ai-title">
+                    <header><span><Brain size={20} weight="duotone" /></span><div><h2 id="settings-ai-title">AI 与纪要</h2><p>控制会议结束后的 MiniMax 整理流程。</p></div></header>
+                    <div className="settings-switch-row"><div><b>会议结束后自动总结</b><small>关闭后只保存录音、逐字稿和发言人，可稍后手动总结。</small></div><button role="switch" aria-checked={autoSummaryEnabled} className={`settings-switch ${autoSummaryEnabled ? "on" : ""}`} onClick={() => selectAutoSummary(!autoSummaryEnabled)}><i /></button></div>
+                    <div className="settings-switch-row"><div><b>总结后自动命名会议</b><small>根据纪要生成简短名称；手动改过的名称不会被覆盖。</small></div><button role="switch" aria-checked={autoTitleEnabled} disabled={!autoSummaryEnabled} className={`settings-switch ${autoTitleEnabled ? "on" : ""}`} onClick={() => selectAutoTitle(!autoTitleEnabled)}><i /></button></div>
+                    <div className="settings-block"><div><b>默认纪要方式</b><small>内容模板决定关注重点，报告样式只改变展示。</small></div><div className="settings-template-summary"><span><Sparkle size={17} weight="duotone" /><b>{summaryTemplateName(defaultSummaryTemplate)}</b><small>{defaultReportStyle === "visual" ? "图文纪要" : "深度纪要"}</small></span><button onClick={openTemplateDialog}>选择模板</button></div></div>
+                    <form className="settings-credentials" onSubmit={(event) => { event.preventDefault(); void saveSettings(); }}>
+                      <div className="settings-section-title"><div><b>MiniMax 连接</b><small>密钥使用当前系统安全加密，只保存在这台电脑。</small></div><em className={miniMaxSettings?.configured ? "ready" : ""}>{miniMaxSettings?.configured ? "已配置" : "未配置"}</em></div>
+                      <label><span>API Key</span><input type="password" autoComplete="off" value={miniMaxKeyDraft} disabled={!miniMaxSettings?.managedByApp || settingsSaving} onChange={(event) => setMiniMaxKeyDraft(event.target.value)} placeholder={miniMaxSettings?.configured ? "留空可保留当前密钥" : "请输入 MiniMax API Key"} /></label>
+                      <label><span>模型</span><input value={miniMaxModelDraft} disabled={!miniMaxSettings?.managedByApp || settingsSaving} onChange={(event) => setMiniMaxModelDraft(event.target.value)} placeholder="MiniMax-M3" /></label>
+                      {settingsError && <p className="settings-error"><WarningCircle size={14} />{settingsError}</p>}
+                      <button className="settings-primary" type="submit" disabled={!miniMaxSettings?.managedByApp || settingsSaving}>{settingsSaving ? "正在保存…" : "保存 AI 配置"}</button>
+                    </form>
+                  </section>
+                )}
+
+                {settingsSection === "notebook" && (
+                  <section className="settings-panel" aria-labelledby="settings-notebook-title">
+                    <header><span><FileText size={20} weight="duotone" /></span><div><h2 id="settings-notebook-title">笔记与导出</h2><p>把会议纪要接入你习惯使用的知识库。</p></div></header>
+                    <div className="settings-connect-card"><div><span><FileText size={22} weight="duotone" /></span><p><b>Obsidian AI 笔记本</b><small>{notebookSettings?.obsidianConfigured ? `已连接：${notebookSettings.obsidianVaultName || "当前 Vault"}` : "可选功能，未连接时不会自动同步或弹出错误。"}</small></p></div><button onClick={() => void connectNotebook()} disabled={notebookConnecting}>{notebookConnecting ? "正在选择…" : notebookSettings?.obsidianConfigured ? "更换 Vault" : "连接 Obsidian"}</button></div>
+                    <div className="settings-switch-row"><div><b>会议结束后自动同步</b><small>只有连接 Obsidian 后才会生效，仍可从导出菜单手动同步。</small></div><button role="switch" aria-checked={obsidianAutoSave} disabled={!notebookSettings?.obsidianConfigured} className={`settings-switch ${obsidianAutoSave ? "on" : ""}`} onClick={toggleObsidianAutoSave}><i /></button></div>
+                    <div className="settings-info-note neutral"><FileText size={17} weight="duotone" /><p><b>Markdown 是默认推荐格式</b><span>完整保留标题、摘要、行动项和逐字稿，适合直接交给其他 AI Agent 分析。</span></p></div>
+                  </section>
+                )}
+
+                {settingsSection === "data" && (
+                  <section className="settings-panel" aria-labelledby="settings-data-title">
+                    <header><span><HardDrives size={20} weight="duotone" /></span><div><h2 id="settings-data-title">数据与隐私</h2><p>会议录音、逐字稿和声纹资料默认保存在本机。</p></div></header>
+                    <div className="settings-storage-overview"><span><small>本机工作区</small><strong>{storageInfo ? formatBytes(storageInfo.totalBytes) : "正在读取…"}</strong><em>{storageInfo ? `${storageInfo.meetingCount} 场会议` : ""}</em></span><button onClick={() => void openStorageDialog()}>查看空间明细</button></div>
+                    <div className="settings-action-grid"><button onClick={() => void openDataFolder()}><FolderOpen size={18} /><span><b>打开数据文件夹</b><small>查看本机保存位置</small></span></button><button onClick={() => void createBackup()} disabled={Boolean(backupBusy)}><HardDrives size={18} /><span><b>创建完整备份</b><small>录音、纪要和声纹一起保存</small></span></button><button onClick={() => void restoreBackup()} disabled={Boolean(backupBusy)}><ArrowClockwise size={18} /><span><b>恢复备份</b><small>安全合并，不覆盖已有会议</small></span></button><button onClick={() => void openTrashDialog()}><Trash size={18} /><span><b>最近删除</b><small>恢复误删除的会议</small></span></button></div>
+                    {storageError && <p className="settings-error"><WarningCircle size={14} />{storageError}</p>}
+                    <div className="settings-info-note"><CheckCircle size={17} weight="fill" /><p><b>隐私边界</b><span>本地转写、录音和声纹不会上传；只有生成 AI 纪要时，整理后的会议文字和可读取资料会发送给 MiniMax。</span></p></div>
+                  </section>
+                )}
+
+                {settingsSection === "updates" && (
+                  <section className="settings-panel" aria-labelledby="settings-updates-title">
+                    <header><span><ArrowClockwise size={20} weight="duotone" /></span><div><h2 id="settings-updates-title">更新与快捷键</h2><p>检查新版本并确认桌面全局快捷键是否可用。</p></div></header>
+                    <div className="settings-update-card"><div><span><ArrowClockwise size={20} weight="duotone" /></span><p><b>拾音 AI {applicationUpdate?.currentVersion ? `v${applicationUpdate.currentVersion}` : ""}</b><small>{applicationUpdate?.message || "安装版会自动检查正式更新。"}</small></p></div>{applicationUpdate?.supported && <button disabled={!applicationUpdate.canCheck && !applicationUpdate.canDownload && !applicationUpdate.canInstall} onClick={() => void handleApplicationUpdate()}>{applicationUpdate.canInstall ? "重启并安装" : applicationUpdate.canDownload ? "下载更新" : "检查更新"}</button>}</div>
+                    <div className="settings-shortcut-grid"><article><kbd>{globalShortcutStatus?.openLabel || "⌃⌥M"}</kbd><span><b>打开应用</b><small>{globalShortcutStatus?.openWindow === false ? "快捷键被其他应用占用" : "全局可用"}</small></span></article><article><kbd>{globalShortcutStatus?.recordingLabel || "⌃⌥R"}</kbd><span><b>开始 / 结束会议</b><small>{globalShortcutStatus?.toggleRecording === false ? "快捷键被其他应用占用" : "全局可用"}</small></span></article></div>
+                    <div className="settings-info-note neutral"><CheckCircle size={17} weight="duotone" /><p><b>更新不会删除会议记录</b><span>应用程序和会议数据分开保存，覆盖安装或自动更新都会保留本机历史会议。</span></p></div>
+                  </section>
+                )}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <>
         <header className="topbar">
           <div>
             <div className="eyebrow">
@@ -2787,7 +2940,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                     disabled={obsidianSaving}
                     onClick={() => notebookSettings?.obsidianConfigured
                       ? void saveMeetingToObsidian()
-                      : void openSettingsDialog()}
+                      : void openSettingsDialog("notebook")}
                   ><b>{obsidianSaving ? "正在同步…" : notebookSettings?.obsidianConfigured ? "同步到 AI 笔记本" : "连接 AI 笔记本"}</b><span>{notebookSettings?.obsidianConfigured ? `Obsidian · ${notebookSettings.obsidianVaultName || "已连接"}` : "可选连接自己的 Obsidian 知识库"}</span></button>
                   <button onClick={toggleObsidianAutoSave}><b>结束后自动同步</b><span>{obsidianAutoSave ? "已开启 · 后续会议自动保存" : "默认关闭 · 用户可自行开启"}</span></button>
                   <button onClick={exportHtmlReport}><b>网页报告</b><span>适合浏览与打印</span></button>
@@ -3590,7 +3743,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                           : "结束听记后，会直接用 MiniMax 生成完整会议报告；发言人校正可按需手动运行。"}
                     </p>
                     {!miniMaxSettings?.configured && meeting?.status !== "recording" && (
-                      <button className="empty-summary-configure" onClick={() => void openSettingsDialog()}>
+                      <button className="empty-summary-configure" onClick={() => void openSettingsDialog("ai")}>
                         配置 MiniMax 并生成总结
                       </button>
                     )}
@@ -3665,6 +3818,8 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             </button>
           </aside>}
         </div>
+          </>
+        )}
       </section>
       {showBackToTop && (
         <button
@@ -3885,95 +4040,6 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
               )}
             </div>
           </section>
-        </div>
-      )}
-      {settingsDialogOpen && (
-        <div
-          className="dialog-backdrop"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.currentTarget === event.target && !settingsSaving) setSettingsDialogOpen(false);
-          }}
-        >
-          <form
-            className="settings-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="settings-dialog-title"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void saveSettings();
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "Escape" && !settingsSaving) setSettingsDialogOpen(false);
-            }}
-          >
-            <div className="settings-dialog-heading">
-              <span><Key size={21} weight="duotone" /></span>
-              <div>
-                <h2 id="settings-dialog-title">MiniMax 设置</h2>
-                <p>密钥只保存在当前电脑，不会写进安装包。</p>
-              </div>
-              <button type="button" onClick={() => setSettingsDialogOpen(false)} disabled={settingsSaving} aria-label="关闭设置">
-                <X size={17} />
-              </button>
-            </div>
-            <label htmlFor="minimax-api-key">MiniMax API Key</label>
-            <input
-              id="minimax-api-key"
-              type="password"
-              autoFocus
-              autoComplete="off"
-              value={miniMaxKeyDraft}
-              disabled={!miniMaxSettings?.managedByApp || settingsSaving}
-              onChange={(event) => setMiniMaxKeyDraft(event.target.value)}
-              placeholder={miniMaxSettings?.configured ? "留空可保留当前密钥" : "请输入你的 MiniMax API Key"}
-            />
-            <label htmlFor="minimax-model">模型</label>
-            <input
-              id="minimax-model"
-              value={miniMaxModelDraft}
-              disabled={!miniMaxSettings?.managedByApp || settingsSaving}
-              onChange={(event) => setMiniMaxModelDraft(event.target.value)}
-              placeholder="MiniMax-M3"
-            />
-            {settingsError && <p className="settings-error"><WarningCircle size={14} />{settingsError}</p>}
-            <div className="settings-security-note">
-              <CheckCircle size={17} weight="fill" />
-              <p>
-                <b>{miniMaxSettings?.configured ? "密钥已配置" : "等待配置密钥"}</b>
-                <span>{miniMaxSettings?.managedByApp
-                  ? "保存后由当前系统安全加密，并自动重启应用使配置生效。"
-                  : "开发版继续使用项目中的 .env.local；安装版可在这里直接配置。"}</span>
-              </p>
-            </div>
-            <div className="notebook-settings-card">
-              <div>
-                <b>AI 笔记本 <em>可选</em></b>
-                <span>{notebookSettings?.obsidianConfigured
-                  ? `已连接 Obsidian：${notebookSettings.obsidianVaultName || "当前 Vault"}`
-                  : "可连接自己的 Obsidian；未连接时不会自动同步或弹出错误。"}</span>
-              </div>
-              <button type="button" onClick={() => void connectNotebook()} disabled={notebookConnecting || settingsSaving}>
-                {notebookConnecting ? "正在选择…" : notebookSettings?.obsidianConfigured ? "更换" : "连接 Obsidian"}
-              </button>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={obsidianAutoSave}
-                  disabled={!notebookSettings?.obsidianConfigured}
-                  onChange={toggleObsidianAutoSave}
-                />
-                会议结束后自动同步
-              </label>
-            </div>
-            <div className="settings-dialog-actions">
-              <button type="button" onClick={() => setSettingsDialogOpen(false)} disabled={settingsSaving}>取消</button>
-              <button className="primary" type="submit" disabled={!miniMaxSettings?.managedByApp || settingsSaving}>
-                {settingsSaving ? "正在保存…" : "保存并立即生效"}
-              </button>
-            </div>
-          </form>
         </div>
       )}
       {templateDialogOpen && (

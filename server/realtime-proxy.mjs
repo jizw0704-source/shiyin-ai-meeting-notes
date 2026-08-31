@@ -173,7 +173,7 @@ function extractedAttachmentText(buffer, extension, mimeType) {
   return buffer.toString("utf8").replace(/\u0000/g, "").trim().slice(0, 80000) || null;
 }
 
-async function runSummary(meetingId, client = null) {
+async function runSummary(meetingId, client = null, options = {}) {
   const summaryJob = storage.createJob(meetingId, "summary");
   storage.updateMeeting(meetingId, { status: "summarizing", error: null });
   storage.updateJob(summaryJob.id, { status: "running", progress: 10 });
@@ -198,7 +198,7 @@ async function runSummary(meetingId, client = null) {
       },
     });
     storage.saveSummary(meetingId, summary);
-    storage.applyAutomaticTitle(meetingId, summary);
+    if (options.autoTitle !== false) storage.applyAutomaticTitle(meetingId, summary);
     storage.updateJob(summaryJob.id, { status: "completed", progress: 100 });
     storage.updateMeeting(meetingId, { status: "completed", error: null });
   } catch (error) {
@@ -252,15 +252,20 @@ async function runCorrectionAndSummary(meetingId, client = null) {
   return runSummaryAfterMeeting(meetingId, client);
 }
 
-async function runSummaryAfterMeeting(meetingId, client = null) {
-  if (!miniMaxApiKey) {
+async function runSummaryAfterMeeting(meetingId, client = null, options = {}) {
+  if (!miniMaxApiKey || options.autoSummary === false) {
     storage.updateMeeting(meetingId, { status: "completed", error: null });
     const meeting = storage.getMeeting(meetingId);
-    sendJson(client, { type: "session.completed", meeting, summarySkipped: true });
+    sendJson(client, {
+      type: "session.completed",
+      meeting,
+      summarySkipped: true,
+      summaryDisabled: options.autoSummary === false,
+    });
     return meeting;
   }
 
-  const meeting = await runSummary(meetingId, client);
+  const meeting = await runSummary(meetingId, client, options);
   sendJson(client, { type: "session.completed", meeting });
   return meeting;
 }
@@ -325,7 +330,7 @@ function workspaceIsBusy() {
     || storage.listMeetings().some(meetingIsBusy);
 }
 
-async function runAudioImport(meetingId, sourcePath) {
+async function runAudioImport(meetingId, sourcePath, options = {}) {
   const job = storage.createJob(meetingId, "audio-import");
   const audioPath = path.join(dataRoot, "meetings", meetingId, "audio.wav");
   activeAudioImports.add(meetingId);
@@ -382,7 +387,7 @@ async function runAudioImport(meetingId, sourcePath) {
     storage.updateMeeting(meetingId, { status: "completed", error: correctionWarning });
     activeAudioImports.delete(meetingId);
     await runOverlapEnhancement(meetingId, null, { automatic: true });
-    await runSummaryAfterMeeting(meetingId);
+    await runSummaryAfterMeeting(meetingId, null, options);
   } catch (error) {
     storage.updateJob(job.id, { status: "failed", error: error.message });
     storage.updateMeeting(meetingId, {
@@ -519,7 +524,10 @@ const httpServer = createServer(async (request, response) => {
         maxSpeakers: body.maxSpeakers,
         speakerLimitMode: body.speakerLimitMode,
       });
-      runAudioImport(meeting.id, source.sourcePath).catch(() => undefined);
+      runAudioImport(meeting.id, source.sourcePath, {
+        autoSummary: body.autoSummary !== false,
+        autoTitle: body.autoTitle !== false,
+      }).catch(() => undefined);
       return jsonResponse(response, 202, { accepted: true, meeting: storage.getMeeting(meeting.id) });
     }
     if (request.method === "POST" && url.pathname === "/api/settings/minimax") {
@@ -826,6 +834,7 @@ const httpServer = createServer(async (request, response) => {
     if (request.method === "POST" && actionMatch) {
       const meetingId = actionMatch[1];
       const currentMeeting = storage.getMeeting(meetingId);
+      const body = actionMatch[2] === "summarize" ? await readJson(request) : {};
       if (!currentMeeting) return jsonResponse(response, 404, { error: "会议不存在" });
       if (meetingIsBusy(currentMeeting)) {
         return jsonResponse(response, 409, { error: "会议仍在处理中，请稍后再试" });
@@ -843,7 +852,7 @@ const httpServer = createServer(async (request, response) => {
       } else if (actionMatch[2] === "correct") {
         runCorrectionAndSummary(meetingId).catch(() => undefined);
       } else {
-        runSummary(meetingId).catch((error) => {
+        runSummary(meetingId, null, { autoTitle: body.autoTitle !== false }).catch((error) => {
           storage.updateMeeting(meetingId, { status: "failed", error: `总结失败：${error.message}` });
         });
       }
@@ -873,6 +882,8 @@ websocketServer.on("connection", (client, request) => {
   }
 
   const requestUrl = new URL(request.url, "http://127.0.0.1");
+  const autoSummary = requestUrl.searchParams.get("autoSummary") !== "false";
+  const autoTitle = requestUrl.searchParams.get("autoTitle") !== "false";
   const meeting = storage.createMeeting(requestUrl.searchParams.get("title") || meetingTitle(), {
     summaryTemplate: requestUrl.searchParams.get("template"),
     reportStyle: requestUrl.searchParams.get("reportStyle"),
@@ -1036,6 +1047,7 @@ websocketServer.on("connection", (client, request) => {
       || liveSummaryRunning
       || finishing
       || finalized
+      || !autoSummary
       || !miniMaxApiKey
       || audio.durationMs < liveSummaryStartMs
       || sequence < 4
@@ -1061,7 +1073,7 @@ websocketServer.on("connection", (client, request) => {
         endedAt: new Date().toISOString(),
         durationMs: audio.durationMs,
         audioPath: wavPath,
-        status: miniMaxApiKey ? "summarizing" : "completed",
+        status: autoSummary && miniMaxApiKey ? "summarizing" : "completed",
         error: asrError,
       });
       try {
@@ -1072,7 +1084,7 @@ websocketServer.on("connection", (client, request) => {
       }
       activeSessions.delete(meetingId);
       await runOverlapEnhancement(meetingId, client, { automatic: true });
-      await runSummaryAfterMeeting(meetingId, client);
+      await runSummaryAfterMeeting(meetingId, client, { autoSummary, autoTitle });
     } catch (error) {
       activeSessions.delete(meetingId);
       storage.updateMeeting(meetingId, { status: "failed", error: error.message });

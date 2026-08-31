@@ -35,7 +35,7 @@ test("server-renders the meeting transcription product", async () => {
   assert.match(html, /本地实时转写/);
   assert.match(html, /录音来源/);
   assert.match(html, /电脑声音 \+ 麦克风/);
-  assert.match(html, /MiniMax 设置/);
+  assert.match(html, /<span><b>设置<\/b>/);
   assert.match(html, /管理录音与空间/);
   assert.match(html, /发言人数识别/);
   assert.match(html, /自动检测/);
@@ -97,7 +97,8 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(proxy, /summary\.preview/);
   assert.match(proxy, /\/api\/settings\/minimax/);
   assert.match(proxy, /SHIYIN_DESKTOP_CONTROL_TOKEN/);
-  assert.match(proxy, /await runSummaryAfterMeeting\(meetingId, client\)/);
+  assert.match(proxy, /await runSummaryAfterMeeting\(meetingId, client, \{ autoSummary, autoTitle \}\)/);
+  assert.match(proxy, /options\.autoSummary === false/);
   assert.doesNotMatch(proxy, /await runCorrectionAndSummary\(meetingId, client\);/);
   assert.match(proxy, /liveSummaryStartMs/);
   assert.match(proxy, /status: "failed", error: `总结失败：\$\{error\.message\}`/);
@@ -115,14 +116,16 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(page, /重新生成 AI 总结/);
   assert.match(page, /这次想怎么整理/);
   assert.match(page, /MiniMax 总结方式/);
-  assert.match(page, /保存并立即生效/);
+  assert.match(page, /保存 AI 配置/);
   assert.match(page, /MiniMax-M3/);
   assert.match(page, /setView\("summary"\)/);
   assert.match(page, /发言人校正可按需手动运行/);
-  assert.match(page, /不会写进安装包/);
+  assert.match(page, /只保存在这台电脑/);
   assert.match(page, /图文纪要/);
   assert.match(page, /切换不消耗额度/);
   assert.match(page, /socketUrl\.searchParams\.set\("template"/);
+  assert.match(page, /socketUrl\.searchParams\.set\("autoSummary"/);
+  assert.match(page, /shiyin\.autoTitle/);
   assert.match(page, /原始内容已被安全隐藏/);
   assert.match(page, /实时草稿/);
   assert.match(page, /Markdown 文件/);
