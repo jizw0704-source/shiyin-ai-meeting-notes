@@ -1,6 +1,6 @@
 {
   "name": "shiyin-minimax-meeting-notes",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "基于 Sherpa-ONNX 本地实时转写、CAM++ 本地声纹识别与 MiniMax 的 AI 会议听记工具",
   "author": "LightningFlashEvE",
   "license": "UNLICENSED",
@@ -31,6 +31,7 @@
     "drizzle-orm": "0.45.2",
     "electron-updater": "6.8.9",
     "https-proxy-agent": "7.0.6",
+    "onnxruntime-node": "^1.29.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "sherpa-onnx-node": "1.13.4",
@@ -63,6 +64,7 @@
   "build": {
     "appId": "com.phenosola.shiyin",
     "productName": "拾音 AI",
+    "afterPack": "scripts/electron-after-pack.mjs",
     "publish": [
       {
         "provider": "github",
@@ -75,7 +77,8 @@
       "output": "release"
     },
     "asarUnpack": [
-      "dist/**/*"
+      "dist/**/*",
+      "node_modules/onnxruntime-node/bin/**/*"
     ],
     "files": [
       "desktop/**/*",

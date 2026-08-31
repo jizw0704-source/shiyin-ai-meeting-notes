@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import process from "node:process";
 import { LocalAsrEngine } from "../server/local-asr-engine.mjs";
+import { OverlapSeparationEngine } from "../server/overlap-enhancement.mjs";
 import { SpeakerEngine } from "../server/speaker-engine.mjs";
 
 const require = createRequire(import.meta.url);
@@ -65,6 +66,16 @@ const embedding = speakerEngine.extractEmbedding(pcm);
 assert.ok(embedding?.length, "CAM++ 模型未能生成声纹向量");
 assert.ok(Array.from(embedding).every(Number.isFinite), "CAM++ 模型生成了无效声纹向量");
 
+const separationEngine = new OverlapSeparationEngine({
+  modelPath: path.join(sourceRoot, "models", "separation", "convtasnet_16k.onnx"),
+  numThreads: 1,
+});
+assert.equal(separationEngine.available, true, "双人语音分离模型文件缺失");
+await assert.doesNotReject(
+  () => separationEngine.ensureSession(),
+  "双人语音分离模型无法由 ONNX Runtime 加载",
+);
+
 process.stdout.write(`${JSON.stringify({
   ok: true,
   platform: process.platform,
@@ -74,4 +85,5 @@ process.stdout.write(`${JSON.stringify({
   punctuationModelAvailable: asrEngine.punctuationAvailable,
   speakerModelAvailable: speakerEngine.available,
   speakerEmbeddingDimensions: embedding.length,
+  overlapSeparationModelAvailable: separationEngine.available,
 })}\n`);

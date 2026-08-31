@@ -7,6 +7,7 @@ import test from "node:test";
 import { saveObsidianMeeting } from "../desktop/obsidian-export.mjs";
 import { parseByteRange } from "../server/audio-stream.mjs";
 import { AudioSession } from "../server/audio-session.mjs";
+import { buildClipRanges, createEditedWav } from "../server/audio-editing.mjs";
 import { correctMeetingSpeakers, splitLongSegment } from "../server/correction.mjs";
 import { inspectPcmWav, transcribeHistoricalWav } from "../server/historical-transcription.mjs";
 import { MeetingStorage } from "../server/storage.mjs";
@@ -21,6 +22,7 @@ import { deriveAutomaticMeetingTitle, normalizeAutomaticMeetingTitle } from "../
 import { normalizeMaxSpeakers, normalizeSpeakerLimitMode } from "../server/speaker-settings.mjs";
 import { SpeakerEngine } from "../server/speaker-engine.mjs";
 import { detectPotentialOverlap } from "../server/overlap-detection.mjs";
+import { enhanceOverlappingSegments } from "../server/overlap-enhancement.mjs";
 import { cleanTranscriptText, replaceTranscriptText } from "../server/transcript-cleaning.mjs";
 import { punctuateTranscriptText } from "../server/transcript-punctuation.mjs";
 import {
@@ -585,6 +587,142 @@ test("writes recoverable PCM and a valid mono 16 kHz WAV", async () => {
   }
 });
 
+test("creates non-destructive audio clips by speaker and time range", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-audio-edit-"));
+  const storage = new MeetingStorage(root);
+  try {
+    const meeting = storage.createMeeting("剪辑测试");
+    const first = storage.ensureSpeaker(meeting.id, "发言人1");
+    const second = storage.ensureSpeaker(meeting.id, "发言人2");
+    storage.addSegment(meeting.id, { seq: 0, startMs: 0, endMs: 1000, text: "第一段", speakerId: first.id });
+    storage.addSegment(meeting.id, { seq: 1, startMs: 1000, endMs: 2000, text: "第二段", speakerId: second.id });
+    storage.addSegment(meeting.id, { seq: 2, startMs: 2500, endMs: 3500, text: "第三段", speakerId: first.id });
+    const audio = new AudioSession(root, meeting.id);
+    audio.append(Buffer.alloc(128000, 7));
+    const sourcePath = await audio.finalize();
+    storage.updateMeeting(meeting.id, { status: "completed", durationMs: 4000, audioPath: sourcePath });
+
+    const ranges = buildClipRanges({
+      startMs: 500,
+      endMs: 3000,
+      segments: storage.listSegments(meeting.id),
+      speakerIds: [first.id],
+    });
+    assert.deepEqual(ranges, [{ startMs: 500, endMs: 1000 }, { startMs: 2500, endMs: 3000 }]);
+    assert.deepEqual(buildClipRanges({ startMs: 500, endMs: 3000, segments: [], speakerIds: [] }), [
+      { startMs: 500, endMs: 3000 },
+    ]);
+    const outputPath = path.join(root, "meetings", meeting.id, "clips", "selected.wav");
+    const edited = await createEditedWav({
+      sourcePath,
+      outputPath,
+      startMs: 500,
+      endMs: 3000,
+      segments: storage.listSegments(meeting.id),
+      speakerIds: [first.id],
+    });
+    assert.equal(edited.durationMs, 1120);
+    assert.equal(existsSync(sourcePath), true);
+    assert.equal(existsSync(outputPath), true);
+    const clip = storage.addAudioClip(meeting.id, {
+      name: "发言人1精选",
+      storedName: "selected.wav",
+      startMs: 500,
+      endMs: 3000,
+      durationMs: edited.durationMs,
+      sizeBytes: edited.sizeBytes,
+      speakerIds: [first.id],
+      sourceRanges: edited.sourceRanges,
+    });
+    assert.equal(storage.getMeeting(meeting.id).audioClips[0].id, clip.id);
+    assert.equal(storage.getMeeting(meeting.id).audioClips[0].speakerIds[0], first.id);
+  } finally {
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("separates a verified two-speaker overlap and keeps a restorable transcript version", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-overlap-enhance-"));
+  const storage = new MeetingStorage(root);
+  try {
+    const meeting = storage.createMeeting("多人发言拆解测试");
+    const first = storage.ensureSpeaker(meeting.id, "发言人1", new Float32Array([1, 0]));
+    const second = storage.ensureSpeaker(meeting.id, "发言人2", new Float32Array([0, 1]));
+    storage.addSegment(meeting.id, {
+      seq: 0,
+      startMs: 0,
+      endMs: 2000,
+      text: "两个人同时说话的原记录",
+      overlapSuspected: true,
+      overlapConfidence: 0.8,
+      overlapSpeakerIds: [first.id, second.id],
+    });
+    const audio = new AudioSession(root, meeting.id);
+    audio.append(Buffer.alloc(64000, 3));
+    const sourcePath = await audio.finalize();
+    storage.updateMeeting(meeting.id, { audioPath: sourcePath, durationMs: 2000, status: "completed" });
+
+    const positive = Buffer.alloc(64000);
+    const negative = Buffer.alloc(64000);
+    for (let offset = 0; offset < positive.length; offset += 2) {
+      positive.writeInt16LE(1200, offset);
+      negative.writeInt16LE(-1200, offset);
+    }
+    const fakeAsrEngine = {
+      available: true,
+      createSession(callbacks) {
+        let firstSample = 0;
+        let bytes = 0;
+        return {
+          acceptPcm(chunk) {
+            if (!bytes) firstSample = chunk.readInt16LE(0);
+            bytes += chunk.length;
+          },
+          finish() {
+            callbacks.onFinal({
+              startMs: 0,
+              endMs: bytes / 32,
+              originalText: firstSample > 0 ? "第一位发言人的内容" : "第二位发言人的内容",
+              text: firstSample > 0 ? "第一位发言人的内容。" : "第二位发言人的内容。",
+              words: [],
+            });
+          },
+        };
+      },
+    };
+    const result = await enhanceOverlappingSegments({
+      meetingId: meeting.id,
+      dataRoot: root,
+      storage,
+      separationEngine: { available: true, async separatePcm() { return [positive, negative]; } },
+      asrEngine: fakeAsrEngine,
+      speakerEngine: {
+        available: true,
+        extractEmbedding(pcm) {
+          return pcm.readInt16LE(0) > 0 ? new Float32Array([1, 0]) : new Float32Array([0, 1]);
+        },
+      },
+    });
+    assert.equal(result.enhancedCount, 1);
+    assert.equal(result.retainedCount, 0);
+    assert.equal(result.meeting.segments.length, 2);
+    assert.deepEqual(new Set(result.meeting.segments.map((segment) => segment.speakerId)), new Set([first.id, second.id]));
+    assert.equal(result.meeting.segments.every((segment) => segment.source === "overlap-separated"), true);
+    assert.equal(result.meeting.segments.every((segment) => !segment.overlapSuspected), true);
+    assert.equal(result.meeting.transcriptVersions.length, 1);
+    assert.equal(existsSync(sourcePath), true);
+
+    const restored = storage.restoreTranscriptVersion(meeting.id, result.meeting.transcriptVersions[0].id);
+    assert.equal(restored.segments.length, 1);
+    assert.equal(restored.segments[0].overlapSuspected, true);
+    assert.equal(restored.segments[0].text, "两个人同时说话的原记录");
+  } finally {
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("recovers an interrupted recording and safely cleans legacy duplicate audio", async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-recovery-"));
   const storage = new MeetingStorage(root);
@@ -794,6 +932,20 @@ test("creates a verified workspace backup and safely merges it into another work
       sizeBytes: 37,
       extractedText: "# 会前方案\n\n预算上限为 20 万元。",
     });
+    const clipDirectory = path.join(sourceRoot, "meetings", meeting.id, "clips");
+    mkdirSync(clipDirectory, { recursive: true });
+    writeFileSync(path.join(clipDirectory, "backup-clip.wav"), Buffer.alloc(144, 3));
+    sourceStorage.addAudioClip(meeting.id, {
+      id: "backup-clip",
+      name: "王工发言精选",
+      storedName: "backup-clip.wav",
+      startMs: 100,
+      endMs: 900,
+      durationMs: 800,
+      sizeBytes: 144,
+      speakerIds: [backedUpSpeaker.id],
+      sourceRanges: [{ startMs: 100, endMs: 900 }],
+    });
     sourceStorage.createTranscriptVersion(meeting.id, { label: "备份版本", active: true });
     const deletedMeeting = sourceStorage.createMeeting("误删除但仍需备份的会议");
     sourceStorage.updateMeeting(deletedMeeting.id, { status: "completed", durationMs: 2400 });
@@ -828,12 +980,15 @@ test("creates a verified workspace backup and safely merges it into another work
     assert.equal(restoredMeeting.attachments.length, 1);
     assert.equal(restoredMeeting.attachments[0].originalName, "会前方案.md");
     assert.equal(restoredMeeting.attachments[0].aiReadable, true);
+    assert.equal(restoredMeeting.audioClips.length, 1);
+    assert.equal(restoredMeeting.audioClips[0].name, "王工发言精选");
     assert.equal(restoredMeeting.speakers[0].displayName, "王工");
     assert.equal(restoredMeeting.speakers[1].suggestedName, "王工");
     assert.equal(restoredMeeting.speakers[1].suggestedScore, 0.8);
     assert.equal(targetStorage.listSpeakerProfiles()[0].displayName, "王工");
     assert.equal(existsSync(path.join(targetRoot, "meetings", meeting.id, "audio.wav")), true);
     assert.equal(existsSync(path.join(targetRoot, "meetings", meeting.id, "attachments", `${attachmentId}.md`)), true);
+    assert.equal(existsSync(path.join(targetRoot, "meetings", meeting.id, "clips", "backup-clip.wav")), true);
     assert.equal(targetStorage.listMeetings().length, 1);
     assert.equal(targetStorage.listDeletedMeetings().length, 1);
     assert.equal(targetStorage.listDeletedMeetings()[0].title, "误删除但仍需备份的会议");

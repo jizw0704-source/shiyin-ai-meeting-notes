@@ -49,6 +49,7 @@ function Start-And-VerifyShiyin {
   if ($health.asrMode -ne "local" -or -not $health.localAsrAvailable) { throw "安装版未加载本地转写模型" }
   if (-not $health.punctuationModelAvailable) { throw "安装版未加载本地标点模型" }
   if (-not $health.speakerModelAvailable) { throw "安装版未加载发言人模型" }
+  if (-not $health.overlapSeparationModelAvailable) { throw "安装版未加载重叠语音拆解模型" }
 
   $page = Invoke-WebRequest -Uri $health.appOrigin -UseBasicParsing -TimeoutSec 10
   if ($page.StatusCode -ne 200 -or $page.Content -notmatch "<title>拾音 AI") {
@@ -113,6 +114,7 @@ try {
     localAsrAvailable = $secondRun.health.localAsrAvailable
     punctuationModelAvailable = $secondRun.health.punctuationModelAvailable
     speakerModelAvailable = $secondRun.health.speakerModelAvailable
+    overlapSeparationModelAvailable = $secondRun.health.overlapSeparationModelAvailable
     cssAssetCount = $secondRun.cssAssetCount
     scriptAssetCount = $secondRun.scriptAssetCount
     dataPreservedAcrossUpgrade = $true

@@ -4,7 +4,7 @@
 
 本地转写不消耗云端语音时长。原始录音、逐字稿、发言人声纹、历史版本和会议列表默认保存在自己的电脑上；只有主动生成 AI 总结时，会议文本才会发送给 MiniMax。
 
-> 当前版本：`0.5.5`<br>
+> 当前开发基线：`0.6.2`<br>
 > 使用阶段：个人使用与团队内部测试<br>
 > 支持平台：Apple Silicon macOS、Windows x64<br>
 > 授权状态：`UNLICENSED`，不是开源许可证；公开分发或商业使用前请先确认授权条件
@@ -28,9 +28,10 @@
 | 实时转写 | Sherpa-ONNX Paraformer 中英文转写 | 本机 |
 | 断句与标点 | CT-Transformer 标点恢复，模型缺失时使用保守规则 | 本机 |
 | 发言人区分 | 6、12、20 人会议上限，实时聚类与会后校正 | 本机 |
-| 重叠发言提醒 | 保守标记疑似多人同时发言，支持时间回听与人工确认 | 本机 |
+| 重叠发言增强 Beta | 自动标记疑似重叠片段；会后尝试双人分离、分别转写和声纹回配，低置信度时保留原记录 | 本机 |
 | 姓名记忆 | 人工命名后建立本机声纹档案，会议中渐进匹配、候选确认与结束时轻量复核 | 本机 |
 | 逐字稿整理 | 原始记录、整理稿、正序/倒序、口语过滤、查找替换与撤销 | 本机 |
+| 音频整理 | 按时间与发言人另存音频剪辑，原始录音保持不变 | 本机 |
 | AI 总结 | 会议概览、议题、决策、风险、行动项和发言人贡献 | MiniMax |
 | 导出与连接 | Markdown、网页报告、复制给 AI Agent、可选 Obsidian | 本机 / 用户选择 |
 | 数据保护 | 异常恢复、转写历史版本、完整备份与校验 | 本机 |
@@ -43,8 +44,9 @@ flowchart LR
     B --> C["Sherpa-ONNX 实时转写与标点"]
     C --> D["CAM++ 区分发言人"]
     D --> E["本机声纹库匹配姓名"]
-    E --> F["人工检查与逐字稿整理"]
-    F --> G["MiniMax 生成会议纪要"]
+    E --> F["重叠片段会后增强与人工确认"]
+    F --> I["逐字稿整理与音频剪辑"]
+    I --> G["MiniMax 生成会议纪要"]
     G --> H["导出 Markdown / 网页 / AI 笔记本"]
 ```
 
@@ -72,8 +74,9 @@ flowchart LR
 3. 选择总结模板和报告样式。
 4. 点击“开始会议”。
 5. 会议中查看实时逐字稿，必要时修正发言人姓名。
-6. 结束后立即生成 MiniMax 正式总结；同时完成一次不读取整段录音的轻量姓名复核。
-7. 导出 Markdown、网页报告，或连接自己的 AI 笔记本。
+6. 结束后若发现疑似双人重叠片段，会先在本机尝试拆解并通过声纹校验，再生成 MiniMax 正式总结。
+7. 对未通过校验的片段回听并人工确认；也可以按发言人和时间另存音频剪辑。
+8. 导出 Markdown、网页报告，或连接自己的 AI 笔记本。
 
 历史会议位于左侧栏；会议较多时可上下滚动，会议名称支持重命名和搜索。
 
@@ -124,6 +127,7 @@ flowchart LR
 - 可查找并全局替换简称、术语或识别错误；
 - 整理操作支持撤销，不覆盖原始 ASR 文本；
 - 重新转写会生成历史版本，可恢复旧版本。
+- 会后双人拆解成功时会标记“会后拆解”；处理前逐字稿自动保存为可恢复版本。
 
 ### MiniMax 总结
 
@@ -165,7 +169,7 @@ Obsidian 是可选连接，不是必需依赖：
 - Node.js `22.13.0` 或更高版本；
 - npm，并使用仓库中已提交的 `package-lock.json`；
 - MiniMax API Key 仅在需要 AI 总结时使用；
-- 本地 ASR 和标点模型体积较大，不提交到 Git 仓库。
+- 本地 ASR 和标点模型体积较大，开发者需按下文路径准备；声纹与双人分离模型随应用资源提供。
 
 ### 安装依赖
 
@@ -185,11 +189,13 @@ models/
 │   └── tokens.txt
 ├── punctuation/
 │   └── model.int8.onnx
-└── speaker/
-    └── 3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx
+├── speaker/
+│   └── 3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx
+└── separation/
+    └── convtasnet_16k.onnx
 ```
 
-ASR 使用 `sherpa-onnx-streaming-paraformer-bilingual-zh-en`；标点使用 Sherpa-ONNX CT-Transformer zh-en int8 模型。CAM++ 发言人模型已包含在仓库中。标点模型缺失时会回退到保守断句规则，不影响录音和转写。
+ASR 使用 `sherpa-onnx-streaming-paraformer-bilingual-zh-en`；标点使用 Sherpa-ONNX CT-Transformer zh-en int8 模型。CAM++ 发言人模型与 Conv-TasNet 双人分离模型已包含在仓库中；分离模型的来源、校验值、授权和局限见 `models/separation/README.md`。标点模型缺失时会回退到保守断句规则，不影响录音和转写。
 
 ### 配置环境
 
@@ -208,6 +214,7 @@ SHIYIN_LOCAL_ASR_MODEL_DIR=./models/asr
 SHIYIN_PUNCTUATION_MODEL_PATH=./models/punctuation/model.int8.onnx
 SHIYIN_LOCAL_ASR_SILENCE_MS=1200
 SHIYIN_MODEL_PATH=./models/speaker/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx
+SHIYIN_SEPARATION_MODEL_PATH=./models/separation/convtasnet_16k.onnx
 SHIYIN_DATA_ROOT=./data
 ```
 
@@ -232,7 +239,7 @@ npm run dev
 | `npm run lint` | ESLint 检查 |
 | `npm run typecheck` | TypeScript 类型检查 |
 | `npm test` | 生产构建与自动化测试 |
-| `npm run test:native-models` | 加载当前平台的 ASR、标点和声纹模型 |
+| `npm run test:native-models` | 加载当前平台的 ASR、标点、声纹和双人分离模型 |
 | `npm run build` | 生成生产构建 |
 | `npm run desktop:dist:mac` | 构建 Apple Silicon DMG 与 ZIP |
 | `npm run desktop:dist:win` | 构建 Windows x64 NSIS 安装包 |
@@ -276,6 +283,8 @@ server/realtime-proxy.mjs     本地 API、WebSocket 与任务调度
 server/local-asr-engine.mjs   Sherpa-ONNX 实时转写与标点
 server/speaker-engine.mjs     实时声纹提取与发言人分配
 server/correction.mjs         会后发言人校正与姓名匹配
+server/overlap-enhancement.mjs 双人重叠片段分离、转写与声纹回配
+server/audio-editing.mjs      无损原录音的时间与发言人音频剪辑
 server/storage.mjs            SQLite、声纹库与历史版本
 server/workspace-backup.mjs   完整备份、校验与恢复
 tests/                        持久化、接口和界面构建测试
@@ -297,7 +306,7 @@ tests/                        持久化、接口和界面构建测试
 
 ## 当前限制
 
-- 两人同时说话时，应用会保守标记“疑似重叠发言”并避免强行归属；当前模型仍无法稳定拆分两路重叠语音，重要内容应回听确认。
+- 双人重叠拆解属于 Beta：清晰、短时的两人重叠更容易成功；三人以上、远场、强混响或噪声环境仍会保留“待确认”，重要内容应回听确认。
 - 过短片段可能继承相邻发言人；人数越多、音色越接近，聚类和姓名匹配越容易产生歧义。
 - Paraformer 不提供逐词时间戳，句段时间由实时音频位置估算。
 - 本地标点能改善可读性，但专业名词、简称和复杂语气仍建议会后检查。

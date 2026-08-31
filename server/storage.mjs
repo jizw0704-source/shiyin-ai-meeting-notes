@@ -151,6 +151,19 @@ export class MeetingStorage {
         extracted_text TEXT,
         created_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS audio_clips (
+        id TEXT PRIMARY KEY,
+        meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        stored_name TEXT NOT NULL,
+        start_ms INTEGER NOT NULL,
+        end_ms INTEGER NOT NULL,
+        duration_ms INTEGER NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        speaker_ids_json TEXT NOT NULL,
+        source_ranges_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
       CREATE INDEX IF NOT EXISTS idx_segments_meeting_seq ON segments(meeting_id, seq);
       CREATE INDEX IF NOT EXISTS idx_speakers_meeting ON speakers(meeting_id);
       CREATE INDEX IF NOT EXISTS idx_speaker_profiles_name ON speaker_profiles(display_name);
@@ -158,6 +171,7 @@ export class MeetingStorage {
       CREATE INDEX IF NOT EXISTS idx_transcript_edits_meeting ON transcript_edits(meeting_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_transcript_versions_meeting ON transcript_versions(meeting_id, version_no);
       CREATE INDEX IF NOT EXISTS idx_meeting_attachments_meeting ON meeting_attachments(meeting_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_audio_clips_meeting ON audio_clips(meeting_id, created_at);
     `);
     const meetingColumns = new Set(
       this.db.prepare("PRAGMA table_info(meetings)").all().map((column) => column.name),
@@ -304,6 +318,7 @@ export class MeetingStorage {
     }));
     value.jobs = this.listJobs(meeting.id);
     value.attachments = this.listAttachments(meeting.id);
+    value.audioClips = this.listAudioClips(meeting.id);
     value.transcriptVersions = this.listTranscriptVersions(meeting.id);
     value.canUndoTranscriptEdit = Boolean(this.latestTranscriptEdit(meeting.id));
     return value;
@@ -360,6 +375,64 @@ export class MeetingStorage {
     if (!attachment) return null;
     this.db.prepare("DELETE FROM meeting_attachments WHERE id = ?").run(id);
     return attachment;
+  }
+
+  addAudioClip(meetingId, clip) {
+    if (!this.getMeeting(meetingId)) throw new Error("会议不存在");
+    const id = String(clip.id || randomUUID());
+    const createdAt = clip.createdAt || new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO audio_clips
+      (id, meeting_id, name, stored_name, start_ms, end_ms, duration_ms, size_bytes,
+       speaker_ids_json, source_ranges_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      meetingId,
+      String(clip.name || "会议音频剪辑").trim().slice(0, 80),
+      String(clip.storedName || `${id}.wav`).slice(0, 120),
+      Math.max(0, Math.round(Number(clip.startMs) || 0)),
+      Math.max(0, Math.round(Number(clip.endMs) || 0)),
+      Math.max(0, Math.round(Number(clip.durationMs) || 0)),
+      Math.max(0, Math.round(Number(clip.sizeBytes) || 0)),
+      JSON.stringify(Array.isArray(clip.speakerIds) ? clip.speakerIds.map(String) : []),
+      JSON.stringify(Array.isArray(clip.sourceRanges) ? clip.sourceRanges : []),
+      createdAt,
+    );
+    return this.getAudioClip(id);
+  }
+
+  getAudioClip(id) {
+    const row = this.db.prepare("SELECT * FROM audio_clips WHERE id = ?").get(id);
+    return row ? this.hydrateAudioClip(row) : null;
+  }
+
+  listAudioClips(meetingId) {
+    return this.db.prepare("SELECT * FROM audio_clips WHERE meeting_id = ? ORDER BY created_at DESC").all(meetingId)
+      .map((row) => this.hydrateAudioClip(row));
+  }
+
+  hydrateAudioClip(row) {
+    return {
+      id: row.id,
+      meetingId: row.meeting_id,
+      name: row.name,
+      storedName: row.stored_name,
+      startMs: row.start_ms,
+      endMs: row.end_ms,
+      durationMs: row.duration_ms,
+      sizeBytes: row.size_bytes,
+      speakerIds: JSON.parse(row.speaker_ids_json || "[]"),
+      sourceRanges: JSON.parse(row.source_ranges_json || "[]"),
+      createdAt: row.created_at,
+    };
+  }
+
+  deleteAudioClip(id) {
+    const clip = this.getAudioClip(id);
+    if (!clip) return null;
+    this.db.prepare("DELETE FROM audio_clips WHERE id = ?").run(id);
+    return clip;
   }
 
   updateMeeting(id, patch) {
@@ -519,6 +592,25 @@ export class MeetingStorage {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  replaceEnhancedSegments(meetingId, segments) {
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare("DELETE FROM segments WHERE meeting_id = ?").run(meetingId);
+      this.db.prepare("DELETE FROM transcript_edits WHERE meeting_id = ?").run(meetingId);
+      for (const segment of segments) this.addSegment(meetingId, segment);
+      this.db.prepare(`
+        UPDATE meetings
+        SET live_summary_json = NULL, summary_stale = 1, active_transcript_version_id = NULL
+        WHERE id = ?
+      `).run(meetingId);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return this.getMeeting(meetingId);
   }
 
   transcriptSnapshot(meetingId) {
@@ -1120,6 +1212,7 @@ export class MeetingStorage {
       jobs: [],
       transcriptEdits,
       attachments: this.listAttachments(meetingId),
+      audioClips: this.listAudioClips(meetingId),
       transcriptVersions: this.listTranscriptVersions(meetingId, true),
     };
   }
@@ -1227,6 +1320,9 @@ export class MeetingStorage {
       }
       for (const attachment of snapshot.attachments || []) {
         this.addAttachment(meetingId, attachment);
+      }
+      for (const clip of snapshot.audioClips || []) {
+        this.addAudioClip(meetingId, clip);
       }
       for (const version of snapshot.transcriptVersions || []) {
         if (!version.snapshot) continue;

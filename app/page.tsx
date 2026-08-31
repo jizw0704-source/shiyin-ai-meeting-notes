@@ -26,6 +26,7 @@ import {
   Palette,
   PushPin,
   Quotes,
+  Scissors,
   Sparkle,
   Sun,
   Target,
@@ -37,7 +38,7 @@ import {
 } from "@phosphor-icons/react";
 
 type View = "transcript" | "summary" | "actions";
-type MeetingStatus = "recording" | "correcting" | "summarizing" | "retranscribing" | "completed" | "failed";
+type MeetingStatus = "recording" | "correcting" | "summarizing" | "retranscribing" | "enhancing" | "completed" | "failed";
 type SummaryTemplateId = "meeting-minutes" | "daily-log" | "project-sync" | "brainstorm";
 type ReportStyle = "detailed" | "visual";
 type AudioSourceMode = "microphone" | "system" | "mixed";
@@ -130,6 +131,19 @@ type MeetingAttachment = {
   aiReadable: boolean;
   createdAt: string;
 };
+type AudioClip = {
+  id: string;
+  meetingId: string;
+  name: string;
+  storedName: string;
+  startMs: number;
+  endMs: number;
+  durationMs: number;
+  sizeBytes: number;
+  speakerIds: string[];
+  sourceRanges: Array<{ startMs: number; endMs: number }>;
+  createdAt: string;
+};
 type Speaker = {
   id: string;
   meetingId: string;
@@ -155,7 +169,7 @@ type Segment = {
   editedText: string | null;
   cleanedText: string;
   speakerId: string | null;
-  source: "realtime" | "local-realtime" | "local-retranscribed" | "corrected" | "restored";
+  source: "realtime" | "local-realtime" | "local-retranscribed" | "corrected" | "overlap-separated" | "restored";
   confidence: number | null;
   overlapSuspected: boolean;
   overlapConfidence: number | null;
@@ -229,7 +243,7 @@ type Summary = {
 };
 type Job = {
   id: string;
-  kind: "speaker-correction" | "summary" | "retranscription";
+  kind: "speaker-correction" | "summary" | "retranscription" | "overlap-enhancement";
   status: "pending" | "running" | "completed" | "failed";
   progress: number;
   error: string | null;
@@ -264,6 +278,7 @@ type Meeting = MeetingBrief & {
   activeTranscriptVersionId: string | null;
   transcriptVersions: TranscriptVersion[];
   attachments: MeetingAttachment[];
+  audioClips: AudioClip[];
 };
 
 declare global {
@@ -373,6 +388,7 @@ function statusLabel(status: MeetingStatus) {
     correcting: "正在校正发言人",
     summarizing: "正在生成总结",
     retranscribing: "正在重新转写录音",
+    enhancing: "正在拆解多人发言",
     completed: "已完成",
     failed: "处理失败",
   }[status];
@@ -382,7 +398,8 @@ function meetingIsBusy(status: MeetingStatus | undefined) {
   return status === "recording"
     || status === "correcting"
     || status === "summarizing"
-    || status === "retranscribing";
+    || status === "retranscribing"
+    || status === "enhancing";
 }
 
 function summaryLooksInvalid(summary: Summary | null | undefined) {
@@ -574,6 +591,12 @@ export default function Home() {
   const [recordingBackdrop, setRecordingBackdrop] = useState<RecordingBackdrop>("paper");
   const [pendingAttachments, setPendingAttachments] = useState<File[]>([]);
   const [attachmentUploading, setAttachmentUploading] = useState(false);
+  const [audioEditorOpen, setAudioEditorOpen] = useState(false);
+  const [audioClipSaving, setAudioClipSaving] = useState(false);
+  const [audioClipName, setAudioClipName] = useState("");
+  const [audioClipStartMs, setAudioClipStartMs] = useState(0);
+  const [audioClipEndMs, setAudioClipEndMs] = useState(0);
+  const [audioClipSpeakerIds, setAudioClipSpeakerIds] = useState<Set<string>>(new Set());
   const [trashDialogOpen, setTrashDialogOpen] = useState(false);
   const [deletedMeetings, setDeletedMeetings] = useState<MeetingBrief[]>([]);
   const [trashLoading, setTrashLoading] = useState(false);
@@ -1201,6 +1224,70 @@ export default function Home() {
     }
   }
 
+  function openAudioEditor() {
+    if (!meeting?.audioPath || meetingIsBusy(meeting.status)) return;
+    setAudioClipName(`${meeting.title}-剪辑`);
+    setAudioClipStartMs(0);
+    setAudioClipEndMs(meeting.durationMs);
+    setAudioClipSpeakerIds(new Set(meeting.speakers.map((speaker) => speaker.id)));
+    setAudioEditorOpen(true);
+  }
+
+  function toggleAudioClipSpeaker(speakerId: string) {
+    setAudioClipSpeakerIds((current) => {
+      const next = new Set(current);
+      if (next.has(speakerId)) next.delete(speakerId);
+      else next.add(speakerId);
+      return next;
+    });
+  }
+
+  async function saveAudioClip() {
+    if (!meeting || audioClipSaving || (meeting.speakers.length > 0 && !audioClipSpeakerIds.size)) return;
+    setAudioClipSaving(true);
+    try {
+      const result = await api<{ clip: AudioClip; meeting: Meeting }>(
+        `/api/meetings/${meeting.id}/audio-clips`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            name: audioClipName.trim(),
+            startMs: audioClipStartMs,
+            endMs: audioClipEndMs,
+            speakerIds: [...audioClipSpeakerIds],
+          }),
+        },
+      );
+      setMeeting(result.meeting);
+      mergeMeetingList(result.meeting);
+      setAudioEditorOpen(false);
+      setNotice(`已保存“${result.clip.name}”，原始录音保持不变`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法保存音频剪辑");
+    } finally {
+      setAudioClipSaving(false);
+    }
+  }
+
+  async function deleteAudioClip(clip: AudioClip) {
+    if (!meeting || audioClipSaving) return;
+    if (!window.confirm(`删除音频剪辑“${clip.name}”？原始录音不会受到影响。`)) return;
+    setAudioClipSaving(true);
+    try {
+      const result = await api<{ meeting: Meeting }>(
+        `/api/meetings/${meeting.id}/audio-clips/${clip.id}`,
+        { method: "DELETE" },
+      );
+      setMeeting(result.meeting);
+      mergeMeetingList(result.meeting);
+      setNotice("音频剪辑已删除，原始录音仍然保留");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法删除音频剪辑");
+    } finally {
+      setAudioClipSaving(false);
+    }
+  }
+
   async function openAudioPrivacySettings(kind: "microphone" | "screen") {
     const opened = await window.shiyinDesktop?.openAudioPrivacySettings(kind);
     if (!opened) return;
@@ -1391,20 +1478,35 @@ export default function Home() {
             setProcessing(true);
             setMeeting((current) => {
               if (!current || current.id !== message.meetingId) return current;
+              const nextStatus: MeetingStatus = message.job.kind === "summary"
+                ? "summarizing"
+                : message.job.kind === "overlap-enhancement"
+                  ? "enhancing"
+                  : message.job.kind === "retranscription"
+                    ? "retranscribing"
+                    : "correcting";
               return {
                 ...current,
-                status: message.job.kind === "summary" ? "summarizing" : "correcting",
+                status: nextStatus,
                 jobs: [...current.jobs.filter((job) => job.id !== message.job.id), message.job],
               };
             });
             setConnectionStatus(
               message.job.kind === "summary"
                 ? `正在生成会议总结 ${message.job.progress}%`
+                : message.job.kind === "overlap-enhancement"
+                  ? `正在拆解多人同时发言 ${message.job.progress}%`
                 : `正在校正发言人 ${message.job.progress}%`,
             );
           } else if (message.type === "speaker.corrected") {
             setMeeting(message.meeting);
             mergeMeetingList(message.meeting);
+          } else if (message.type === "overlap.enhanced") {
+            setMeeting(message.meeting);
+            mergeMeetingList(message.meeting);
+            setNotice(message.enhancedCount
+              ? `已拆解 ${message.enhancedCount} 处多人同时发言${message.retainedCount ? `；另有 ${message.retainedCount} 处保留原记录待确认` : ""}`
+              : "暂未找到足够可靠的双人拆解结果，已完整保留原记录");
           } else if (message.type === "session.completed") {
             const value = message.meeting as Meeting;
             setMeeting(value);
@@ -1617,6 +1719,33 @@ export default function Home() {
       }, 1500);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "无法启动校正任务");
+    }
+  }
+
+  async function enhanceOverlappingSpeech() {
+    if (!meeting || meetingIsBusy(meeting.status) || !meeting.audioPath || !overlapCount) return;
+    const meetingId = meeting.id;
+    try {
+      await api(`/api/meetings/${meetingId}/enhance-overlap`, { method: "POST" });
+      setProcessing(true);
+      setMeeting((current) => current?.id === meetingId ? { ...current, status: "enhancing", error: null } : current);
+      setConnectionStatus("正在本地拆解多人同时发言…");
+      setNotice("会后增强已开始；处理前的逐字稿已自动保留为版本");
+      const poll = window.setInterval(async () => {
+        const value = await loadMeeting(meetingId).catch(() => null);
+        if (value && !meetingIsBusy(value.status)) {
+          window.clearInterval(poll);
+          setProcessing(false);
+          mergeMeetingList(value);
+          const remaining = value.segments.filter((segment) => segment.overlapSuspected).length;
+          setNotice(remaining < overlapCount
+            ? `多人发言拆解完成：成功处理 ${overlapCount - remaining} 处${remaining ? `，${remaining} 处仍需人工确认` : ""}`
+            : value.error || "暂未找到足够可靠的拆解结果，原记录保持不变");
+        }
+      }, 1500);
+    } catch (error) {
+      setProcessing(false);
+      setNotice(error instanceof Error ? error.message : "无法启动多人发言拆解");
     }
   }
 
@@ -2632,8 +2761,32 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                 >
                   当前系统不支持音频播放。
                 </audio>
+                <button className="audio-edit-button" type="button" disabled={processing || meetingIsBusy(meeting.status)} onClick={openAudioEditor}>
+                  <Scissors size={15} /> 剪辑音频
+                </button>
               </section>
             )}
+            {meeting?.audioClips.length ? (
+              <section className="audio-clip-shelf" aria-label="已保存的音频剪辑">
+                <header><span><Scissors size={16} weight="duotone" /><b>已保存剪辑</b></span><small>{meeting.audioClips.length} 个 · 原始录音未修改</small></header>
+                <div>
+                  {meeting.audioClips.map((clip) => {
+                    const speakerNames = meeting.speakers
+                      .filter((speaker) => clip.speakerIds.includes(speaker.id))
+                      .map((speaker) => speaker.displayName);
+                    const clipUrl = `${apiBase}/api/meetings/${encodeURIComponent(meeting.id)}/audio-clips/${encodeURIComponent(clip.id)}/audio`;
+                    return (
+                      <article key={clip.id}>
+                        <span><b>{clip.name}</b><small>{formatClock(clip.durationMs)} · {speakerNames.join("、") || "全部发言人"} · 原录音 {formatClock(clip.startMs)}–{formatClock(clip.endMs)}</small></span>
+                        <audio controls preload="metadata" src={clipUrl}>当前系统不支持音频播放。</audio>
+                        <a href={clipUrl} download={`${safeFilename(clip.name)}.wav`}><DownloadSimple size={14} /> 保存文件</a>
+                        <button type="button" disabled={audioClipSaving} onClick={() => void deleteAudioClip(clip)} aria-label={`删除 ${clip.name}`}><Trash size={14} /></button>
+                      </article>
+                    );
+                  })}
+                </div>
+              </section>
+            ) : null}
             {meeting && (
               <section className="meeting-materials" aria-labelledby="meeting-materials-title">
                 <div className="meeting-materials-heading">
@@ -2779,8 +2932,13 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                     <WarningCircle size={19} weight="duotone" />
                     <p>
                       <b>发现 {overlapCount} 处疑似重叠发言</b>
-                      <span>系统没有强行归属；可点击时间回听，或在对应记录中确认发言人。</span>
+                      <span>可先用本地模型尝试拆成两路并匹配声纹；不可靠的片段会保留原记录。</span>
                     </p>
+                    <button
+                      type="button"
+                      disabled={!meeting?.audioPath || recording || processing || meetingIsBusy(meeting?.status)}
+                      onClick={() => void enhanceOverlappingSpeech()}
+                    >{meeting?.status === "enhancing" ? "正在拆解…" : "会后增强拆解 Beta"}</button>
                   </div>
                 )}
                 {filteredSegments.map((segment) => {
@@ -2817,6 +2975,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                               <Waveform size={12} />{formatClock(segment.startMs)}–{formatClock(segment.endMs)}
                             </button>
                             {segment.source === "corrected" && <em>已校正</em>}
+                            {segment.source === "overlap-separated" && <em className="overlap-separated-badge">会后拆解</em>}
                             {speaker?.autoMatched && <em className="speaker-auto-match">声纹匹配</em>}
                             {speaker?.suggestedName && !speaker.autoMatched && !speaker.manuallyNamed && (
                               <button
@@ -3416,6 +3575,54 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
           <ArrowUp size={16} weight="bold" />
           <span>回到顶部</span>
         </button>
+      )}
+      {audioEditorOpen && meeting && (
+        <div
+          className="dialog-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.currentTarget === event.target && !audioClipSaving) setAudioEditorOpen(false);
+          }}
+        >
+          <form
+            className="audio-editor-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="audio-editor-title"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveAudioClip();
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && !audioClipSaving) setAudioEditorOpen(false);
+            }}
+          >
+            <header>
+              <div><span><Scissors size={21} weight="duotone" /></span><div><h2 id="audio-editor-title">剪辑会议音频</h2><p>选择发言人与时间范围，另存为新音频；原始录音始终保留。</p></div></div>
+              <button type="button" onClick={() => setAudioEditorOpen(false)} disabled={audioClipSaving} aria-label="关闭音频剪辑"><X size={17} /></button>
+            </header>
+            <label className="audio-clip-name"><span>剪辑名称</span><input autoFocus maxLength={80} value={audioClipName} disabled={audioClipSaving} onChange={(event) => setAudioClipName(event.target.value)} /></label>
+            <section className="audio-speaker-picker">
+              <div><span><b>保留哪些发言人</b><small>只选择部分人员时，会按时间顺序拼接他们的发言片段</small></span><button type="button" onClick={() => setAudioClipSpeakerIds(new Set(meeting.speakers.map((speaker) => speaker.id)))}>全选</button></div>
+              <div>
+                {meeting.speakers.map((speaker) => (
+                  <label key={speaker.id} className={audioClipSpeakerIds.has(speaker.id) ? "selected" : ""}>
+                    <input type="checkbox" checked={audioClipSpeakerIds.has(speaker.id)} onChange={() => toggleAudioClipSpeaker(speaker.id)} />
+                    <i className={`avatar ${speaker.color}`}>{speaker.displayName.slice(0, 1)}</i>
+                    <span>{speaker.displayName}</span>
+                  </label>
+                ))}
+              </div>
+            </section>
+            <section className="audio-time-editor">
+              <div><b>剪辑时间</b><span>{formatClock(audioClipStartMs)} – {formatClock(audioClipEndMs)}</span></div>
+              <label><span>开始</span><input type="range" min={0} max={Math.max(0, meeting.durationMs - 250)} step={100} value={audioClipStartMs} onChange={(event) => setAudioClipStartMs(Math.min(Number(event.target.value), audioClipEndMs - 250))} /><input type="number" min={0} max={Math.max(0, audioClipEndMs / 1000 - 0.25)} step={0.1} value={(audioClipStartMs / 1000).toFixed(1)} onChange={(event) => setAudioClipStartMs(Math.max(0, Math.min(Number(event.target.value) * 1000, audioClipEndMs - 250)))} /><em>秒</em></label>
+              <label><span>结束</span><input type="range" min={0} max={meeting.durationMs} step={100} value={audioClipEndMs} onChange={(event) => setAudioClipEndMs(Math.max(Number(event.target.value), audioClipStartMs + 250))} /><input type="number" min={audioClipStartMs / 1000 + 0.25} max={meeting.durationMs / 1000} step={0.05} value={(audioClipEndMs / 1000).toFixed(1)} onChange={(event) => setAudioClipEndMs(Math.min(meeting.durationMs, Math.max(Number(event.target.value) * 1000, audioClipStartMs + 250)))} /><em>秒</em></label>
+              <audio controls preload="metadata" src={`${apiBase}/api/meetings/${encodeURIComponent(meeting.id)}/audio`}>当前系统不支持音频播放。</audio>
+            </section>
+            <footer><p><CheckCircle size={15} weight="fill" /> {meeting.speakers.length ? `已选 ${audioClipSpeakerIds.size} 位发言人` : "将保留所选时间内的全部声音"}，原始录音不会被覆盖。</p><div><button type="button" onClick={() => setAudioEditorOpen(false)} disabled={audioClipSaving}>取消</button><button className="primary" type="submit" disabled={audioClipSaving || !audioClipName.trim() || (meeting.speakers.length > 0 && !audioClipSpeakerIds.size) || audioClipEndMs <= audioClipStartMs}>{audioClipSaving ? "正在生成…" : "保存音频剪辑"}</button></div></footer>
+          </form>
+        </div>
       )}
       {storageDialogOpen && (
         <div

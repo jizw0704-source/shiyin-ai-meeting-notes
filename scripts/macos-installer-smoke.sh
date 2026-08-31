@@ -99,6 +99,7 @@ start_and_verify() {
     if (health.asrMode !== "local" || !health.localAsrAvailable) throw new Error("本地转写模型不可用");
     if (!health.punctuationModelAvailable) throw new Error("本地标点模型不可用");
     if (!health.speakerModelAvailable) throw new Error("发言人模型不可用");
+    if (!health.overlapSeparationModelAvailable) throw new Error("重叠语音拆解模型不可用");
     if (!health.appOrigin) throw new Error("缺少应用地址");
     process.stdout.write(health.appOrigin);
   ' "$health_file" >"$temporary_root/app-origin.txt"
@@ -140,6 +141,7 @@ node -e '
     localAsrAvailable: true,
     punctuationModelAvailable: true,
     speakerModelAvailable: true,
+    overlapSeparationModelAvailable: true,
     dataPreservedAcrossUpgrade: true,
     dataPreservedAfterAppRemoval: true,
   };

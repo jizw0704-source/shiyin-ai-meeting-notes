@@ -157,6 +157,11 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(page, /撤销上次替换/);
   assert.match(page, /重命名会议/);
   assert.match(page, /智能命名/);
+  assert.match(page, /剪辑会议音频/);
+  assert.match(page, /保留哪些发言人/);
+  assert.match(page, /原始录音始终保留/);
+  assert.match(page, /会后增强拆解 Beta/);
+  assert.match(page, /overlap-separated/);
   assert.match(page, /setSelectedId\(\(current\) => preferredId \|\| current \|\| null\)/);
   assert.doesNotMatch(page, /result\.meetings\[0\]\?\.id/);
   assert.match(page, /会议名称不能为空/);
@@ -181,6 +186,10 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(proxy, /speakerLimitMode: meeting\.speakerLimitMode/);
   assert.match(proxy, /会议名称不能为空/);
   assert.match(proxy, /applyAutomaticTitle/);
+  assert.match(proxy, /audio-clips/);
+  assert.match(proxy, /createEditedWav/);
+  assert.match(proxy, /runOverlapEnhancement/);
+  assert.match(proxy, /overlapSeparationModelAvailable/);
   assert.match(proxy, /\/api\/backups\/create/);
   assert.match(page, /summary\.preview/);
   assert.match(page, /\/api\/meetings\/\$\{encodeURIComponent\(meeting\.id\)\}\/audio/);

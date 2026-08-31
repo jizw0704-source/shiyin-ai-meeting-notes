@@ -8,9 +8,11 @@ import { HttpsProxyAgent } from "https-proxy-agent";
 import { WebSocket, WebSocketServer } from "ws";
 import { streamMeetingAudio } from "./audio-stream.mjs";
 import { AudioSession } from "./audio-session.mjs";
+import { createEditedWav } from "./audio-editing.mjs";
 import { correctMeetingSpeakers } from "./correction.mjs";
 import { transcribeHistoricalWav } from "./historical-transcription.mjs";
 import { LocalAsrEngine } from "./local-asr-engine.mjs";
+import { enhanceOverlappingSegments, OverlapSeparationEngine } from "./overlap-enhancement.mjs";
 import { SpeakerEngine } from "./speaker-engine.mjs";
 import { MeetingStorage } from "./storage.mjs";
 import {
@@ -47,6 +49,9 @@ const localAsrModelDir = path.resolve(process.env.SHIYIN_LOCAL_ASR_MODEL_DIR || 
 const punctuationModelPath = path.resolve(
   process.env.SHIYIN_PUNCTUATION_MODEL_PATH || path.join("models", "punctuation", "model.int8.onnx"),
 );
+const separationModelPath = path.resolve(
+  process.env.SHIYIN_SEPARATION_MODEL_PATH || path.join("models", "separation", "convtasnet_16k.onnx"),
+);
 const storage = new MeetingStorage(dataRoot);
 const speakerEngine = new SpeakerEngine({ modelPath, maxSpeakers: 6, threshold: 0.62 });
 const localAsrEngine = new LocalAsrEngine({
@@ -55,8 +60,13 @@ const localAsrEngine = new LocalAsrEngine({
   trailingSilenceMs: process.env.SHIYIN_LOCAL_ASR_SILENCE_MS,
   numThreads: process.env.SHIYIN_LOCAL_ASR_THREADS,
 });
+const overlapSeparationEngine = new OverlapSeparationEngine({
+  modelPath: separationModelPath,
+  numThreads: process.env.SHIYIN_SEPARATION_THREADS,
+});
 const activeSessions = new Map();
 const activeRetranscriptions = new Set();
+const activeOverlapEnhancements = new Set();
 const appVersion = process.env.SHIYIN_APP_VERSION || "0.3.0";
 const upstreamUrl = process.env.DASHSCOPE_WEBSOCKET_URL || (
   workspaceId
@@ -145,6 +155,13 @@ function attachmentDirectory(meetingId) {
   const root = path.resolve(dataRoot, "meetings", meetingId, "attachments");
   const meetingsRoot = path.resolve(dataRoot, "meetings") + path.sep;
   if (!root.startsWith(meetingsRoot)) throw new Error("无效会议资料目录");
+  return root;
+}
+
+function audioClipDirectory(meetingId) {
+  const root = path.resolve(dataRoot, "meetings", meetingId, "clips");
+  const meetingsRoot = path.resolve(dataRoot, "meetings");
+  if (!root.startsWith(`${meetingsRoot}${path.sep}`)) throw new Error("无效会议目录");
   return root;
 }
 
@@ -245,13 +262,62 @@ async function runSummaryAfterMeeting(meetingId, client = null) {
   return meeting;
 }
 
+async function runOverlapEnhancement(meetingId, client = null, options = {}) {
+  const meeting = storage.getMeeting(meetingId);
+  const overlapCount = meeting?.segments.filter((segment) => segment.overlapSuspected).length || 0;
+  if (!overlapCount) return { meeting, enhancedCount: 0, retainedCount: 0 };
+  if (!overlapSeparationEngine.available) {
+    if (options.automatic) return { meeting, enhancedCount: 0, retainedCount: overlapCount };
+    throw new Error("本地双人语音分离模型不可用");
+  }
+
+  const job = storage.createJob(meetingId, "overlap-enhancement");
+  activeOverlapEnhancements.add(meetingId);
+  storage.updateMeeting(meetingId, { status: "enhancing", error: null });
+  storage.updateJob(job.id, { status: "running", progress: 1 });
+  sendJson(client, { type: "job.progress", meetingId, job: storage.getJob(job.id) });
+  try {
+    const result = await enhanceOverlappingSegments({
+      meetingId,
+      dataRoot,
+      storage,
+      separationEngine: overlapSeparationEngine,
+      asrEngine: localAsrEngine,
+      speakerEngine,
+      onProgress(progress) {
+        storage.updateJob(job.id, { status: "running", progress });
+        sendJson(client, { type: "job.progress", meetingId, job: storage.getJob(job.id) });
+      },
+    });
+    storage.updateJob(job.id, { status: "completed", progress: 100 });
+    storage.updateMeeting(meetingId, { status: "completed", error: null });
+    const updatedMeeting = storage.getMeeting(meetingId);
+    sendJson(client, {
+      type: "overlap.enhanced",
+      meeting: updatedMeeting,
+      enhancedCount: result.enhancedCount,
+      retainedCount: result.retainedCount,
+    });
+    return { ...result, meeting: updatedMeeting };
+  } catch (error) {
+    storage.updateJob(job.id, { status: "failed", error: error.message });
+    storage.updateMeeting(meetingId, { status: "completed", error: `多人发言拆解未完成：${error.message}` });
+    if (!options.automatic) throw error;
+    sendJson(client, { type: "error", recoverable: true, message: `多人发言拆解未完成，已保留原记录：${error.message}` });
+    return { meeting: storage.getMeeting(meetingId), enhancedCount: 0, retainedCount: overlapCount };
+  } finally {
+    activeOverlapEnhancements.delete(meetingId);
+  }
+}
+
 function meetingIsBusy(meeting) {
-  return ["recording", "correcting", "summarizing", "retranscribing"].includes(meeting?.status);
+  return ["recording", "correcting", "summarizing", "retranscribing", "enhancing"].includes(meeting?.status);
 }
 
 function workspaceIsBusy() {
   return activeSessions.size > 0
     || activeRetranscriptions.size > 0
+    || activeOverlapEnhancements.size > 0
     || storage.listMeetings().some(meetingIsBusy);
 }
 
@@ -353,6 +419,7 @@ const httpServer = createServer(async (request, response) => {
         dashScopeConfigured: Boolean(apiKey),
         miniMaxConfigured: Boolean(miniMaxApiKey),
         speakerModelAvailable: speakerEngine.available,
+        overlapSeparationModelAvailable: overlapSeparationEngine.available,
         activeMeetings: activeSessions.size,
         liveSummaryStartMs,
         liveSummaryIntervalMs,
@@ -413,6 +480,71 @@ const httpServer = createServer(async (request, response) => {
       const meeting = storage.getMeeting(audioMatch[1]);
       if (!meeting) return jsonResponse(response, 404, { error: "会议不存在" });
       return streamMeetingAudio(request, response, { meeting, dataRoot, appOrigin });
+    }
+    const clipCollectionMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/audio-clips$/);
+    if (request.method === "POST" && clipCollectionMatch) {
+      const meetingId = clipCollectionMatch[1];
+      const meeting = storage.getMeeting(meetingId);
+      if (!meeting) return jsonResponse(response, 404, { error: "会议不存在" });
+      if (meetingIsBusy(meeting)) return jsonResponse(response, 409, { error: "会议仍在处理中，请稍后再剪辑" });
+      if (!meeting.audioPath || !existsSync(meeting.audioPath)) {
+        return jsonResponse(response, 404, { error: "这场会议没有可剪辑的原始录音" });
+      }
+      if (meeting.audioClips.length >= 30) return jsonResponse(response, 400, { error: "每场会议最多保存 30 个音频剪辑" });
+      const body = await readJson(request);
+      const speakerIds = [...new Set(Array.isArray(body.speakerIds) ? body.speakerIds.map(String) : [])];
+      const validSpeakerIds = new Set(meeting.speakers.map((speaker) => speaker.id));
+      if ((meeting.speakers.length > 0 && !speakerIds.length) || speakerIds.some((id) => !validSpeakerIds.has(id))) {
+        return jsonResponse(response, 400, { error: "请至少选择一位有效发言人" });
+      }
+      const startMs = Math.max(0, Math.round(Number(body.startMs) || 0));
+      const endMs = Math.min(meeting.durationMs, Math.round(Number(body.endMs) || meeting.durationMs));
+      if (endMs <= startMs) return jsonResponse(response, 400, { error: "结束时间必须晚于开始时间" });
+      const id = randomUUID();
+      const storedName = `${id}.wav`;
+      const outputPath = path.join(audioClipDirectory(meetingId), storedName);
+      try {
+        const result = await createEditedWav({
+          sourcePath: meeting.audioPath,
+          outputPath,
+          startMs,
+          endMs,
+          segments: meeting.segments,
+          speakerIds: speakerIds.length === meeting.speakers.length ? [] : speakerIds,
+        });
+        const clip = storage.addAudioClip(meetingId, {
+          id,
+          name: String(body.name || "会议音频剪辑").trim() || "会议音频剪辑",
+          storedName,
+          startMs,
+          endMs,
+          durationMs: result.durationMs,
+          sizeBytes: result.sizeBytes,
+          speakerIds,
+          sourceRanges: result.sourceRanges,
+        });
+        return jsonResponse(response, 201, { clip, meeting: storage.getMeeting(meetingId) });
+      } catch (error) {
+        rmSync(outputPath, { force: true });
+        throw error;
+      }
+    }
+    const clipAudioMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/audio-clips\/([^/]+)\/audio$/);
+    if ((request.method === "GET" || request.method === "HEAD") && clipAudioMatch) {
+      const [meetingId, clipId] = clipAudioMatch.slice(1);
+      const clip = storage.getAudioClip(clipId);
+      if (!clip || clip.meetingId !== meetingId) return jsonResponse(response, 404, { error: "音频剪辑不存在" });
+      const audioPath = path.join(audioClipDirectory(meetingId), clip.storedName);
+      return streamMeetingAudio(request, response, { meeting: { audioPath }, dataRoot, appOrigin });
+    }
+    const clipItemMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/audio-clips\/([^/]+)$/);
+    if (request.method === "DELETE" && clipItemMatch) {
+      const [meetingId, clipId] = clipItemMatch.slice(1);
+      const clip = storage.getAudioClip(clipId);
+      if (!clip || clip.meetingId !== meetingId) return jsonResponse(response, 404, { error: "音频剪辑不存在" });
+      storage.deleteAudioClip(clipId);
+      rmSync(path.join(audioClipDirectory(meetingId), clip.storedName), { force: true });
+      return jsonResponse(response, 200, { meeting: storage.getMeeting(meetingId) });
     }
     const attachmentCollectionMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/attachments$/);
     if (request.method === "POST" && attachmentCollectionMatch) {
@@ -593,7 +725,7 @@ const httpServer = createServer(async (request, response) => {
       if (meetingIsBusy(currentMeeting)) return jsonResponse(response, 409, { error: "会议仍在处理中，请稍后再切换版本" });
       return jsonResponse(response, 200, storage.restoreTranscriptVersion(versionRestoreMatch[1], versionRestoreMatch[2]));
     }
-    const actionMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/(correct|summarize|retranscribe)$/);
+    const actionMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/(correct|summarize|retranscribe|enhance-overlap)$/);
     if (request.method === "POST" && actionMatch) {
       const meetingId = actionMatch[1];
       const currentMeeting = storage.getMeeting(meetingId);
@@ -609,6 +741,8 @@ const httpServer = createServer(async (request, response) => {
       }
       if (actionMatch[2] === "retranscribe") {
         runHistoricalRetranscription(meetingId).catch(() => undefined);
+      } else if (actionMatch[2] === "enhance-overlap") {
+        runOverlapEnhancement(meetingId).catch(() => undefined);
       } else if (actionMatch[2] === "correct") {
         runCorrectionAndSummary(meetingId).catch(() => undefined);
       } else {
@@ -840,6 +974,7 @@ websocketServer.on("connection", (client, request) => {
         // A lightweight name match must never block saving or summarizing the meeting.
       }
       activeSessions.delete(meetingId);
+      await runOverlapEnhancement(meetingId, client, { automatic: true });
       await runSummaryAfterMeeting(meetingId, client);
     } catch (error) {
       activeSessions.delete(meetingId);
@@ -983,6 +1118,7 @@ httpServer.listen(port, bindHost, () => {
   console.log(`拾音后台已启动：http://127.0.0.1:${port}`);
   console.log(`实时转写：${asrMode === "local" ? "本地 Sherpa-ONNX" : asrMode === "dashscope" ? "百炼" : "不可用"}`);
   console.log(`本地声纹模型：${speakerEngine.available ? "可用" : "不可用"}`);
+  console.log(`双人语音分离模型：${overlapSeparationEngine.available ? "可用" : "不可用"}`);
   if (startupRecovery.recoveredRecordings || startupRecovery.interruptedTasks || startupRecovery.failedRecordings) {
     console.log(`异常恢复：找回 ${startupRecovery.recoveredRecordings} 段录音，中断 ${startupRecovery.interruptedTasks} 个任务`);
   }

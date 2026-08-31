@@ -65,6 +65,9 @@ const nodeEnvironment = () => ({
   SHIYIN_PUNCTUATION_MODEL_PATH: app.isPackaged
     ? path.join(process.resourcesPath, "models", "punctuation", "model.int8.onnx")
     : path.join(sourceRoot, "models", "punctuation", "model.int8.onnx"),
+  SHIYIN_SEPARATION_MODEL_PATH: app.isPackaged
+    ? path.join(process.resourcesPath, "models", "separation", "convtasnet_16k.onnx")
+    : path.join(sourceRoot, "models", "separation", "convtasnet_16k.onnx"),
 });
 const webHost = process.env.SHIYIN_WEB_HOST || "127.0.0.1";
 const preferredWebPort = Number(process.env.SHIYIN_WEB_PORT || 3000);
