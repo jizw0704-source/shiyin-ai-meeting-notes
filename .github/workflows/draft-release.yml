@@ -41,6 +41,11 @@ jobs:
             echo "Requested version $REQUESTED_VERSION does not match package.json $package_version" >&2
             exit 1
           fi
+          history_version="$(node -p "require('./public/version-history.json')[0].version")"
+          if [[ "$REQUESTED_VERSION" != "$history_version" ]]; then
+            echo "Requested version $REQUESTED_VERSION does not match the latest version history entry $history_version" >&2
+            exit 1
+          fi
           if gh release view "v$REQUESTED_VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release v$REQUESTED_VERSION already exists" >&2
             exit 1
@@ -61,6 +66,9 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       REQUESTED_VERSION: ${{ inputs.version }}
     steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
       - name: Download verified Windows packages
         uses: actions/download-artifact@v6
         with:
@@ -73,6 +81,26 @@ jobs:
           name: shiyin-ai-macos-arm64-${{ github.sha }}
           path: release-assets/macos
 
+      - name: Prepare user-facing release notes
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const history = require("./public/version-history.json");
+          const entry = history.find((item) => item.version === process.env.REQUESTED_VERSION);
+          if (!entry) throw new Error(`Missing version history for ${process.env.REQUESTED_VERSION}`);
+          const lines = [
+            "## 本次更新",
+            "",
+            entry.summary,
+            "",
+            ...entry.changes.map((change) => `- ${change}`),
+            "",
+            "会议记录、录音、声纹库和本机配置会继续保留。",
+          ];
+          fs.writeFileSync(path.join(process.env.RUNNER_TEMP, "release-notes.md"), `${lines.join("\n")}\n`);
+          NODE
+
       - name: Create unpublished prerelease draft
         run: |
           mapfile -d '' release_files < <(find release-assets -type f -print0)
@@ -84,6 +112,6 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "拾音 AI v$REQUESTED_VERSION（内部测试）" \
-            --generate-notes \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
             --draft \
             --prerelease

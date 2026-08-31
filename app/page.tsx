@@ -35,6 +35,7 @@ import {
   WarningCircle,
   X,
 } from "@phosphor-icons/react";
+import versionHistoryData from "../public/version-history.json";
 
 type View = "transcript" | "summary" | "actions";
 type MeetingStatus = "recording" | "importing" | "correcting" | "summarizing" | "retranscribing" | "enhancing" | "completed" | "failed";
@@ -69,12 +70,20 @@ type ApplicationUpdateState = {
   status: ApplicationUpdateStatus;
   currentVersion: string;
   availableVersion: string | null;
+  releaseName: string | null;
+  releaseNotes: string[];
   percent: number | null;
   message: string;
   supported: boolean;
   canCheck: boolean;
   canDownload: boolean;
   canInstall: boolean;
+};
+type VersionHistoryItem = {
+  version: string;
+  date: string;
+  summary: string;
+  changes: string[];
 };
 type MiniMaxSettings = {
   configured: boolean;
@@ -329,6 +338,8 @@ declare global {
 
 const websocketBase = process.env.NEXT_PUBLIC_ASR_PROXY_URL || "ws://127.0.0.1:8788";
 const apiBase = process.env.NEXT_PUBLIC_API_URL || websocketBase.replace(/^ws/, "http");
+const versionHistory = versionHistoryData as VersionHistoryItem[];
+const CURRENT_APP_VERSION = versionHistory[0]?.version || "0.6.5";
 const DEFAULT_SUMMARY_TEMPLATE: SummaryTemplateId = "meeting-minutes";
 const DEFAULT_REPORT_STYLE: ReportStyle = "detailed";
 const DEFAULT_SPEAKER_LIMIT: SpeakerLimit = 6;
@@ -2477,6 +2488,9 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
     setExportMenuOpen(false);
   }
 
+  const displayedAppVersion = applicationUpdate?.currentVersion || CURRENT_APP_VERSION;
+  const currentVersionInfo = versionHistory.find((item) => item.version === displayedAppVersion) || versionHistory[0];
+  const availableReleaseNotes = applicationUpdate?.releaseNotes || [];
   const isMacDesktop = audioCaptureCapabilities?.platform === "darwin";
   const isWindowsDesktop = audioCaptureCapabilities?.platform === "win32";
   const macScreenPermission = audioCaptureCapabilities?.screenPermission || "unknown";
@@ -2511,7 +2525,10 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             <i />
             <span>会议听记工作台</span>
           </div>
-          <div className="window-chrome-state"><i /> 本地运行</div>
+          <div className="window-chrome-meta">
+            <span className="window-version">v{displayedAppVersion}</span>
+            <div className="window-chrome-state"><i /> 本地运行</div>
+          </div>
         </div>
       </header>
       <input
@@ -2788,7 +2805,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
           )}
           <button className={`settings-button ${settingsPageOpen ? "active" : ""} ${miniMaxSettings?.configured ? "" : "needs-attention"}`} disabled={recording || processing} onClick={() => void openSettingsDialog("general")}>
             <GearSix size={17} weight="duotone" />
-            <span><b>设置</b><small>{miniMaxSettings?.configured ? "偏好、AI 与数据" : "需要配置 MiniMax"}</small></span>
+            <span><b>设置</b><small>{miniMaxSettings?.configured ? `v${displayedAppVersion} · 偏好、AI 与数据` : `v${displayedAppVersion} · 需要配置 MiniMax`}</small></span>
           </button>
           <div className="profile"><span>本</span><p><b>本机工作区</b><small>{speakerLimitMode === "auto" ? "新会议自动检测发言人" : `新会议最多 ${speakerLimit} 人`}</small></p></div>
         </div>
@@ -2897,7 +2914,36 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                 {settingsSection === "updates" && (
                   <section className="settings-panel" aria-labelledby="settings-updates-title">
                     <header><span><ArrowClockwise size={20} weight="duotone" /></span><div><h2 id="settings-updates-title">更新与快捷键</h2><p>检查新版本并确认桌面全局快捷键是否可用。</p></div></header>
-                    <div className="settings-update-card"><div><span><ArrowClockwise size={20} weight="duotone" /></span><p><b>拾音 AI {applicationUpdate?.currentVersion ? `v${applicationUpdate.currentVersion}` : ""}</b><small>{applicationUpdate?.message || "安装版会自动检查正式更新。"}</small></p></div>{applicationUpdate?.supported && <button disabled={!applicationUpdate.canCheck && !applicationUpdate.canDownload && !applicationUpdate.canInstall} onClick={() => void handleApplicationUpdate()}>{applicationUpdate.canInstall ? "重启并安装" : applicationUpdate.canDownload ? "下载更新" : "检查更新"}</button>}</div>
+                    <div className="settings-update-card">
+                      <div><span><ArrowClockwise size={20} weight="duotone" /></span><p><b>拾音 AI v{displayedAppVersion}</b><small>{applicationUpdate?.message || "安装版会自动检查正式更新。"}</small></p></div>
+                      {applicationUpdate?.supported && <button disabled={!applicationUpdate.canCheck && !applicationUpdate.canDownload && !applicationUpdate.canInstall} onClick={() => void handleApplicationUpdate()}>{applicationUpdate.canInstall ? "重启并安装" : applicationUpdate.canDownload ? "下载更新" : "检查更新"}</button>}
+                    </div>
+                    {currentVersionInfo && (
+                      <article className="settings-current-release">
+                        <div><span>当前版本</span><time>{currentVersionInfo.date}</time></div>
+                        <h3>v{currentVersionInfo.version} · {currentVersionInfo.summary}</h3>
+                        <ul>{currentVersionInfo.changes.map((change) => <li key={change}>{change}</li>)}</ul>
+                      </article>
+                    )}
+                    {applicationUpdate?.availableVersion && (
+                      <article className="settings-available-release">
+                        <div><span>可用更新</span><b>v{applicationUpdate.availableVersion}</b></div>
+                        <h3>{applicationUpdate.releaseName || `拾音 AI v${applicationUpdate.availableVersion}`}</h3>
+                        {availableReleaseNotes.length
+                          ? <ul>{availableReleaseNotes.map((note, index) => <li key={`${index}-${note}`}>{note}</li>)}</ul>
+                          : <p>这个版本尚未提供更新说明，建议发布前补充 GitHub Release 内容。</p>}
+                      </article>
+                    )}
+                    <details className="settings-version-history">
+                      <summary>查看全部版本记录 <span>{versionHistory.length} 个版本</span></summary>
+                      <div>{versionHistory.map((item) => (
+                        <article key={item.version} className={item.version === displayedAppVersion ? "current" : ""}>
+                          <div><b>v{item.version}</b><time>{item.date}</time></div>
+                          <p>{item.summary}</p>
+                          <ul>{item.changes.map((change) => <li key={change}>{change}</li>)}</ul>
+                        </article>
+                      ))}</div>
+                    </details>
                     <div className="settings-shortcut-grid"><article><kbd>{globalShortcutStatus?.openLabel || "⌃⌥M"}</kbd><span><b>打开应用</b><small>{globalShortcutStatus?.openWindow === false ? "快捷键被其他应用占用" : "全局可用"}</small></span></article><article><kbd>{globalShortcutStatus?.recordingLabel || "⌃⌥R"}</kbd><span><b>开始 / 结束会议</b><small>{globalShortcutStatus?.toggleRecording === false ? "快捷键被其他应用占用" : "全局可用"}</small></span></article></div>
                     <div className="settings-info-note neutral"><CheckCircle size={17} weight="duotone" /><p><b>更新不会删除会议记录</b><span>应用程序和会议数据分开保存，覆盖安装或自动更新都会保留本机历史会议。</span></p></div>
                   </section>

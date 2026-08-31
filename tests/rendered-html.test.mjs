@@ -35,6 +35,7 @@ test("server-renders the meeting transcription product", async () => {
   assert.match(html, /本地实时转写/);
   assert.match(html, /录音来源/);
   assert.match(html, /电脑声音 \+ 麦克风/);
+  assert.match(html, /v0\.6\.5/);
   assert.match(html, /<span><b>设置<\/b>/);
   assert.match(html, /管理录音与空间/);
   assert.match(html, /发言人数识别/);
@@ -71,7 +72,7 @@ test("normalizes vinext static asset cache keys on Windows", () => {
 });
 
 test("supports local transcription and keeps cloud keys behind the realtime proxy", async () => {
-  const [proxy, localAsr, page, worklet, envExample, desktopMain, preload, packageJson] = await Promise.all([
+  const [proxy, localAsr, page, worklet, envExample, desktopMain, preload, packageJson, versionHistoryJson] = await Promise.all([
     readFile(new URL("../server/realtime-proxy.mjs", import.meta.url), "utf8"),
     readFile(new URL("../server/local-asr-engine.mjs", import.meta.url), "utf8"),
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
@@ -80,7 +81,12 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
     readFile(new URL("../desktop/main.mjs", import.meta.url), "utf8"),
     readFile(new URL("../desktop/preload.cjs", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
+    readFile(new URL("../public/version-history.json", import.meta.url), "utf8"),
   ]);
+  const packageInfo = JSON.parse(packageJson);
+  const versionHistory = JSON.parse(versionHistoryJson);
+  assert.equal(versionHistory[0].version, packageInfo.version);
+  assert.equal(new Set(versionHistory.map((item) => item.version)).size, versionHistory.length);
   assert.match(proxy, /process\.env\.DASHSCOPE_API_KEY/);
   assert.match(proxy, /SHIYIN_ASR_MODE/);
   assert.match(proxy, /localAsrAvailable/);
@@ -139,6 +145,8 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(page, /checkForApplicationUpdates/);
   assert.match(page, /下载新版本/);
   assert.match(page, /重启并更新/);
+  assert.match(page, /查看全部版本记录/);
+  assert.match(page, /availableReleaseNotes/);
   assert.match(page, /shiyin\.obsidianAutoSave/);
   assert.match(page, /开始 \/ 结束/);
   assert.match(page, /getGlobalShortcutStatus/);
@@ -215,6 +223,8 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(desktopMain, /shell\.openExternal/);
   assert.match(desktopMain, /application:relaunch/);
   assert.match(desktopMain, /electron-updater/);
+  assert.match(desktopMain, /normalizeReleaseNotes/);
+  assert.match(desktopMain, /releaseDetails\(info\)/);
   assert.match(desktopMain, /application-update:check/);
   assert.match(desktopMain, /autoDownload = false/);
   assert.match(desktopMain, /quitAndInstall/);

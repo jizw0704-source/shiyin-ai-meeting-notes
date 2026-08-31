@@ -41,6 +41,15 @@ const sourceRoot = path.resolve(directory, "..");
 const productionMode = app.isPackaged || process.argv.includes("--production");
 const appRoot = app.isPackaged ? app.getAppPath() : sourceRoot;
 const runtimeRoot = app.isPackaged ? app.getPath("userData") : sourceRoot;
+const applicationVersion = app.isPackaged
+  ? app.getVersion()
+  : (() => {
+      try {
+        return JSON.parse(fs.readFileSync(path.join(sourceRoot, "package.json"), "utf8")).version || app.getVersion();
+      } catch {
+        return app.getVersion();
+      }
+    })();
 const packagedWebRoot = app.isPackaged
   ? path.join(process.resourcesPath, "app.asar.unpacked")
   : runtimeRoot;
@@ -64,7 +73,7 @@ function resolveFfmpegPath() {
 const nodeEnvironment = () => ({
   ...process.env,
   ELECTRON_RUN_AS_NODE: "1",
-  SHIYIN_APP_VERSION: app.getVersion(),
+  SHIYIN_APP_VERSION: applicationVersion,
   SHIYIN_DATA_ROOT: app.isPackaged ? path.join(runtimeRoot, "data") : path.join(sourceRoot, "data"),
   SHIYIN_MODEL_PATH: app.isPackaged
     ? path.join(process.resourcesPath, "models", "speaker", "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx")
@@ -106,8 +115,10 @@ let updateStartupTimer = null;
 let updateIntervalTimer = null;
 let applicationUpdateState = {
   status: app.isPackaged ? "idle" : "unavailable",
-  currentVersion: app.getVersion(),
+  currentVersion: applicationVersion,
   availableVersion: null,
+  releaseName: null,
+  releaseNotes: [],
   percent: null,
   message: app.isPackaged ? "准备检查新版本" : "开发模式不检查更新",
 };
@@ -421,7 +432,7 @@ function showAbout() {
     title: "关于拾音 AI",
     message: "拾音 AI",
     detail: [
-      `版本 ${app.getVersion()}`,
+      `版本 ${applicationVersion}`,
       "本地实时转写 · 本地发言人识别 · MiniMax 智能总结",
       "",
       "会议录音、逐字稿和声纹数据默认保存在本机。",
@@ -470,6 +481,28 @@ function friendlyUpdateError(error) {
   return "检查更新失败，请稍后重试";
 }
 
+function normalizeReleaseNotes(value) {
+  const values = Array.isArray(value) ? value : [value];
+  return values.flatMap((item) => {
+    const content = typeof item === "string"
+      ? item
+      : String(item?.note || item?.releaseNotes || "");
+    return content
+      .replace(/<[^>]+>/g, " ")
+      .split(/\r?\n/)
+      .map((line) => line.replace(/^\s*(?:[-*+]\s+|#{1,6}\s*)/, "").trim())
+      .filter(Boolean);
+  }).slice(0, 12);
+}
+
+function releaseDetails(info) {
+  return {
+    availableVersion: info?.version || null,
+    releaseName: String(info?.releaseName || "").trim() || null,
+    releaseNotes: normalizeReleaseNotes(info?.releaseNotes),
+  };
+}
+
 async function checkForApplicationUpdates() {
   if (!updaterSupported() || !applicationUpdater) {
     return broadcastApplicationUpdateState({
@@ -501,12 +534,12 @@ async function initializeApplicationUpdater() {
     applicationUpdater.allowPrerelease = false;
 
     applicationUpdater.on("checking-for-update", () => {
-      broadcastApplicationUpdateState({ status: "checking", percent: null, message: "正在检查新版本…" });
+      broadcastApplicationUpdateState({ status: "checking", availableVersion: null, releaseName: null, releaseNotes: [], percent: null, message: "正在检查新版本…" });
     });
     applicationUpdater.on("update-available", (info) => {
       broadcastApplicationUpdateState({
         status: "available",
-        availableVersion: info.version,
+        ...releaseDetails(info),
         percent: null,
         message: `发现新版本 ${info.version}`,
       });
@@ -515,8 +548,10 @@ async function initializeApplicationUpdater() {
       broadcastApplicationUpdateState({
         status: "not-available",
         availableVersion: null,
+        releaseName: null,
+        releaseNotes: [],
         percent: null,
-        message: `当前已是最新版 ${app.getVersion()}`,
+        message: `当前已是最新版 ${applicationVersion}`,
       });
     });
     applicationUpdater.on("download-progress", (progress) => {
@@ -530,7 +565,7 @@ async function initializeApplicationUpdater() {
     applicationUpdater.on("update-downloaded", (info) => {
       broadcastApplicationUpdateState({
         status: "downloaded",
-        availableVersion: info.version,
+        ...releaseDetails(info),
         percent: 100,
         message: `版本 ${info.version} 已下载，点击重启安装`,
       });

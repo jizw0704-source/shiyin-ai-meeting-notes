@@ -22,13 +22,30 @@
 ## 创建内部草稿版本
 
 1. 确认 `package.json` 与 `package-lock.json` 使用同一个新版本号。
-2. 确认变更已经通过本地检查，且确实希望启动双平台构建。
-3. 在 GitHub Actions 中手动运行 `Create internal draft release`。
-4. `version` 填写与 `package.json` 完全一致的版本，例如 `0.5.1`。
-5. `confirm` 必须填写 `CREATE_DRAFT`。
-6. 工作流重新构建并验证两个平台，全部成功后创建 `v<版本号>` 的 Draft + Prerelease。
+2. 在 `public/version-history.json` 和 `CHANGELOG.md` 中增加同版本的简要介绍。
+3. 确认变更已经通过本地检查，且确实希望启动双平台构建。
+4. 在 GitHub Actions 中手动运行 `Create internal draft release`。
+5. `version` 填写与 `package.json` 完全一致的版本，例如 `0.6.5`。
+6. `confirm` 必须填写 `CREATE_DRAFT`。
+7. 工作流重新构建并验证两个平台，全部成功后创建 `v<版本号>` 的 Draft + Prerelease。
 
 该流程不会自动公开版本。发布前必须人工检查 Release 中的文件、SHA-256、冒烟结果与更新说明。
+
+## 更新说明格式
+
+GitHub Release 正文会直接显示在应用的更新页面中，建议保持简短并使用下面的结构：
+
+```markdown
+## 本次更新
+
+- 新增：一句话说明最重要的新功能。
+- 优化：一句话说明体验变化。
+- 修复：一句话说明关键问题。
+
+会议记录和本机配置会继续保留。
+```
+
+发布说明应描述用户能够感知的变化，不写内部提交号、构建过程或尚未完成的规划。
 
 ## 正式发布前检查
 
