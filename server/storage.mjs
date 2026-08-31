@@ -67,6 +67,8 @@ export class MeetingStorage {
         max_speakers INTEGER NOT NULL DEFAULT 6,
         speaker_limit_mode TEXT NOT NULL DEFAULT 'manual',
         title_source TEXT NOT NULL DEFAULT 'default',
+        source_type TEXT NOT NULL DEFAULT 'recorded',
+        source_name TEXT,
         deleted_at TEXT
       );
       CREATE TABLE IF NOT EXISTS speakers (
@@ -213,6 +215,12 @@ export class MeetingStorage {
         WHERE title = '未命名会议' OR title GLOB '会议 ??/?? ??:??'
       `);
     }
+    if (!meetingColumns.has("source_type")) {
+      this.db.exec("ALTER TABLE meetings ADD COLUMN source_type TEXT NOT NULL DEFAULT 'recorded'");
+    }
+    if (!meetingColumns.has("source_name")) {
+      this.db.exec("ALTER TABLE meetings ADD COLUMN source_name TEXT");
+    }
     const segmentColumns = new Set(
       this.db.prepare("PRAGMA table_info(segments)").all().map((column) => column.name),
     );
@@ -263,9 +271,22 @@ export class MeetingStorage {
     this.db.prepare(`
       INSERT INTO meetings
       (id, title, status, created_at, started_at, summary_template, template_version, report_style,
-       max_speakers, speaker_limit_mode, title_source)
-      VALUES (?, ?, 'recording', ?, ?, ?, ?, ?, ?, ?, 'default')
-    `).run(id, title, now, now, summaryTemplate, templateVersion, reportStyle, maxSpeakers, speakerLimitMode);
+       max_speakers, speaker_limit_mode, title_source, source_type, source_name)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'default', ?, ?)
+    `).run(
+      id,
+      title,
+      options.status || "recording",
+      now,
+      now,
+      summaryTemplate,
+      templateVersion,
+      reportStyle,
+      maxSpeakers,
+      speakerLimitMode,
+      options.sourceType === "imported" ? "imported" : "recorded",
+      options.sourceName ? String(options.sourceName).slice(0, 240) : null,
+    );
     return this.getMeeting(id);
   }
 
@@ -308,6 +329,8 @@ export class MeetingStorage {
       maxSpeakers: normalizeMaxSpeakers(meeting.max_speakers),
       speakerLimitMode: normalizeSpeakerLimitMode(meeting.speaker_limit_mode, "manual"),
       titleSource: ["default", "automatic", "manual"].includes(meeting.title_source) ? meeting.title_source : "manual",
+      sourceType: meeting.source_type === "imported" ? "imported" : "recorded",
+      sourceName: meeting.source_name || null,
       deletedAt: meeting.deleted_at || null,
     };
     if (!includeDetails) return value;
@@ -450,6 +473,8 @@ export class MeetingStorage {
       maxSpeakers: "max_speakers",
       speakerLimitMode: "speaker_limit_mode",
       titleSource: "title_source",
+      sourceType: "source_type",
+      sourceName: "source_name",
     };
     const normalizedPatch = {
       ...patch,
@@ -1230,8 +1255,8 @@ export class MeetingStorage {
         (id, title, status, created_at, started_at, ended_at, duration_ms, audio_path,
          summary_json, live_summary_json, error, summary_template, template_version,
          report_style, filler_filter_enabled, summary_stale, active_transcript_version_id, max_speakers,
-         speaker_limit_mode, title_source, deleted_at)
-        VALUES (?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         speaker_limit_mode, title_source, source_type, source_name, deleted_at)
+        VALUES (?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         meetingId,
         String(snapshot.title || "已恢复会议").slice(0, 80),
@@ -1251,6 +1276,8 @@ export class MeetingStorage {
         normalizeMaxSpeakers(snapshot.maxSpeakers),
         normalizeSpeakerLimitMode(snapshot.speakerLimitMode, "manual"),
         ["default", "automatic", "manual"].includes(snapshot.titleSource) ? snapshot.titleSource : "manual",
+        snapshot.sourceType === "imported" ? "imported" : "recorded",
+        snapshot.sourceName ? String(snapshot.sourceName).slice(0, 240) : null,
         snapshot.deletedAt || null,
       );
       for (const speaker of snapshot.speakers || []) {

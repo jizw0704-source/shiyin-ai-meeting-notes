@@ -29,6 +29,8 @@ test("server-renders the meeting transcription product", async () => {
   assert.match(html, /界面外观/);
   assert.match(html, /跟随系统|系统/);
   assert.match(html, /开始会议/);
+  assert.match(html, /导入已有会议录音/);
+  assert.match(html, /原文件不变/);
   assert.match(html, /本地听记已准备就绪/);
   assert.match(html, /本地实时转写/);
   assert.match(html, /录音来源/);
@@ -182,6 +184,8 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(proxy, /\/api\/storage\/cleanup/);
   assert.match(proxy, /recoverInterruptedMeetings/);
   assert.match(proxy, /runHistoricalRetranscription/);
+  assert.match(proxy, /runAudioImport/);
+  assert.match(proxy, /\/api\/audio-imports/);
   assert.match(proxy, /maxSpeakers: meeting\.maxSpeakers/);
   assert.match(proxy, /speakerLimitMode: meeting\.speakerLimitMode/);
   assert.match(proxy, /会议名称不能为空/);
@@ -199,6 +203,8 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(worklet, /mixed \/ channels\.length/);
   assert.match(desktopMain, /setDisplayMediaRequestHandler/);
   assert.match(desktopMain, /audio: "loopback"/);
+  assert.match(desktopMain, /audio-import:select/);
+  assert.match(preload, /importDroppedAudio/);
   assert.match(desktopMain, /useSystemPicker: process\.platform === "darwin"/);
   assert.match(desktopMain, /nativeSystemAudioPicker/);
   assert.match(desktopMain, /macOSMajorVersion\(\) >= 15/);

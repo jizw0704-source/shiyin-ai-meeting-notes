@@ -2,7 +2,7 @@ import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { AudioSession } from "./audio-session.mjs";
 
-const INTERRUPTED_STATUSES = new Set(["recording", "correcting", "summarizing", "retranscribing", "enhancing"]);
+const INTERRUPTED_STATUSES = new Set(["recording", "importing", "correcting", "summarizing", "retranscribing", "enhancing"]);
 
 function validWav(filePath) {
   if (!existsSync(filePath)) return false;
@@ -113,8 +113,9 @@ export function getStorageStats({ storage, dataRoot }) {
   return {
     totalBytes: files.reduce((total, file) => total + file.size, 0),
     recordingsBytes: files.filter((file) => file.name === "audio.wav").reduce((total, file) => total + file.size, 0),
-    temporaryBytes: files.filter((file) => file.name === "audio.pcm.tmp").reduce((total, file) => total + file.size, 0),
-    temporaryFiles: files.filter((file) => file.name === "audio.pcm.tmp").length,
+    temporaryBytes: files.filter((file) => file.name === "audio.pcm.tmp" || file.name.endsWith(".importing"))
+      .reduce((total, file) => total + file.size, 0),
+    temporaryFiles: files.filter((file) => file.name === "audio.pcm.tmp" || file.name.endsWith(".importing")).length,
     databaseBytes: files.filter((file) => file.name.startsWith("shiyin.sqlite")).reduce((total, file) => total + file.size, 0),
     meetingCount: meetings.length,
     interruptedCount: meetings.filter((meeting) => INTERRUPTED_STATUSES.has(meeting.status)).length,
@@ -130,10 +131,17 @@ export function cleanupTemporaryAudio({ storage, dataRoot, activeMeetingIds = ne
     const directory = path.join(dataRoot, "meetings", meeting.id);
     const pcmPath = path.join(directory, "audio.pcm.tmp");
     const wavPath = path.join(directory, "audio.wav");
-    if (!existsSync(pcmPath) || !validWav(wavPath)) continue;
-    bytesFreed += statSync(pcmPath).size;
-    rmSync(pcmPath, { force: true });
-    filesRemoved += 1;
+    const importingPath = `${wavPath}.importing`;
+    if (existsSync(pcmPath) && validWav(wavPath)) {
+      bytesFreed += statSync(pcmPath).size;
+      rmSync(pcmPath, { force: true });
+      filesRemoved += 1;
+    }
+    if (existsSync(importingPath)) {
+      bytesFreed += statSync(importingPath).size;
+      rmSync(importingPath, { force: true });
+      filesRemoved += 1;
+    }
   }
   return {
     filesRemoved,

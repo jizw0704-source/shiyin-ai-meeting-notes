@@ -7,6 +7,7 @@ import test from "node:test";
 import { saveObsidianMeeting } from "../desktop/obsidian-export.mjs";
 import { parseByteRange } from "../server/audio-stream.mjs";
 import { AudioSession } from "../server/audio-session.mjs";
+import { importedMeetingTitle, normalizeImportedAudio, validateImportedMedia } from "../server/audio-import.mjs";
 import { buildClipRanges, createEditedWav } from "../server/audio-editing.mjs";
 import { correctMeetingSpeakers, splitLongSegment } from "../server/correction.mjs";
 import { inspectPcmWav, transcribeHistoricalWav } from "../server/historical-transcription.mjs";
@@ -54,6 +55,42 @@ test("selects another local port when the preferred desktop port is occupied", a
     assert.notEqual(selected, address.port);
   } finally {
     await new Promise((resolve) => blocker.close(resolve));
+  }
+});
+
+test("imports a compatible WAV without modifying the selected source file", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-audio-import-"));
+  try {
+    const sourceSession = new AudioSession(root, "source-meeting");
+    sourceSession.append(Buffer.alloc(64000, 9));
+    const sourcePath = await sourceSession.finalize();
+    const sourceBefore = readFileSync(sourcePath);
+    const destinationPath = path.join(root, "meetings", "imported-meeting", "audio.wav");
+    const progress = [];
+    const imported = await normalizeImportedAudio({
+      sourcePath,
+      destinationPath,
+      onProgress(value) { progress.push(value); },
+    });
+    assert.equal(imported.durationMs, 2000);
+    assert.equal(inspectPcmWav(destinationPath).durationMs, 2000);
+    assert.deepEqual(readFileSync(sourcePath), sourceBefore);
+    assert.deepEqual(progress, [1, 100]);
+    assert.equal(importedMeetingTitle("项目周会 2026-08-31.m4a"), "项目周会 2026-08-31");
+    assert.throws(() => validateImportedMedia(path.join(root, "missing.mp3")), /没有找到/);
+
+    const storage = new MeetingStorage(path.join(root, "database"));
+    const meeting = storage.createMeeting("项目周会", {
+      status: "importing",
+      sourceType: "imported",
+      sourceName: "项目周会.m4a",
+    });
+    assert.equal(meeting.status, "importing");
+    assert.equal(meeting.sourceType, "imported");
+    assert.equal(meeting.sourceName, "项目周会.m4a");
+    storage.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 window.addEventListener("DOMContentLoaded", () => {
   document.documentElement.classList.add("desktop-app", `platform-${process.platform}`);
@@ -8,6 +8,14 @@ window.addEventListener("DOMContentLoaded", () => {
 contextBridge.exposeInMainWorld("shiyinDesktop", {
   getAudioCaptureCapabilities() {
     return ipcRenderer.invoke("audio-capture-capabilities");
+  },
+  selectAudioImport(options) {
+    return ipcRenderer.invoke("audio-import:select", options);
+  },
+  importDroppedAudio(file, options) {
+    const sourcePath = webUtils.getPathForFile(file);
+    if (!sourcePath) return Promise.reject(new Error("无法读取拖入的文件"));
+    return ipcRenderer.invoke("audio-import:path", sourcePath, options);
   },
   getGlobalShortcutStatus() {
     return ipcRenderer.invoke("global-shortcuts:get");

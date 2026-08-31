@@ -7,6 +7,7 @@ import process from "node:process";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { WebSocket, WebSocketServer } from "ws";
 import { streamMeetingAudio } from "./audio-stream.mjs";
+import { importedMeetingTitle, normalizeImportedAudio, validateImportedMedia } from "./audio-import.mjs";
 import { AudioSession } from "./audio-session.mjs";
 import { createEditedWav } from "./audio-editing.mjs";
 import { correctMeetingSpeakers } from "./correction.mjs";
@@ -52,6 +53,7 @@ const punctuationModelPath = path.resolve(
 const separationModelPath = path.resolve(
   process.env.SHIYIN_SEPARATION_MODEL_PATH || path.join("models", "separation", "convtasnet_16k.onnx"),
 );
+const ffmpegPath = String(process.env.SHIYIN_FFMPEG_PATH || "").trim();
 const storage = new MeetingStorage(dataRoot);
 const speakerEngine = new SpeakerEngine({ modelPath, maxSpeakers: 6, threshold: 0.62 });
 const localAsrEngine = new LocalAsrEngine({
@@ -67,6 +69,7 @@ const overlapSeparationEngine = new OverlapSeparationEngine({
 const activeSessions = new Map();
 const activeRetranscriptions = new Set();
 const activeOverlapEnhancements = new Set();
+const activeAudioImports = new Set();
 const appVersion = process.env.SHIYIN_APP_VERSION || "0.3.0";
 const upstreamUrl = process.env.DASHSCOPE_WEBSOCKET_URL || (
   workspaceId
@@ -311,14 +314,86 @@ async function runOverlapEnhancement(meetingId, client = null, options = {}) {
 }
 
 function meetingIsBusy(meeting) {
-  return ["recording", "correcting", "summarizing", "retranscribing", "enhancing"].includes(meeting?.status);
+  return ["recording", "importing", "correcting", "summarizing", "retranscribing", "enhancing"].includes(meeting?.status);
 }
 
 function workspaceIsBusy() {
   return activeSessions.size > 0
     || activeRetranscriptions.size > 0
     || activeOverlapEnhancements.size > 0
+    || activeAudioImports.size > 0
     || storage.listMeetings().some(meetingIsBusy);
+}
+
+async function runAudioImport(meetingId, sourcePath) {
+  const job = storage.createJob(meetingId, "audio-import");
+  const audioPath = path.join(dataRoot, "meetings", meetingId, "audio.wav");
+  activeAudioImports.add(meetingId);
+  storage.updateMeeting(meetingId, { status: "importing", error: null });
+  storage.updateJob(job.id, { status: "running", progress: 1 });
+  try {
+    if (!localAsrEngine.available) throw new Error("本地转写模型不可用");
+    const normalized = await normalizeImportedAudio({
+      sourcePath,
+      destinationPath: audioPath,
+      ffmpegPath,
+      onProgress(progress) {
+        storage.updateJob(job.id, { status: "running", progress: Math.min(24, 2 + Math.round(progress * 0.22)) });
+      },
+    });
+    storage.updateMeeting(meetingId, {
+      audioPath,
+      durationMs: normalized.durationMs,
+      endedAt: new Date().toISOString(),
+    });
+    const result = await transcribeHistoricalWav({
+      filePath: audioPath,
+      asrEngine: localAsrEngine,
+      onProgress(progress) {
+        storage.updateJob(job.id, { status: "running", progress: 25 + Math.round(progress * 0.45) });
+      },
+    });
+    if (!result.segments.length) throw new Error("没有识别到有效语音");
+    storage.replaceRetranscribedSegments(meetingId, result.segments);
+    storage.createTranscriptVersion(meetingId, {
+      label: "导入录音本地转写",
+      engine: "Sherpa-ONNX Paraformer",
+      active: true,
+    });
+    storage.updateJob(job.id, { status: "running", progress: 72 });
+
+    let correctionWarning = null;
+    try {
+      if (!speakerEngine.available) throw new Error("本地声纹模型不可用");
+      await correctMeetingSpeakers({
+        meetingId,
+        dataRoot,
+        storage,
+        speakerEngine,
+        maxSpeakers: storage.getMeeting(meetingId)?.maxSpeakers,
+        onProgress(progress) {
+          storage.updateJob(job.id, { status: "running", progress: 72 + Math.round(progress * 0.23) });
+        },
+      });
+    } catch (error) {
+      correctionWarning = `录音已完成转写，但发言人识别未完成：${error.message}`;
+    }
+    storage.updateJob(job.id, { status: "completed", progress: 100 });
+    storage.updateMeeting(meetingId, { status: "completed", error: correctionWarning });
+    activeAudioImports.delete(meetingId);
+    await runOverlapEnhancement(meetingId, null, { automatic: true });
+    await runSummaryAfterMeeting(meetingId);
+  } catch (error) {
+    storage.updateJob(job.id, { status: "failed", error: error.message });
+    storage.updateMeeting(meetingId, {
+      status: "failed",
+      endedAt: new Date().toISOString(),
+      error: `导入解析失败：${error.message}`,
+    });
+  } finally {
+    activeAudioImports.delete(meetingId);
+  }
+  return storage.getMeeting(meetingId);
 }
 
 async function runHistoricalRetranscription(meetingId) {
@@ -420,10 +495,32 @@ const httpServer = createServer(async (request, response) => {
         miniMaxConfigured: Boolean(miniMaxApiKey),
         speakerModelAvailable: speakerEngine.available,
         overlapSeparationModelAvailable: overlapSeparationEngine.available,
+        audioImportAvailable: Boolean(ffmpegPath && existsSync(ffmpegPath)),
         activeMeetings: activeSessions.size,
         liveSummaryStartMs,
         liveSummaryIntervalMs,
       });
+    }
+    if (request.method === "POST" && url.pathname === "/api/audio-imports") {
+      if (!desktopControlToken || request.headers["x-shiyin-control-token"] !== desktopControlToken) {
+        return jsonResponse(response, 403, { error: "桌面导入授权失败" });
+      }
+      if (workspaceIsBusy()) {
+        return jsonResponse(response, 409, { error: "有会议正在录音或处理，请完成后再导入" });
+      }
+      const body = await readJson(request);
+      const source = validateImportedMedia(body.sourcePath);
+      const meeting = storage.createMeeting(importedMeetingTitle(source.sourceName), {
+        status: "importing",
+        sourceType: "imported",
+        sourceName: source.sourceName,
+        summaryTemplate: normalizeSummaryTemplateId(body.summaryTemplate),
+        reportStyle: normalizeReportStyle(body.reportStyle),
+        maxSpeakers: body.maxSpeakers,
+        speakerLimitMode: body.speakerLimitMode,
+      });
+      runAudioImport(meeting.id, source.sourcePath).catch(() => undefined);
+      return jsonResponse(response, 202, { accepted: true, meeting: storage.getMeeting(meeting.id) });
     }
     if (request.method === "POST" && url.pathname === "/api/settings/minimax") {
       if (!desktopControlToken || request.headers["x-shiyin-control-token"] !== desktopControlToken) {

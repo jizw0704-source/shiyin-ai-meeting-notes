@@ -38,7 +38,7 @@ import {
 } from "@phosphor-icons/react";
 
 type View = "transcript" | "summary" | "actions";
-type MeetingStatus = "recording" | "correcting" | "summarizing" | "retranscribing" | "enhancing" | "completed" | "failed";
+type MeetingStatus = "recording" | "importing" | "correcting" | "summarizing" | "retranscribing" | "enhancing" | "completed" | "failed";
 type SummaryTemplateId = "meeting-minutes" | "daily-log" | "project-sync" | "brainstorm";
 type ReportStyle = "detailed" | "visual";
 type AudioSourceMode = "microphone" | "system" | "mixed";
@@ -243,7 +243,7 @@ type Summary = {
 };
 type Job = {
   id: string;
-  kind: "speaker-correction" | "summary" | "retranscription" | "overlap-enhancement";
+  kind: "audio-import" | "speaker-correction" | "summary" | "retranscription" | "overlap-enhancement";
   status: "pending" | "running" | "completed" | "failed";
   progress: number;
   error: string | null;
@@ -268,6 +268,8 @@ type MeetingBrief = {
   maxSpeakers: SpeakerLimit;
   speakerLimitMode: SpeakerLimitMode;
   titleSource: "default" | "automatic" | "manual";
+  sourceType: "recorded" | "imported";
+  sourceName: string | null;
   deletedAt: string | null;
 };
 type Meeting = MeetingBrief & {
@@ -285,6 +287,18 @@ declare global {
   interface Window {
     shiyinDesktop?: {
       getAudioCaptureCapabilities: () => Promise<AudioCaptureCapabilities>;
+      selectAudioImport: (options: {
+        summaryTemplate: SummaryTemplateId;
+        reportStyle: ReportStyle;
+        maxSpeakers: SpeakerLimit;
+        speakerLimitMode: SpeakerLimitMode;
+      }) => Promise<{ canceled: boolean; accepted?: boolean; meeting?: Meeting }>;
+      importDroppedAudio: (file: File, options: {
+        summaryTemplate: SummaryTemplateId;
+        reportStyle: ReportStyle;
+        maxSpeakers: SpeakerLimit;
+        speakerLimitMode: SpeakerLimitMode;
+      }) => Promise<{ canceled: boolean; accepted?: boolean; meeting?: Meeting }>;
       getGlobalShortcutStatus: () => Promise<GlobalShortcutStatus>;
       openAudioPrivacySettings: (kind: "microphone" | "screen") => Promise<boolean>;
       openDataFolder: () => Promise<boolean>;
@@ -385,6 +399,7 @@ function formatBytes(bytes: number | null | undefined) {
 function statusLabel(status: MeetingStatus) {
   return {
     recording: "正在听记",
+    importing: "正在解析导入录音",
     correcting: "正在校正发言人",
     summarizing: "正在生成总结",
     retranscribing: "正在重新转写录音",
@@ -396,6 +411,7 @@ function statusLabel(status: MeetingStatus) {
 
 function meetingIsBusy(status: MeetingStatus | undefined) {
   return status === "recording"
+    || status === "importing"
     || status === "correcting"
     || status === "summarizing"
     || status === "retranscribing"
@@ -591,6 +607,8 @@ export default function Home() {
   const [recordingBackdrop, setRecordingBackdrop] = useState<RecordingBackdrop>("paper");
   const [pendingAttachments, setPendingAttachments] = useState<File[]>([]);
   const [attachmentUploading, setAttachmentUploading] = useState(false);
+  const [audioImportStarting, setAudioImportStarting] = useState(false);
+  const [audioImportDragActive, setAudioImportDragActive] = useState(false);
   const [audioEditorOpen, setAudioEditorOpen] = useState(false);
   const [audioClipSaving, setAudioClipSaving] = useState(false);
   const [audioClipName, setAudioClipName] = useState("");
@@ -956,6 +974,66 @@ export default function Home() {
     setMeeting(value);
     return value;
   }, []);
+
+  const processAudioImportResult = useCallback(async (result: { canceled: boolean; meeting?: Meeting }) => {
+    if (result.canceled || !result.meeting) return;
+    const meetingId = result.meeting.id;
+    setMeeting(result.meeting);
+    setSelectedId(meetingId);
+    setMeetings((items) => [result.meeting!, ...items.filter((item) => item.id !== meetingId)]);
+    setConnectionStatus("正在转换并解析导入录音…");
+    window.shiyinDesktop?.setRecording(true);
+    for (;;) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1400));
+      const value = await loadMeeting(meetingId);
+      setMeetings((items) => [value, ...items.filter((item) => item.id !== meetingId)]);
+      const activeJob = [...value.jobs].reverse().find((job) => job.status === "running");
+      if (activeJob?.kind === "audio-import") {
+        setConnectionStatus(`正在解析导入录音 · ${activeJob.progress}%`);
+      } else {
+        setConnectionStatus(statusLabel(value.status));
+      }
+      if (!meetingIsBusy(value.status)) {
+        setView(value.summary || value.liveSummary ? "summary" : "transcript");
+        setNotice(value.status === "failed"
+          ? (value.error || "录音解析失败，请检查文件后重试")
+          : miniMaxSettings?.configured
+            ? "录音已完成本地转写、发言人识别与 AI 总结"
+            : "录音已完成本地转写；配置 MiniMax 后可生成 AI 总结");
+        break;
+      }
+    }
+  }, [loadMeeting, miniMaxSettings?.configured]);
+
+  const audioImportOptions = useCallback(() => ({
+    summaryTemplate: defaultSummaryTemplate,
+    reportStyle: defaultReportStyle,
+    maxSpeakers: speakerLimit,
+    speakerLimitMode,
+  }), [defaultReportStyle, defaultSummaryTemplate, speakerLimit, speakerLimitMode]);
+
+  const importMeetingAudio = useCallback(async (droppedFile?: File) => {
+    const desktop = window.shiyinDesktop;
+    if (!desktop) {
+      setNotice("导入其他会议录音需要在拾音 AI 桌面版中使用");
+      return;
+    }
+    setAudioImportStarting(true);
+    setProcessing(true);
+    try {
+      const result = droppedFile
+        ? await desktop.importDroppedAudio(droppedFile, audioImportOptions())
+        : await desktop.selectAudioImport(audioImportOptions());
+      await processAudioImportResult(result);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法导入这份会议录音");
+    } finally {
+      window.shiyinDesktop?.setRecording(false);
+      setAudioImportStarting(false);
+      setProcessing(false);
+      await refreshMeetings().catch(() => undefined);
+    }
+  }, [audioImportOptions, processAudioImportResult, refreshMeetings]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -2837,6 +2915,30 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                       {audioSourceMode === "mixed" ? "电脑声音 + 麦克风" : audioSourceMode === "system" ? "电脑声音" : "麦克风"}
                       {speakerLimitMode === "auto" ? " · 自动检测发言人" : ` · 最多 ${speakerLimit} 人`}
                     </small>
+                  </button>
+                  <button
+                    type="button"
+                    className={`meeting-import-button ${audioImportDragActive ? "drag-active" : ""}`}
+                    disabled={recording || processing || audioImportStarting}
+                    onClick={() => void importMeetingAudio()}
+                    onDragEnter={(event) => { event.preventDefault(); if (!processing) setAudioImportDragActive(true); }}
+                    onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; }}
+                    onDragLeave={(event) => {
+                      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setAudioImportDragActive(false);
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      setAudioImportDragActive(false);
+                      const file = event.dataTransfer.files[0];
+                      if (file) void importMeetingAudio(file);
+                    }}
+                  >
+                    <FolderOpen size={21} weight="duotone" />
+                    <span>
+                      <strong>{audioImportStarting ? "正在选择并解析…" : "导入已有会议录音"}</strong>
+                      <small>{audioImportDragActive ? "松开即可导入并开始本地解析" : "点击选择或拖入 MP3、M4A、WAV、FLAC、MP4 等 · 原文件不变"}</small>
+                    </span>
+                    <ArrowRight size={17} />
                   </button>
                   <div className="meeting-start-features" aria-label="会议处理方式">
                     <span><CheckCircle size={15} weight="fill" /> 本地实时转写</span>

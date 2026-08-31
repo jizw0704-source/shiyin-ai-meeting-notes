@@ -51,6 +51,16 @@ const applicationIconPath = path.join(
   "build",
   process.platform === "darwin" ? "icon.icns" : "icon.ico",
 );
+function resolveFfmpegPath() {
+  const executable = process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg";
+  const candidates = [
+    process.env.SHIYIN_FFMPEG_PATH,
+    app.isPackaged ? path.join(process.resourcesPath, "tools", "ffmpeg", executable) : null,
+    process.platform === "darwin" ? "/opt/homebrew/bin/ffmpeg" : null,
+    process.platform === "darwin" ? "/usr/local/bin/ffmpeg" : null,
+  ].filter(Boolean);
+  return candidates.find((candidate) => fs.existsSync(candidate)) || "";
+}
 const nodeEnvironment = () => ({
   ...process.env,
   ELECTRON_RUN_AS_NODE: "1",
@@ -68,6 +78,7 @@ const nodeEnvironment = () => ({
   SHIYIN_SEPARATION_MODEL_PATH: app.isPackaged
     ? path.join(process.resourcesPath, "models", "separation", "convtasnet_16k.onnx")
     : path.join(sourceRoot, "models", "separation", "convtasnet_16k.onnx"),
+  SHIYIN_FFMPEG_PATH: resolveFfmpegPath(),
 });
 const webHost = process.env.SHIYIN_WEB_HOST || "127.0.0.1";
 const preferredWebPort = Number(process.env.SHIYIN_WEB_PORT || 3000);
@@ -818,6 +829,27 @@ ipcMain.on("recording-state", (_event, active) => {
 });
 
 ipcMain.handle("audio-capture-capabilities", () => audioCaptureCapabilities());
+ipcMain.handle("audio-import:select", async (_event, options = {}) => {
+  const selection = await dialog.showOpenDialog(mainWindow, {
+    title: "选择要解析的会议录音",
+    defaultPath: app.getPath("documents"),
+    buttonLabel: "导入并解析",
+    properties: ["openFile"],
+    filters: [
+      { name: "会议音频与视频", extensions: ["wav", "mp3", "m4a", "aac", "flac", "ogg", "opus", "mp4", "mov", "mkv", "webm"] },
+      { name: "所有文件", extensions: ["*"] },
+    ],
+  });
+  if (selection.canceled || !selection.filePaths[0]) return { canceled: true };
+  return {
+    canceled: false,
+    ...await postBackend("/api/audio-imports", { ...options, sourcePath: selection.filePaths[0] }),
+  };
+});
+ipcMain.handle("audio-import:path", async (_event, sourcePath, options = {}) => ({
+  canceled: false,
+  ...await postBackend("/api/audio-imports", { ...options, sourcePath }),
+}));
 ipcMain.handle("global-shortcuts:get", () => ({
   ...shortcutRegistration,
   openAccelerator: openWindowShortcut,

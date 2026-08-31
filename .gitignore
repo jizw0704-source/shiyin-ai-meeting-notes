@@ -50,5 +50,9 @@ next-env.d.ts
 /data/
 /models/asr/
 /models/punctuation/
+/tools/ffmpeg/ffmpeg
+/tools/ffmpeg/ffmpeg.exe
+/tools/ffmpeg/COPYING.LGPLv2.1
+/tools/ffmpeg/LICENSE.txt
 /.openai/
 /build/icon.png
