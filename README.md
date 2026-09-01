@@ -1,6 +1,6 @@
-# 拾音 AI｜本地优先的中文会议听记
+# 拾音 AI｜听见讨论，看见下一步
 
-拾音 AI 是一款面向中文会议的 macOS / Windows 桌面应用：使用 Sherpa-ONNX 在本机完成实时转写与中英文标点恢复，使用 CAM++ 在本机区分、校正并记忆发言人，再按需调用 MiniMax 生成结构化会议纪要。
+拾音 AI 是一款本地优先的中文会议听记桌面应用。它使用 Sherpa-ONNX 在本机完成实时转写与中英文标点恢复，使用 CAM++ 在本机区分、校正并记忆发言人，再按需调用 MiniMax 自动判断会议类型，生成结构化纪要与可编辑会议简报。
 
 本地转写不消耗云端语音时长。原始录音、逐字稿、发言人声纹、历史版本和会议列表默认保存在自己的电脑上；只有主动生成 AI 总结时，会议文本才会发送给 MiniMax。
 
@@ -11,6 +11,14 @@
 
 [![macOS build](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/macos-build.yml/badge.svg)](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/macos-build.yml)
 [![Windows build](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/windows-build.yml/badge.svg)](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/windows-build.yml)
+
+## 0.6.6 版本亮点
+
+- **更简单地开始会议**：首页只保留开始会议主操作，以及导入录音、会议资料和会议设置三个次级入口。
+- **会议前先自检**：在设置中检查录音权限、本地服务、转写、标点、声纹模型和磁盘空间，MiniMax 未配置不会阻止本地听记。
+- **自动理解会议类型**：根据调研访谈、项目推进、方案评审等内容调整纪要重点，并生成可继续编辑的一页式会议简报。
+- **更自然的会议命名**：根据单位、联系人、项目或部门、主题和日期组合名称，信息缺失时不猜测，也不会覆盖人工名称。
+- **形成个人会议档案**：本机工作区汇总会议数量、累计时长、纪要覆盖和会议资料，并可检索、打开历史会议。
 
 ## 为什么做拾音 AI
 
@@ -28,7 +36,7 @@
 | 外部录音导入 | 解析 MP3、M4A、WAV、FLAC、OGG、MP4、MOV、MKV 与 WebM，不修改源文件 | 本机 |
 | 实时转写 | Sherpa-ONNX Paraformer 中英文转写 | 本机 |
 | 断句与标点 | CT-Transformer 标点恢复，模型缺失时使用保守规则 | 本机 |
-| 发言人区分 | 6、12、20 人会议上限，实时聚类与会后校正 | 本机 |
+| 发言人区分 | 自动检测人数并逐步扩展，默认设置 20 人安全上限；支持实时聚类与会后校正 | 本机 |
 | 重叠发言增强 Beta | 自动标记疑似重叠片段；会后尝试双人分离、分别转写和声纹回配，低置信度时保留原记录 | 本机 |
 | 姓名记忆 | 人工命名后建立本机声纹档案，会议中渐进匹配、候选确认与结束时轻量复核 | 本机 |
 | 逐字稿整理 | 原始记录、整理稿、正序/倒序、口语过滤、查找替换与撤销 | 本机 |
@@ -43,7 +51,7 @@
 
 ```mermaid
 flowchart LR
-    A["选择录音来源、人数和模板"] --> B["本机录音"]
+    A["选择录音来源和总结模板"] --> B["本机录音"]
     A2["或导入已有会议录音"] --> B2["本机生成标准 WAV 副本"]
     B --> C["Sherpa-ONNX 实时转写与标点"]
     B2 --> C2["Sherpa-ONNX 会后转写与标点"]
@@ -69,14 +77,14 @@ flowchart LR
 
 ### 2. 配置 MiniMax（可选）
 
-打开左侧底部的“MiniMax 设置”，填写自己的 API Key 和模型名称。密钥由 Electron 的系统安全存储保存在当前电脑，不会写入安装包、会议备份或 Git 仓库。
+打开“设置 → AI 与纪要”，填写自己的 API Key 和模型名称。密钥由 Electron 的系统安全存储保存在当前电脑，不会写入安装包、会议备份或 Git 仓库。
 
 不配置 MiniMax 时，录音、本地转写、标点、发言人识别和逐字稿整理仍可正常使用；之后补充密钥，可以对历史会议重新生成总结。
 
 ### 3. 开始会议
 
 1. 选择录音来源：现场会议使用麦克风，线上会议使用电脑声音，混合会议可同时录制两者。
-2. 根据会议规模选择 6、12 或 20 人上限。
+2. 默认使用自动检测人数；如需控制识别规模，可在设置中选择 6、12 或 20 人安全上限。
 3. 选择总结模板和报告样式。
 4. 首页查看精简的准备状态；完整“会议前自检”位于“设置 → 会议与转写”。绿色表示正常，黄色表示可以开始但需要留意，红色问题需要先处理。
 5. 点击“开始会议”。按钮点击后会再次检查，避免使用已经失效的设备或权限。
@@ -153,7 +161,7 @@ flowchart LR
 Obsidian 是可选连接，不是必需依赖：
 
 - 默认不连接、不自动同步；
-- 可在“MiniMax 设置”中选择自己的 Obsidian Vault；
+- 可在“设置 → 笔记与导出”中选择自己的 Obsidian Vault；
 - 可单次同步，也可自行开启会议结束后自动同步；
 - 未连接时不会弹出目录选择或产生同步错误。
 
@@ -303,6 +311,9 @@ server/speaker-engine.mjs     实时声纹提取与发言人分配
 server/correction.mjs         会后发言人校正与姓名匹配
 server/overlap-enhancement.mjs 双人重叠片段分离、转写与声纹回配
 server/audio-editing.mjs      无损原录音的时间与发言人音频剪辑
+server/meeting-preflight.mjs  会议前权限、模型、存储与服务检查
+server/meeting-title.mjs      内外部会议判断与自适应命名
+server/summarizer.mjs         MiniMax 纪要、会议分类与会议简报
 server/storage.mjs            SQLite、声纹库与历史版本
 server/workspace-backup.mjs   完整备份、校验与恢复
 tests/                        持久化、接口和界面构建测试
@@ -329,6 +340,7 @@ tests/                        持久化、接口和界面构建测试
 - Paraformer 不提供逐词时间戳，句段时间由实时音频位置估算。
 - 本地标点能改善可读性，但专业名词、简称和复杂语气仍建议会后检查。
 - MiniMax 总结需要网络连接、有效密钥和可用额度。
+- 本机工作区目前提供统计、会议档案和资料入口；跨会议知识检索与问答尚未开放。
 - macOS 与 Windows 安装包目前均未进行商业代码签名。
 
 ## 来源与授权
