@@ -1,12 +1,12 @@
-export const DEFAULT_SUMMARY_TEMPLATE = "meeting-minutes";
-export const DEFAULT_REPORT_STYLE = "detailed";
-export const SUMMARY_TEMPLATE_VERSION = 1;
+export const DEFAULT_SUMMARY_TEMPLATE = "meeting-brief";
+export const DEFAULT_REPORT_STYLE = "visual";
+export const SUMMARY_TEMPLATE_VERSION = 2;
 
 export const SUMMARY_TEMPLATES = Object.freeze({
   "meeting-brief": {
     name: "会议简报",
     prompt: `当前内容模板：会议简报。
-先根据会议内容自动判断会议类型，再用一页式简报呈现最值得未参会者关注的信息。调研访谈突出被调研方现状、核心痛点、当前应对方式和真实期望；项目推进突出进展、阻塞、依赖和下一步；方案评审突出评审意见、风险、修改要求和结论；其他会议按主题、问题、各方期望、共识和推进事项组织。brief.sections应按会议逻辑生成4到6个短板块，不要为了套模板虚构不存在的“双方”或“痛点”。`,
+先根据会议内容自动判断会议类型，再用一页式图文简报呈现最值得未参会者关注的信息。brief.sections的第一个板块优先回答“讨论了什么”，其余板块根据会议类型组织：调研访谈突出被调研方现状、核心痛点、当前应对方式、真实期望与待验证问题；项目推进突出当前进展、阻塞、依赖和下一步；方案评审突出评审目标、主要意见、风险、修改要求和结论；其他会议按主要问题、各方期望、共识和推进事项组织。生成4到6个短板块，每个板块使用一段可独立阅读的清晰文字，不要为了套模板虚构不存在的“双方”或“痛点”。`,
   },
   "meeting-minutes": {
     name: "会议纪要",

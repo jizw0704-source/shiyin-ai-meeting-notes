@@ -9,7 +9,7 @@ import { parseByteRange } from "../server/audio-stream.mjs";
 import { AudioSession } from "../server/audio-session.mjs";
 import { importedMeetingTitle, normalizeImportedAudio, validateImportedMedia } from "../server/audio-import.mjs";
 import { buildClipRanges, createEditedWav } from "../server/audio-editing.mjs";
-import { correctMeetingSpeakers, splitLongSegment } from "../server/correction.mjs";
+import { buildSpeakerClusters, correctMeetingSpeakers, splitLongSegment } from "../server/correction.mjs";
 import { inspectPcmWav, transcribeHistoricalWav } from "../server/historical-transcription.mjs";
 import { MeetingStorage } from "../server/storage.mjs";
 import {
@@ -420,7 +420,7 @@ test("persists meetings, speakers, timestamps, pauses, and manual names", () => 
     assert.equal(saved.title, "设计周会");
     assert.equal(saved.status, "completed");
     assert.equal(saved.summaryTemplate, "project-sync");
-    assert.equal(saved.templateVersion, 1);
+    assert.equal(saved.templateVersion, 2);
     assert.equal(saved.reportStyle, "visual");
     assert.equal(saved.maxSpeakers, 12);
     assert.equal(saved.speakerLimitMode, "manual");
@@ -446,6 +446,9 @@ test("defaults new meetings to automatic speaker detection with a 20-person safe
     const meeting = storage.createMeeting("自动识别会议");
     assert.equal(meeting.speakerLimitMode, "auto");
     assert.equal(meeting.maxSpeakers, 20);
+    assert.equal(meeting.summaryTemplate, "meeting-brief");
+    assert.equal(meeting.reportStyle, "visual");
+    assert.equal(meeting.templateVersion, 2);
     assert.equal(normalizeSpeakerLimitMode("unexpected", "manual"), "manual");
   } finally {
     storage.close();
@@ -453,52 +456,116 @@ test("defaults new meetings to automatic speaker detection with a 20-person safe
   }
 });
 
-test("automatic speaker detection expands only after a stable seventh voice repeats", () => {
+test("automatic speaker detection confirms a second voice but ignores transient fragments", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-auto-expansion-"));
   const storage = new MeetingStorage(root);
   try {
     const meeting = storage.createMeeting("自动扩容会议");
     const engine = new SpeakerEngine({
       modelPath: path.join(root, "missing-speaker-model.onnx"),
-      autoExpansionSamples: 3,
-      autoExpansionDurationMs: 3600,
+      autoConfirmationSamples: 2,
+      autoConfirmationDurationMs: 2400,
+      autoExpansionSamples: 4,
+      autoExpansionDurationMs: 6000,
     });
-    for (let index = 0; index < 6; index += 1) {
-      const voice = new Float32Array(7);
-      voice[index] = 1;
-      const assignment = engine.assign(meeting.id, voice, storage, {
-        durationMs: 1500,
-        maxSpeakers: meeting.maxSpeakers,
-        speakerLimitMode: meeting.speakerLimitMode,
-      });
-      assert.equal(assignment.created, true);
-    }
-    const seventhVoice = new Float32Array([0, 0, 0, 0, 0, 0, 1]);
-    const firstEvidence = engine.assign(meeting.id, seventhVoice, storage, {
+    const firstVoice = new Float32Array([1, 0, 0, 0]);
+    const secondVoice = new Float32Array([0, 1, 0, 0]);
+    const transientVoice = new Float32Array([0, 0, 1, 0]);
+    const first = engine.assign(meeting.id, firstVoice, storage, {
       durationMs: 1500,
       maxSpeakers: 20,
       speakerLimitMode: "auto",
     });
-    const secondEvidence = engine.assign(meeting.id, seventhVoice, storage, {
+    const transient = engine.assign(meeting.id, transientVoice, storage, {
       durationMs: 1500,
       maxSpeakers: 20,
       speakerLimitMode: "auto",
     });
-    const expanded = engine.assign(meeting.id, seventhVoice, storage, {
+    engine.assign(meeting.id, firstVoice, storage, {
       durationMs: 1500,
       maxSpeakers: 20,
       speakerLimitMode: "auto",
     });
-    assert.equal(firstEvidence.pendingNewSpeaker, true);
+    const secondEvidence = engine.assign(meeting.id, secondVoice, storage, {
+      durationMs: 1500,
+      maxSpeakers: 20,
+      speakerLimitMode: "auto",
+    });
+    engine.assign(meeting.id, firstVoice, storage, {
+      durationMs: 1500,
+      maxSpeakers: 20,
+      speakerLimitMode: "auto",
+    });
+    const confirmedSecond = engine.assign(meeting.id, secondVoice, storage, {
+      durationMs: 1500,
+      maxSpeakers: 20,
+      speakerLimitMode: "auto",
+    });
+    assert.equal(first.created, true);
+    assert.equal(first.effectiveMaxSpeakers, 2);
+    assert.equal(transient.pendingNewSpeaker, true);
     assert.equal(secondEvidence.pendingNewSpeaker, true);
-    assert.equal(storage.listSpeakers(meeting.id).length, 7);
-    assert.equal(expanded.created, true);
-    assert.equal(expanded.expandedTo, 12);
-    assert.equal(expanded.speaker.displayName, "发言人7");
+    assert.equal(confirmedSecond.created, true);
+    assert.equal(confirmedSecond.expandedTo, null);
+    assert.equal(storage.listSpeakers(meeting.id).length, 2);
   } finally {
     storage.close();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("automatic speaker detection expands beyond two only after stable repeated evidence", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-auto-third-speaker-"));
+  const storage = new MeetingStorage(root);
+  try {
+    const meeting = storage.createMeeting("三人自动扩容会议");
+    const engine = new SpeakerEngine({
+      modelPath: path.join(root, "missing-speaker-model.onnx"),
+      autoConfirmationSamples: 2,
+      autoConfirmationDurationMs: 2400,
+      autoExpansionSamples: 4,
+      autoExpansionDurationMs: 6000,
+    });
+    const firstVoice = new Float32Array([1, 0, 0]);
+    const secondVoice = new Float32Array([0, 1, 0]);
+    const thirdVoice = new Float32Array([0, 0, 1]);
+    engine.assign(meeting.id, firstVoice, storage, { durationMs: 1500, maxSpeakers: 20, speakerLimitMode: "auto" });
+    engine.assign(meeting.id, secondVoice, storage, { durationMs: 1500, maxSpeakers: 20, speakerLimitMode: "auto" });
+    engine.assign(meeting.id, secondVoice, storage, { durationMs: 1500, maxSpeakers: 20, speakerLimitMode: "auto" });
+    const evidence = [];
+    for (let index = 0; index < 4; index += 1) {
+      evidence.push(engine.assign(meeting.id, thirdVoice, storage, {
+        durationMs: 1500,
+        maxSpeakers: 20,
+        speakerLimitMode: "auto",
+      }));
+      if (index < 3) engine.assign(meeting.id, firstVoice, storage, {
+        durationMs: 1500,
+        maxSpeakers: 20,
+        speakerLimitMode: "auto",
+      });
+    }
+    assert.equal(evidence.slice(0, 3).every((item) => item.pendingNewSpeaker), true);
+    assert.equal(evidence[3].created, true);
+    assert.equal(evidence[3].expandedTo, 6);
+    assert.equal(storage.listSpeakers(meeting.id).length, 3);
+  } finally {
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("speaker correction discards short singleton acoustic fragments", () => {
+  const items = [
+    { startMs: 0, endMs: 1600, embedding: new Float32Array([1, 0, 0]), clusterIndex: null },
+    { startMs: 1700, endMs: 3400, embedding: new Float32Array([0.99, 0.04, 0]), clusterIndex: null },
+    { startMs: 3500, endMs: 5100, embedding: new Float32Array([0, 1, 0]), clusterIndex: null },
+    { startMs: 5200, endMs: 6900, embedding: new Float32Array([0.04, 0.99, 0]), clusterIndex: null },
+    { startMs: 7000, endMs: 8300, embedding: new Float32Array([0, 0, 1]), clusterIndex: null },
+  ];
+  const clusters = buildSpeakerClusters(items, { maxSpeakers: 6 });
+  assert.equal(clusters.length, 2);
+  assert.equal(items.at(-1).clusterIndex, null);
 });
 
 test("remembers manually named voices and conservatively matches them across meetings", () => {
@@ -721,9 +788,9 @@ test("stores organized punctuation without overwriting original ASR text", () =>
 test("normalizes template and report settings", () => {
   assert.equal(normalizeSummaryTemplateId("meeting-brief"), "meeting-brief");
   assert.equal(normalizeSummaryTemplateId("brainstorm"), "brainstorm");
-  assert.equal(normalizeSummaryTemplateId("unknown"), "meeting-minutes");
+  assert.equal(normalizeSummaryTemplateId("unknown"), "meeting-brief");
   assert.equal(normalizeReportStyle("visual"), "visual");
-  assert.equal(normalizeReportStyle("poster"), "detailed");
+  assert.equal(normalizeReportStyle("poster"), "visual");
   assert.match(summaryTemplatePrompt("daily-log"), /日常记录/);
   assert.match(summaryTemplatePrompt("project-sync"), /项目进度/);
   assert.match(summaryTemplatePrompt("meeting-brief"), /自动判断会议类型/);

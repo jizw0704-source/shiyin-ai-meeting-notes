@@ -32,13 +32,18 @@ export class SpeakerEngine {
     this.profileAutoMargin = options.profileAutoMargin ?? 0.05;
     this.profileSuggestionThreshold = options.profileSuggestionThreshold ?? 0.78;
     this.profileSuggestionMargin = options.profileSuggestionMargin ?? 0.025;
-    this.autoExpansionSamples = options.autoExpansionSamples ?? 3;
-    this.autoExpansionDurationMs = options.autoExpansionDurationMs ?? 3600;
+    this.autoConfirmationSamples = options.autoConfirmationSamples ?? 2;
+    this.autoConfirmationDurationMs = options.autoConfirmationDurationMs ?? 2400;
+    this.autoExpansionSamples = options.autoExpansionSamples ?? 4;
+    this.autoExpansionDurationMs = options.autoExpansionDurationMs ?? 6000;
     this.autoExpansionSimilarity = options.autoExpansionSimilarity ?? 0.72;
+    this.pendingVoiceLimit = options.pendingVoiceLimit ?? 4;
+    this.pendingVoiceMaxGap = options.pendingVoiceMaxGap ?? 8;
     this.extractor = null;
     this.clusters = new Map();
     this.autoLimits = new Map();
     this.pendingNovelVoices = new Map();
+    this.observationCounts = new Map();
     if (existsSync(this.modelPath)) {
       const sherpa = require("sherpa-onnx-node");
       this.extractor = new sherpa.SpeakerEmbeddingExtractor({
@@ -73,7 +78,7 @@ export class SpeakerEngine {
       lastProfileCheckCount: speaker.profileId || speaker.manuallyNamed ? speaker.sampleCount || 1 : 0,
     })));
     const count = speakers.length;
-    this.autoLimits.set(meetingId, count > 12 ? 20 : count > 6 ? 12 : 6);
+    this.autoLimits.set(meetingId, count > 12 ? 20 : count > 6 ? 12 : count > 2 ? 6 : 2);
   }
 
   createCluster(meetingId, embedding, storage, options = {}) {
@@ -93,21 +98,50 @@ export class SpeakerEngine {
     return speaker;
   }
 
-  trackNovelVoice(meetingId, embedding, durationMs) {
-    const current = this.pendingNovelVoices.get(meetingId);
-    const similar = current && cosineSimilarity(embedding, current.centroid) >= this.autoExpansionSimilarity;
-    if (!similar) {
-      const pending = { centroid: embedding, sampleCount: 1, durationMs: durationMs || 0 };
-      this.pendingNovelVoices.set(meetingId, pending);
+  trackNovelVoice(meetingId, embedding, durationMs, observationIndex) {
+    const candidates = (this.pendingNovelVoices.get(meetingId) || [])
+      .filter((candidate) => observationIndex - candidate.lastObservationIndex <= this.pendingVoiceMaxGap);
+    let best = null;
+    for (const candidate of candidates) {
+      const score = cosineSimilarity(embedding, candidate.centroid);
+      if (!best || score > best.score) best = { candidate, score };
+    }
+    if (!best || best.score < this.autoExpansionSimilarity) {
+      const pending = {
+        centroid: embedding,
+        sampleCount: 1,
+        durationMs: durationMs || 0,
+        lastObservationIndex: observationIndex,
+      };
+      candidates.push(pending);
+      candidates.sort((left, right) =>
+        (right.sampleCount * 1000 + right.durationMs) - (left.sampleCount * 1000 + left.durationMs));
+      this.pendingNovelVoices.set(meetingId, candidates.slice(0, this.pendingVoiceLimit));
       return pending;
     }
+    const current = best.candidate;
     const count = current.sampleCount + 1;
     const weight = Math.min(0.34, 1 / count);
     current.centroid = normalize(Float32Array.from(current.centroid, (value, index) =>
       value * (1 - weight) + embedding[index] * weight));
     current.sampleCount = count;
     current.durationMs += durationMs || 0;
+    current.lastObservationIndex = observationIndex;
+    this.pendingNovelVoices.set(meetingId, candidates);
     return current;
+  }
+
+  removePendingVoice(meetingId, pending) {
+    const remaining = (this.pendingNovelVoices.get(meetingId) || []).filter((candidate) => candidate !== pending);
+    if (remaining.length) this.pendingNovelVoices.set(meetingId, remaining);
+    else this.pendingNovelVoices.delete(meetingId);
+  }
+
+  prunePendingVoices(meetingId, observationIndex) {
+    const remaining = (this.pendingNovelVoices.get(meetingId) || [])
+      .filter((candidate) => observationIndex - candidate.lastObservationIndex <= this.pendingVoiceMaxGap);
+    if (remaining.length) this.pendingNovelVoices.set(meetingId, remaining);
+    else this.pendingNovelVoices.delete(meetingId);
   }
 
   evaluateProfileMatch(meetingId, cluster, storage, options = {}) {
@@ -142,6 +176,8 @@ export class SpeakerEngine {
   assign(meetingId, embedding, storage, options = {}) {
     if (!embedding) return null;
     if (!this.clusters.has(meetingId)) this.seedMeeting(meetingId, storage.listSpeakers(meetingId));
+    const observationIndex = (this.observationCounts.get(meetingId) || 0) + 1;
+    this.observationCounts.set(meetingId, observationIndex);
     const clusters = this.clusters.get(meetingId);
     let best = null;
     for (const cluster of clusters) {
@@ -156,23 +192,36 @@ export class SpeakerEngine {
     const maxSpeakers = normalizeMaxSpeakers(options.maxSpeakers ?? this.maxSpeakers);
     const speakerLimitMode = normalizeSpeakerLimitMode(options.speakerLimitMode, "manual");
     const effectiveMaxSpeakers = speakerLimitMode === "auto"
-      ? Math.min(maxSpeakers, this.autoLimits.get(meetingId) || 6)
+      ? Math.min(maxSpeakers, this.autoLimits.get(meetingId) || 2)
       : maxSpeakers;
-    if ((!best || best.score < this.threshold) && clusters.length < effectiveMaxSpeakers) {
-      this.pendingNovelVoices.delete(meetingId);
+    const novelVoice = !best || best.score < this.threshold;
+    if (novelVoice && clusters.length === 0) {
       const speaker = this.createCluster(meetingId, embedding, storage, options);
       return { speaker, score: 1, created: true, effectiveMaxSpeakers };
     }
-    if ((!best || best.score < this.threshold) && speakerLimitMode === "auto") {
-      if (effectiveMaxSpeakers >= maxSpeakers) {
+    if (novelVoice && speakerLimitMode === "manual" && clusters.length < effectiveMaxSpeakers) {
+      const speaker = this.createCluster(meetingId, embedding, storage, options);
+      return { speaker, score: 1, created: true, effectiveMaxSpeakers };
+    }
+    if (novelVoice && speakerLimitMode === "auto") {
+      const requiresExpansion = clusters.length >= effectiveMaxSpeakers;
+      if (requiresExpansion && effectiveMaxSpeakers >= maxSpeakers) {
         return { speaker: null, score: best?.score ?? null, created: false, limitReached: true, effectiveMaxSpeakers };
       }
-      const pending = this.trackNovelVoice(meetingId, embedding, options.durationMs);
-      if (pending.sampleCount >= this.autoExpansionSamples
-        && pending.durationMs >= this.autoExpansionDurationMs) {
-        const expandedTo = effectiveMaxSpeakers < 12 ? 12 : 20;
-        this.autoLimits.set(meetingId, Math.min(maxSpeakers, expandedTo));
-        this.pendingNovelVoices.delete(meetingId);
+      const pending = this.trackNovelVoice(meetingId, embedding, options.durationMs, observationIndex);
+      const requiredSamples = clusters.length === 1
+        ? this.autoConfirmationSamples
+        : this.autoExpansionSamples;
+      const requiredDurationMs = clusters.length === 1
+        ? this.autoConfirmationDurationMs
+        : this.autoExpansionDurationMs;
+      if (pending.sampleCount >= requiredSamples && pending.durationMs >= requiredDurationMs) {
+        let expandedTo = effectiveMaxSpeakers;
+        if (requiresExpansion) {
+          expandedTo = effectiveMaxSpeakers < 6 ? 6 : effectiveMaxSpeakers < 12 ? 12 : 20;
+          this.autoLimits.set(meetingId, Math.min(maxSpeakers, expandedTo));
+        }
+        this.removePendingVoice(meetingId, pending);
         const speaker = this.createCluster(meetingId, pending.centroid, storage, {
           durationMs: pending.durationMs,
           sampleCount: pending.sampleCount,
@@ -181,7 +230,7 @@ export class SpeakerEngine {
           speaker,
           score: 1,
           created: true,
-          expandedTo: Math.min(maxSpeakers, expandedTo),
+          expandedTo: requiresExpansion ? Math.min(maxSpeakers, expandedTo) : null,
           effectiveMaxSpeakers: Math.min(maxSpeakers, expandedTo),
         };
       }
@@ -194,7 +243,7 @@ export class SpeakerEngine {
       };
     }
     if (!best) return null;
-    this.pendingNovelVoices.delete(meetingId);
+    this.prunePendingVoices(meetingId, observationIndex);
     const cluster = best.cluster;
     const count = cluster.sampleCount + 1;
     const weight = Math.min(0.25, 1 / count);
@@ -226,5 +275,6 @@ export class SpeakerEngine {
     this.clusters.delete(meetingId);
     this.autoLimits.delete(meetingId);
     this.pendingNovelVoices.delete(meetingId);
+    this.observationCounts.delete(meetingId);
   }
 }

@@ -58,9 +58,9 @@ export class MeetingStorage {
         summary_json TEXT,
         live_summary_json TEXT,
         error TEXT,
-        summary_template TEXT NOT NULL DEFAULT 'meeting-minutes',
-        template_version INTEGER NOT NULL DEFAULT 1,
-        report_style TEXT NOT NULL DEFAULT 'detailed',
+        summary_template TEXT NOT NULL DEFAULT 'meeting-brief',
+        template_version INTEGER NOT NULL DEFAULT 2,
+        report_style TEXT NOT NULL DEFAULT 'visual',
         filler_filter_enabled INTEGER NOT NULL DEFAULT 0,
         summary_stale INTEGER NOT NULL DEFAULT 0,
         active_transcript_version_id TEXT,
@@ -179,13 +179,13 @@ export class MeetingStorage {
       this.db.prepare("PRAGMA table_info(meetings)").all().map((column) => column.name),
     );
     if (!meetingColumns.has("summary_template")) {
-      this.db.exec("ALTER TABLE meetings ADD COLUMN summary_template TEXT NOT NULL DEFAULT 'meeting-minutes'");
+      this.db.exec("ALTER TABLE meetings ADD COLUMN summary_template TEXT NOT NULL DEFAULT 'meeting-brief'");
     }
     if (!meetingColumns.has("template_version")) {
-      this.db.exec("ALTER TABLE meetings ADD COLUMN template_version INTEGER NOT NULL DEFAULT 1");
+      this.db.exec("ALTER TABLE meetings ADD COLUMN template_version INTEGER NOT NULL DEFAULT 2");
     }
     if (!meetingColumns.has("report_style")) {
-      this.db.exec("ALTER TABLE meetings ADD COLUMN report_style TEXT NOT NULL DEFAULT 'detailed'");
+      this.db.exec("ALTER TABLE meetings ADD COLUMN report_style TEXT NOT NULL DEFAULT 'visual'");
     }
     if (!meetingColumns.has("live_summary_json")) {
       this.db.exec("ALTER TABLE meetings ADD COLUMN live_summary_json TEXT");

@@ -381,9 +381,9 @@ declare global {
 const websocketBase = process.env.NEXT_PUBLIC_ASR_PROXY_URL || "ws://127.0.0.1:8788";
 const apiBase = process.env.NEXT_PUBLIC_API_URL || websocketBase.replace(/^ws/, "http");
 const versionHistory = versionHistoryData as VersionHistoryItem[];
-const CURRENT_APP_VERSION = versionHistory[0]?.version || "0.6.6";
-const DEFAULT_SUMMARY_TEMPLATE: SummaryTemplateId = "meeting-minutes";
-const DEFAULT_REPORT_STYLE: ReportStyle = "detailed";
+const CURRENT_APP_VERSION = versionHistory[0]?.version || "0.6.7";
+const DEFAULT_SUMMARY_TEMPLATE: SummaryTemplateId = "meeting-brief";
+const DEFAULT_REPORT_STYLE: ReportStyle = "visual";
 const DEFAULT_SPEAKER_LIMIT: SpeakerLimit = 6;
 const speakerLimitOptions: Array<{ value: SpeakerLimit; label: string; detail: string }> = [
   { value: 6, label: "6 人", detail: "小型会议" },
@@ -410,7 +410,7 @@ const summaryTemplates: Array<{
 ];
 
 function summaryTemplateName(id: SummaryTemplateId | undefined) {
-  return summaryTemplates.find((template) => template.id === id)?.name || "会议纪要";
+  return summaryTemplates.find((template) => template.id === id)?.name || "会议简报";
 }
 
 function summaryTemplateIcon(id: SummaryTemplateId, size = 20) {
@@ -604,18 +604,16 @@ function downloadBriefImage(meeting: Meeting, summary: Summary, brief: EditableM
   canvas.height = height;
   const context = canvas.getContext("2d");
   if (!context) throw new Error("当前设备无法生成简报图片");
-  context.fillStyle = "#f7f5ef";
+  context.fillStyle = "#f9f7f1";
   context.fillRect(0, 0, width, height);
+  context.fillStyle = "#315fae";
+  context.font = '600 24px "PingFang SC", "Microsoft YaHei", sans-serif';
+  context.fillText("会议简报  ·  给未参会的人", margin, 104);
   context.fillStyle = "#202421";
-  context.font = '600 70px "Songti SC", "STSong", serif';
-  context.fillText("会议简报", margin, 150);
-  context.fillStyle = "#788474";
-  context.fillRect(margin, 190, 82, 3);
-  context.fillStyle = "#202421";
-  context.font = '600 38px "PingFang SC", "Microsoft YaHei", sans-serif';
-  const titleLines = wrapCanvasText(context, meeting.title, contentWidth);
-  titleLines.slice(0, 2).forEach((line, index) => context.fillText(line, margin, 270 + index * 52));
-  let y = 310 + Math.min(2, titleLines.length) * 52;
+  context.font = '600 48px "Songti SC", "STSong", serif';
+  const titleLines = wrapCanvasText(context, brief.subject || meeting.title, contentWidth);
+  titleLines.slice(0, 2).forEach((line, index) => context.fillText(line, margin, 184 + index * 62));
+  let y = 225 + Math.min(2, titleLines.length) * 62;
   context.fillStyle = "#59605a";
   context.font = '25px "PingFang SC", "Microsoft YaHei", sans-serif';
   context.fillText(`${briefDate(meeting.startedAt)}  ·  ${formatClock(meeting.durationMs)}  ·  ${brief.participants}`, margin, y);
@@ -625,10 +623,9 @@ function downloadBriefImage(meeting: Meeting, summary: Summary, brief: EditableM
   context.beginPath(); context.moveTo(margin, y); context.lineTo(width - margin, y); context.stroke();
   y += 76;
   sectionLayouts.forEach((section, index) => {
-    context.fillStyle = "#788474";
+    context.fillStyle = "#315fae";
     context.font = '500 37px "Georgia", serif';
     context.fillText(String(index + 1).padStart(2, "0"), margin, y);
-    context.beginPath(); context.arc(margin + 82, y - 10, 5, 0, Math.PI * 2); context.fill();
     context.fillStyle = "#202421";
     context.font = '600 32px "PingFang SC", "Microsoft YaHei", sans-serif';
     context.fillText(section.title, margin + 118, y);
@@ -1006,7 +1003,7 @@ export default function Home() {
       if (summaryTemplates.some((template) => template.id === savedTemplate)) {
         setDefaultSummaryTemplate(savedTemplate!);
       }
-      if (savedStyle === "visual") setDefaultReportStyle("visual");
+      if (savedStyle === "visual" || savedStyle === "detailed") setDefaultReportStyle(savedStyle);
       if (speakerLimitOptions.some((option) => option.value === savedSpeakerLimit)) {
         setSpeakerLimit(savedSpeakerLimit as SpeakerLimit);
       }
@@ -2389,7 +2386,7 @@ export default function Home() {
 
     if (!meeting) {
       setTemplateDialogOpen(false);
-      setNotice(`新听记将使用“${summaryTemplateName(templateDraft)}”与${reportStyleDraft === "visual" ? "图文纪要" : "深度纪要"}`);
+      setNotice(`新听记将使用“${summaryTemplateName(templateDraft)}”与${reportStyleDraft === "visual" ? "图文总结" : "深度纪要"}`);
       return;
     }
 
@@ -2409,7 +2406,7 @@ export default function Home() {
         setView("summary");
         await regenerateSummary(updated.id);
       } else {
-        setNotice(`已切换为${reportStyleDraft === "visual" ? "图文纪要" : "深度纪要"}，无需重新调用 MiniMax`);
+        setNotice(`已切换为${reportStyleDraft === "visual" ? "图文总结" : "深度纪要"}，无需重新调用 MiniMax`);
       }
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "无法保存总结模板");
@@ -3212,7 +3209,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
           <span>
             <small>总结模板</small>
             <b>{summaryTemplateName(meeting?.summaryTemplate || defaultSummaryTemplate)}</b>
-            <em>{(meeting?.reportStyle || defaultReportStyle) === "visual" ? "图文纪要" : "深度纪要"}</em>
+            <em>{(meeting?.reportStyle || defaultReportStyle) === "visual" ? "图文总结" : "深度纪要"}</em>
           </span>
           <ArrowRight size={15} />
         </button>
@@ -3397,7 +3394,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                     <header><span><Brain size={20} weight="duotone" /></span><div><h2 id="settings-ai-title">AI 与纪要</h2><p>控制会议结束后的 MiniMax 整理流程。</p></div></header>
                     <div className="settings-switch-row"><div><b>会议结束后自动总结</b><small>关闭后只保存录音、逐字稿和发言人，可稍后手动总结。</small></div><button role="switch" aria-checked={autoSummaryEnabled} className={`settings-switch ${autoSummaryEnabled ? "on" : ""}`} onClick={() => selectAutoSummary(!autoSummaryEnabled)}><i /></button></div>
                     <div className="settings-switch-row"><div><b>总结后自动命名会议</b><small>按会议类型组合对方单位、联系人或项目、主题和日期；不猜测，也不覆盖手动名称。</small></div><button role="switch" aria-checked={autoTitleEnabled} disabled={!autoSummaryEnabled} className={`settings-switch ${autoTitleEnabled ? "on" : ""}`} onClick={() => selectAutoTitle(!autoTitleEnabled)}><i /></button></div>
-                    <div className="settings-block"><div><b>默认纪要方式</b><small>内容模板决定关注重点，报告样式只改变展示。</small></div><div className="settings-template-summary"><span><Sparkle size={17} weight="duotone" /><b>{summaryTemplateName(defaultSummaryTemplate)}</b><small>{defaultReportStyle === "visual" ? "图文纪要" : "深度纪要"}</small></span><button onClick={openTemplateDialog}>选择模板</button></div></div>
+                    <div className="settings-block"><div><b>默认总结方式</b><small>内容模板决定关注重点，报告样式只改变展示。</small></div><div className="settings-template-summary"><span><Sparkle size={17} weight="duotone" /><b>{summaryTemplateName(defaultSummaryTemplate)}</b><small>{defaultReportStyle === "visual" ? "图文总结" : "深度纪要"}</small></span><button onClick={openTemplateDialog}>选择模板</button></div></div>
                     <form className="settings-credentials" onSubmit={(event) => { event.preventDefault(); void saveSettings(); }}>
                       <div className="settings-section-title"><div><b>MiniMax 连接</b><small>密钥使用当前系统安全加密，只保存在这台电脑。</small></div><em className={miniMaxSettings?.configured ? "ready" : ""}>{miniMaxSettings?.configured ? "已配置" : "未配置"}</em></div>
                       <label><span>API Key</span><input type="password" autoComplete="off" value={miniMaxKeyDraft} disabled={!miniMaxSettings?.managedByApp || settingsSaving} onChange={(event) => setMiniMaxKeyDraft(event.target.value)} placeholder={miniMaxSettings?.configured ? "留空可保留当前密钥" : "请输入 MiniMax API Key"} /></label>
@@ -3985,8 +3982,8 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                     <div className="visual-report">
                       <header className="visual-report-hero">
                         <div className="visual-hero-topline">
-                          <span><Sparkle size={13} weight="fill" /> MiniMax AI {usingLiveSummary ? "实时草稿" : "图文纪要"}</span>
-                          <button onClick={openTemplateDialog}>{summaryTemplateName(meeting?.summaryTemplate || "meeting-minutes")} · 更换模板</button>
+                          <span><Sparkle size={13} weight="fill" /> MiniMax AI {usingLiveSummary ? "实时草稿" : "图文总结"}</span>
+                          <button onClick={openTemplateDialog}>{summaryTemplateName(meeting?.summaryTemplate || DEFAULT_SUMMARY_TEMPLATE)} · 更换模板</button>
                         </div>
                         <h2>{usableSummary.headline || meeting?.title}</h2>
                         <p>{usableSummary.overview}</p>
@@ -4777,7 +4774,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                   onClick={() => setReportStyleDraft("visual")}
                 >
                   <span className="style-preview visual"><ChartBar size={28} weight="duotone" /></span>
-                  <span><b>图文纪要</b><small>看板化呈现重点、数据、任务与风险</small></span>
+                  <span><b>图文总结</b><small>让未参会者快速看懂问题、期望与下一步</small></span>
                   {reportStyleDraft === "visual" && <CheckCircle size={20} weight="fill" />}
                 </button>
               </div>

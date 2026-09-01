@@ -73,8 +73,47 @@ export function splitLongSegment(segment) {
   return pieces;
 }
 
-function buildClusters(items, threshold = 0.64, maxSpeakers = 6) {
-  const clusters = [];
+function speechDurationMs(item) {
+  return Math.max(0, (item.endMs ?? item.startMs) - item.startMs);
+}
+
+function meanEmbedding(items) {
+  if (!items.length) return null;
+  const first = items.find((item) => item.embedding)?.embedding;
+  if (!first) return null;
+  const sum = new Float32Array(first.length);
+  for (const item of items) {
+    if (!item.embedding) continue;
+    for (let index = 0; index < sum.length; index += 1) sum[index] += item.embedding[index];
+  }
+  return normalize(sum);
+}
+
+function rebuildClusters(items, clusters) {
+  const groups = clusters.map(() => []);
+  for (const item of items) {
+    if (item.clusterIndex === null || item.clusterIndex === undefined) continue;
+    groups[item.clusterIndex]?.push(item);
+  }
+  const rebuilt = [];
+  for (const group of groups) {
+    if (!group.length) continue;
+    const index = rebuilt.length;
+    for (const item of group) item.clusterIndex = index;
+    rebuilt.push({ index, centroid: meanEmbedding(group), items: group });
+  }
+  return rebuilt;
+}
+
+export function buildSpeakerClusters(items, options = {}) {
+  const threshold = options.threshold ?? 0.64;
+  const maxSpeakers = options.maxSpeakers ?? 6;
+  const minimumSamples = options.minimumSamples ?? 2;
+  const minimumDurationMs = options.minimumDurationMs ?? 2400;
+  const singleSegmentDurationMs = options.singleSegmentDurationMs ?? 5000;
+  const weakMergeThreshold = options.weakMergeThreshold ?? 0.48;
+  const trustedSpeakerIds = new Set(options.trustedSpeakerIds || []);
+  let clusters = [];
   for (const item of items) {
     if (!item.embedding) continue;
     let best = null;
@@ -95,16 +134,52 @@ function buildClusters(items, threshold = 0.64, maxSpeakers = 6) {
     best.cluster.centroid = normalize(Float32Array.from(best.cluster.centroid, (value, index) =>
       value * ((count - 1) / count) + item.embedding[index] / count));
   }
-  // One refinement pass makes early, noisy assignments less sticky.
-  for (const item of items) {
-    if (!item.embedding || !clusters.length) continue;
-    let best = { index: 0, score: -1 };
-    for (const cluster of clusters) {
-      const score = cosineSimilarity(item.embedding, cluster.centroid);
-      if (score > best.score) best = { index: cluster.index, score };
+  // Two refinement passes make early, noisy assignments less sticky and remove empty clusters.
+  for (let pass = 0; pass < 2; pass += 1) {
+    for (const item of items) {
+      if (!item.embedding || !clusters.length) continue;
+      let best = { index: 0, score: -1 };
+      for (const cluster of clusters) {
+        const score = cosineSimilarity(item.embedding, cluster.centroid);
+        if (score > best.score) best = { index: cluster.index, score };
+      }
+      item.clusterIndex = best.index;
+      item.speakerConfidence = best.score;
     }
-    item.clusterIndex = best.index;
-    item.speakerConfidence = best.score;
+    clusters = rebuildClusters(items, clusters);
+  }
+
+  if (clusters.length <= 1) return clusters;
+  const strongClusters = clusters.filter((cluster) => {
+    const durationMs = cluster.items.reduce((total, item) => total + speechDurationMs(item), 0);
+    const trusted = cluster.items.some((item) => trustedSpeakerIds.has(item.originalSpeakerId));
+    return trusted
+      || (cluster.items.length >= minimumSamples && durationMs >= minimumDurationMs)
+      || durationMs >= singleSegmentDurationMs;
+  });
+  if (!strongClusters.length) {
+    strongClusters.push([...clusters].sort((left, right) => right.items.length - left.items.length)[0]);
+  }
+  if (strongClusters.length < clusters.length) {
+    const strongOldIndexes = new Set(strongClusters.map((cluster) => cluster.index));
+    const strongIndexByOldIndex = new Map(strongClusters.map((cluster, index) => [cluster.index, index]));
+    for (const item of items) {
+      if (item.clusterIndex === null || item.clusterIndex === undefined) continue;
+      if (strongOldIndexes.has(item.clusterIndex)) {
+        item.clusterIndex = strongIndexByOldIndex.get(item.clusterIndex);
+        continue;
+      }
+      let best = null;
+      for (const cluster of strongClusters) {
+        const score = cosineSimilarity(item.embedding, cluster.centroid);
+        if (!best || score > best.score) best = { cluster, score };
+      }
+      item.clusterIndex = best && best.score >= weakMergeThreshold
+        ? strongIndexByOldIndex.get(best.cluster.index)
+        : null;
+      item.speakerConfidence = best?.score ?? item.speakerConfidence;
+    }
+    clusters = rebuildClusters(items, strongClusters.map((cluster, index) => ({ ...cluster, index })));
   }
   return clusters;
 }
@@ -133,7 +208,14 @@ export async function correctMeetingSpeakers({ meetingId, dataRoot, storage, spe
     closeSync(fd);
   }
 
-  const clusters = buildClusters(items, 0.64, normalizeMaxSpeakers(maxSpeakers));
+  const trustedSpeakerIds = storage.listSpeakers(meetingId)
+    .filter((speaker) => speaker.manuallyNamed || speaker.profileId)
+    .map((speaker) => speaker.id);
+  const clusters = buildSpeakerClusters(items, {
+    threshold: 0.64,
+    maxSpeakers: normalizeMaxSpeakers(maxSpeakers),
+    trustedSpeakerIds,
+  });
   const usedSpeakerIds = new Set();
   const usedProfileIds = new Set();
   const clusterSpeaker = new Map();

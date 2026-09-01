@@ -39,7 +39,7 @@ test("server-renders the meeting transcription product", async () => {
   assert.doesNotMatch(html, /重新检查/);
   assert.match(html, /录音来源/);
   assert.match(html, /电脑声音 \+ 麦克风/);
-  assert.match(html, /v0\.6\.6/);
+  assert.match(html, /v0\.6\.7/);
   assert.match(html, /<span><b>设置<\/b>/);
   assert.match(html, /管理录音与空间/);
   assert.match(html, /发言人数识别/);
@@ -158,7 +158,7 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(page, /setView\("summary"\)/);
   assert.match(page, /发言人校正可按需手动运行/);
   assert.match(page, /只保存在这台电脑/);
-  assert.match(page, /图文纪要/);
+  assert.match(page, /图文总结/);
   assert.match(page, /切换不消耗额度/);
   assert.match(page, /socketUrl\.searchParams\.set\("template"/);
   assert.match(page, /socketUrl\.searchParams\.set\("autoSummary"/);
