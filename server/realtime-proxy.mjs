@@ -22,7 +22,7 @@ import {
   getStorageStats,
   recoverInterruptedMeetings,
 } from "./storage-maintenance.mjs";
-import { summarizeMeeting, summarizeMeetingPreview } from "./summarizer.mjs";
+import { normalizeMeetingSummary, summarizeMeeting, summarizeMeetingPreview } from "./summarizer.mjs";
 import { createWorkspaceBackup, restoreWorkspaceBackup } from "./workspace-backup.mjs";
 import {
   SUMMARY_TEMPLATE_VERSION,
@@ -725,6 +725,8 @@ const httpServer = createServer(async (request, response) => {
       const body = await readJson(request);
       const patch = {};
       let renamedMeeting = null;
+      const currentMeeting = storage.getMeeting(meetingMatch[1]);
+      if (!currentMeeting) return jsonResponse(response, 404, { error: "会议不存在" });
       if (Object.hasOwn(body, "title")) {
         const title = String(body.title || "").trim();
         if (!title) return jsonResponse(response, 400, { error: "会议名称不能为空" });
@@ -738,6 +740,16 @@ const httpServer = createServer(async (request, response) => {
       let meeting = Object.keys(patch).length
         ? storage.updateMeeting(meetingMatch[1], patch)
         : renamedMeeting || storage.getMeeting(meetingMatch[1]);
+      if (Object.hasOwn(body, "summary")) {
+        if (meetingIsBusy(meeting)) {
+          return jsonResponse(response, 409, { error: "会议仍在处理中，请稍后再编辑会议简报" });
+        }
+        const summary = normalizeMeetingSummary(body.summary, meeting);
+        summary.brief.userEdited = true;
+        summary.brief.updatedAt = new Date().toISOString();
+        storage.saveSummary(meeting.id, summary);
+        meeting = storage.getMeeting(meeting.id);
+      }
       if (meeting && Object.hasOwn(body, "fillerFilterEnabled")) {
         if (meetingIsBusy(meeting)) {
           return jsonResponse(response, 409, { error: "会议仍在处理中，请稍后再整理逐字稿" });

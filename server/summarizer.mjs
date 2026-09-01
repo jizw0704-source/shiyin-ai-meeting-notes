@@ -40,6 +40,13 @@ function evidence(value, validSeqs) {
   return [...new Set(result)].slice(0, 12);
 }
 
+const MEETING_TYPES = new Set(["general", "research", "project", "review", "decision", "brainstorm"]);
+const MEETING_SCOPES = new Set(["external", "internal", "unknown"]);
+
+function meetingType(value) {
+  return MEETING_TYPES.has(value) ? value : "general";
+}
+
 function cleanModelContent(content) {
   return String(content || "").trim()
     .replace(/<think>[\s\S]*?<\/think>/gi, "")
@@ -174,6 +181,34 @@ export function normalizeMeetingSummary(value, meeting = null) {
   return {
     headline: text(source.headline),
     overview: text(source.overview, "未生成有效总结"),
+    meetingType: meetingType(source.meetingType),
+    meetingTypeReason: text(source.meetingTypeReason),
+    meetingTypeConfidence: ["高", "中", "低"].includes(text(source.meetingTypeConfidence))
+      ? text(source.meetingTypeConfidence)
+      : "中",
+    meetingIdentity: {
+      scope: MEETING_SCOPES.has(source.meetingIdentity?.scope)
+        ? source.meetingIdentity.scope
+        : "unknown",
+      counterpartyOrganization: text(source.meetingIdentity?.counterpartyOrganization),
+      primaryContact: text(source.meetingIdentity?.primaryContact),
+      projectOrDepartment: text(source.meetingIdentity?.projectOrDepartment),
+      subject: text(source.meetingIdentity?.subject, text(source.brief?.subject, text(source.headline))),
+      evidenceSeqs: evidence(source.meetingIdentity?.evidenceSeqs, validSeqs),
+    },
+    brief: {
+      subject: text(source.brief?.subject, text(source.headline)),
+      participants: text(source.brief?.participants),
+      sections: (Array.isArray(source.brief?.sections) ? source.brief.sections : []).map((item, index) => ({
+        id: text(item?.id, `section-${index + 1}`),
+        title: text(item?.title, "会议要点"),
+        content: text(item?.content),
+        evidenceSeqs: evidence(item?.evidenceSeqs, validSeqs),
+      })).filter((item) => item.content).slice(0, 8),
+      aiSuggestions: strings(source.brief?.aiSuggestions, 6),
+      userEdited: Boolean(source.brief?.userEdited),
+      updatedAt: text(source.brief?.updatedAt),
+    },
     meetingBackground: text(source.meetingBackground),
     overviewCards: (Array.isArray(source.overviewCards) ? source.overviewCards : []).map((item) => ({
       title: text(item?.title, "会议要点"),
@@ -502,6 +537,11 @@ const FINAL_PROMPT = `你是资深中文会议分析师，要制作接近钉钉A
 {
   "headline":"25到55字、准确概括会议成果的标题",
   "overview":"150到300字的会议全貌，交代背景、重点、分歧和结果",
+  "meetingType":"general/research/project/review/decision/brainstorm之一",
+  "meetingTypeReason":"一句话说明分类依据",
+  "meetingTypeConfidence":"高/中/低",
+  "meetingIdentity":{"scope":"external/internal/unknown之一","counterpartyOrganization":"外部会议中的对方单位；没有证据则空字符串","primaryContact":"原文明确出现的主要联系人及称谓；没有证据则空字符串","projectOrDepartment":"内部会议中明确出现的项目或部门；没有证据则空字符串","subject":"12到28字的会议主题，不写成果口号","evidenceSeqs":[0]},
+  "brief":{"subject":"会议主题","participants":"参会人员或相关方；无法确认则写未明确","sections":[{"id":"current-situation","title":"根据会议类型生成的栏目名","content":"40到140字的简明内容","evidenceSeqs":[0]}],"aiSuggestions":["明确标注为AI建议的会后推进建议"]},
   "meetingBackground":"100到220字，说明召开背景、目标和讨论范围",
   "overviewCards":[{"title":"总览板块名","summary":"一句概括","points":["2到5个浓缩要点"],"evidenceSeqs":[0]}],
   "keyFacts":[{"value":"12所","label":"已调研高校","context":"数字的具体含义","evidenceSeqs":[0]}],
@@ -525,7 +565,12 @@ const FINAL_PROMPT = `你是资深中文会议分析师，要制作接近钉钉A
 6. notableMoments最多8条，text必须是材料中的短句原文，不得润色伪造。
 7. evidenceSeqs只能引用输入中真实出现的seq；所有板块都要尽量提供原文证据。
 8. 信息密度优先，不要把不同主题压成空泛短句，不要重复同一内容凑数。
-9. speaker_uncertain为true表示疑似多人同时发言：不得把该内容、观点、引语或行动责任强行归给具体个人，并在risks中保留“发言归属待确认”。`;
+9. speaker_uncertain为true表示疑似多人同时发言：不得把该内容、观点、引语或行动责任强行归给具体个人，并在risks中保留“发言归属待确认”。
+10. 先判断meetingType。research表示调研访谈，project表示项目推进，review表示方案或成果评审，decision表示决策讨论，brainstorm表示头脑风暴，其余使用general；把握不足时必须使用general或低可信度。
+11. brief.sections生成4到6个按阅读逻辑排列的板块。research优先使用“被调研方现状、核心痛点、当前应对方式、真实期望、待验证问题”；project优先使用“当前进展、阻塞问题、依赖关系、下一步”；review优先使用“评审目标、主要意见、风险、修改要求、结论”；general根据真实内容使用“会议主题、主要问题、各方期望、会议共识、会后推进”。没有出现的内容不得硬凑，未明确时直写“会议中未明确”。
+12. brief.aiSuggestions只能写基于会议事实的模型建议，不能冒充会议共识；brief整体应让未参会者在一分钟内看懂。
+13. meetingIdentity用于自动命名。明确存在外部对方时scope为external，明确是本公司内部协作时为internal；证据不足必须为unknown。external只填写对方单位，不得把本方单位写成counterpartyOrganization；internal只填写原文明确出现的项目或部门。
+14. primaryContact必须保留原文中的姓名和称谓，例如“王老师”“张总”“李工”；原文只出现姓名时不得擅自补加“老师”等称谓。多人时只在原文明确信息足够的情况下使用“王老师等”。任何未知字段都返回空字符串，不得猜测或填写“未明确”。subject只概括讨论主题，不要写“达成共识”等成果口号。`;
 
 async function extractLongMeeting(transcript, apiKey, model, options = {}) {
   const chunks = splitTranscript(transcript);
@@ -656,6 +701,7 @@ export async function summarizeMeeting(meeting, apiKey, model = "MiniMax-M3", op
   const summary = normalizeMeetingSummary(rawSummary, meeting);
   const structuredSections = [
     summary.overviewCards,
+    summary.brief.sections,
     summary.keyFacts,
     summary.decisions,
     summary.topics,

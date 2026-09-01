@@ -2,6 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowLeft,
   ArrowRight,
   ArrowClockwise,
   ArrowUp,
@@ -40,8 +41,9 @@ import versionHistoryData from "../public/version-history.json";
 
 type View = "transcript" | "summary" | "actions";
 type MeetingStatus = "recording" | "importing" | "correcting" | "summarizing" | "retranscribing" | "enhancing" | "completed" | "failed";
-type SummaryTemplateId = "meeting-minutes" | "daily-log" | "project-sync" | "brainstorm";
+type SummaryTemplateId = "meeting-brief" | "meeting-minutes" | "daily-log" | "project-sync" | "brainstorm";
 type ReportStyle = "detailed" | "visual";
+type MeetingType = "general" | "research" | "project" | "review" | "decision" | "brainstorm";
 type AudioSourceMode = "microphone" | "system" | "mixed";
 type SpeakerLimit = 6 | 12 | 20;
 type SpeakerLimitMode = "auto" | "manual";
@@ -188,6 +190,30 @@ type Segment = {
 type Summary = {
   headline?: string;
   overview: string;
+  meetingType?: MeetingType;
+  meetingTypeReason?: string;
+  meetingTypeConfidence?: "高" | "中" | "低";
+  meetingIdentity?: {
+    scope: "external" | "internal" | "unknown";
+    counterpartyOrganization: string;
+    primaryContact: string;
+    projectOrDepartment: string;
+    subject: string;
+    evidenceSeqs: number[];
+  };
+  brief?: {
+    subject: string;
+    participants: string;
+    sections: Array<{
+      id: string;
+      title: string;
+      content: string;
+      evidenceSeqs: number[];
+    }>;
+    aiSuggestions: string[];
+    userEdited?: boolean;
+    updatedAt?: string;
+  };
   isLiveDraft?: boolean;
   generatedAt?: string;
   throughSeq?: number | null;
@@ -295,6 +321,7 @@ type MeetingBrief = {
   sourceType: "recorded" | "imported";
   sourceName: string | null;
   deletedAt: string | null;
+  attachmentCount: number;
 };
 type Meeting = MeetingBrief & {
   speakers: Speaker[];
@@ -367,7 +394,7 @@ const recordingBackdrops: Array<{ id: RecordingBackdrop; name: string; detail: s
   { id: "paper", name: "清爽", detail: "暖白纸面" },
   { id: "focus", name: "专注", detail: "沉浸蓝光" },
   { id: "wave", name: "声场", detail: "青蓝声场" },
-  { id: "midnight", name: "夜间", detail: "深夜专注" },
+  { id: "midnight", name: "夜间", detail: "低光蓝灰" },
 ];
 const summaryTemplates: Array<{
   id: SummaryTemplateId;
@@ -375,6 +402,7 @@ const summaryTemplates: Array<{
   description: string;
   accent: string;
 }> = [
+  { id: "meeting-brief", name: "会议简报", description: "AI 分类后提炼问题、期望、共识与推进", accent: "slate" },
   { id: "meeting-minutes", name: "会议纪要", description: "决策、议题、风险与行动项", accent: "blue" },
   { id: "daily-log", name: "日常记录", description: "按时间整理交流、灵感与提醒", accent: "cyan" },
   { id: "project-sync", name: "项目周会", description: "进展、阻塞、依赖与下一步", accent: "green" },
@@ -386,11 +414,29 @@ function summaryTemplateName(id: SummaryTemplateId | undefined) {
 }
 
 function summaryTemplateIcon(id: SummaryTemplateId, size = 20) {
+  if (id === "meeting-brief") return <FileText size={size} weight="duotone" />;
   if (id === "daily-log") return <Quotes size={size} weight="duotone" />;
   if (id === "project-sync") return <Target size={size} weight="duotone" />;
   if (id === "brainstorm") return <Brain size={size} weight="duotone" />;
   return <ListChecks size={size} weight="duotone" />;
 }
+
+const meetingTypeNames: Record<MeetingType, string> = {
+  general: "通用会议",
+  research: "调研访谈",
+  project: "项目推进",
+  review: "方案评审",
+  decision: "决策讨论",
+  brainstorm: "头脑风暴",
+};
+
+type EditableMeetingBrief = {
+  subject: string;
+  participants: string;
+  sections: Array<{ id: string; title: string; content: string; evidenceSeqs: number[] }>;
+  aiSuggestions: string[];
+  actionItems: Summary["actionItems"];
+};
 
 function formatClock(milliseconds: number | null | undefined) {
   const seconds = Math.max(0, Math.round((milliseconds || 0) / 1000));
@@ -407,6 +453,14 @@ function formatMeetingDate(iso: string) {
     ? "今天"
     : `${value.getMonth() + 1}月${value.getDate()}日`;
   return `${date} ${value.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })}`;
+}
+
+function formatWorkspaceDuration(milliseconds: number) {
+  const minutes = Math.max(0, Math.round(milliseconds / 60000));
+  if (minutes < 60) return `${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder ? `${hours} 小时 ${remainder} 分` : `${hours} 小时`;
 }
 
 function formatBytes(bytes: number | null | undefined) {
@@ -452,6 +506,7 @@ function summaryLooksInvalid(summary: Summary | null | undefined) {
   }
   const structuredItems = [
     summary.overviewCards,
+    summary.brief?.sections,
     summary.keyFacts,
     summary.decisions,
     summary.topics,
@@ -465,6 +520,161 @@ function summaryLooksInvalid(summary: Summary | null | undefined) {
     summary.keywords,
   ].reduce((total, items) => total + (items?.length || 0), 0);
   return !summary.headline && structuredItems === 0;
+}
+
+function deriveMeetingBrief(meeting: Meeting, summary: Summary): EditableMeetingBrief {
+  const fallbackSections = (summary.overviewCards || []).slice(0, 5).map((card, index) => ({
+    id: `overview-${index + 1}`,
+    title: card.title,
+    content: [card.summary, ...(card.points || [])].filter(Boolean).join("；"),
+    evidenceSeqs: card.evidenceSeqs || [],
+  }));
+  if (!fallbackSections.length) {
+    fallbackSections.push(
+      { id: "overview", title: "核心讨论", content: summary.overview, evidenceSeqs: [] },
+      { id: "problems", title: "主要问题", content: summary.risks.join("；") || "会议中未明确", evidenceSeqs: [] },
+      { id: "consensus", title: "会议共识", content: summary.decisions.join("；") || "会议中未明确", evidenceSeqs: [] },
+    );
+  }
+  const namedSpeakers = meeting.speakers
+    .map((speaker) => speaker.displayName)
+    .filter((name) => name && !/^发言人\d+$/.test(name));
+  return {
+    subject: summary.brief?.subject || summary.headline || meeting.title,
+    participants: summary.brief?.participants || namedSpeakers.join(" · ") || `${meeting.speakers.length} 位参会者`,
+    sections: summary.brief?.sections?.length ? summary.brief.sections : fallbackSections,
+    aiSuggestions: summary.brief?.aiSuggestions || summary.aiInsights?.slice(0, 3).map((item) => item.insight) || [],
+    actionItems: summary.actionItems || [],
+  };
+}
+
+function briefDate(iso: string) {
+  const value = new Date(iso);
+  return value.toLocaleString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).replaceAll("/", ".");
+}
+
+function wrapCanvasText(context: CanvasRenderingContext2D, value: string, maxWidth: number) {
+  const lines: string[] = [];
+  for (const paragraph of String(value || "").split(/\n+/)) {
+    let line = "";
+    for (const character of paragraph || " ") {
+      const next = line + character;
+      if (line && context.measureText(next).width > maxWidth) {
+        lines.push(line);
+        line = character;
+      } else {
+        line = next;
+      }
+    }
+    if (line) lines.push(line);
+  }
+  return lines.length ? lines : ["会议中未明确"];
+}
+
+function downloadBriefImage(meeting: Meeting, summary: Summary, brief: EditableMeetingBrief) {
+  const width = 1240;
+  const margin = 118;
+  const contentWidth = width - margin * 2;
+  const measureCanvas = document.createElement("canvas");
+  const measure = measureCanvas.getContext("2d");
+  if (!measure) throw new Error("当前设备无法生成简报图片");
+  measure.font = '32px "PingFang SC", "Microsoft YaHei", sans-serif';
+  const sectionLayouts = brief.sections.map((section) => ({
+    ...section,
+    lines: wrapCanvasText(measure, section.content, contentWidth - 150),
+  }));
+  const actionLayouts = brief.actionItems.slice(0, 8).map((item) => ({
+    ...item,
+    lines: wrapCanvasText(measure, item.task, contentWidth - 330),
+  }));
+  const suggestionLines = brief.aiSuggestions.flatMap((item) => wrapCanvasText(measure, item, contentWidth - 70));
+  const bodyHeight = sectionLayouts.reduce((total, section) => total + 94 + section.lines.length * 43, 0)
+    + (actionLayouts.length ? 130 + actionLayouts.reduce((total, item) => total + Math.max(68, item.lines.length * 38), 0) : 0)
+    + (suggestionLines.length ? 150 + suggestionLines.length * 42 : 0);
+  const height = Math.max(1754, 570 + bodyHeight);
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("当前设备无法生成简报图片");
+  context.fillStyle = "#f7f5ef";
+  context.fillRect(0, 0, width, height);
+  context.fillStyle = "#202421";
+  context.font = '600 70px "Songti SC", "STSong", serif';
+  context.fillText("会议简报", margin, 150);
+  context.fillStyle = "#788474";
+  context.fillRect(margin, 190, 82, 3);
+  context.fillStyle = "#202421";
+  context.font = '600 38px "PingFang SC", "Microsoft YaHei", sans-serif';
+  const titleLines = wrapCanvasText(context, meeting.title, contentWidth);
+  titleLines.slice(0, 2).forEach((line, index) => context.fillText(line, margin, 270 + index * 52));
+  let y = 310 + Math.min(2, titleLines.length) * 52;
+  context.fillStyle = "#59605a";
+  context.font = '25px "PingFang SC", "Microsoft YaHei", sans-serif';
+  context.fillText(`${briefDate(meeting.startedAt)}  ·  ${formatClock(meeting.durationMs)}  ·  ${brief.participants}`, margin, y);
+  y += 65;
+  context.strokeStyle = "#d2d3cb";
+  context.lineWidth = 1;
+  context.beginPath(); context.moveTo(margin, y); context.lineTo(width - margin, y); context.stroke();
+  y += 76;
+  sectionLayouts.forEach((section, index) => {
+    context.fillStyle = "#788474";
+    context.font = '500 37px "Georgia", serif';
+    context.fillText(String(index + 1).padStart(2, "0"), margin, y);
+    context.beginPath(); context.arc(margin + 82, y - 10, 5, 0, Math.PI * 2); context.fill();
+    context.fillStyle = "#202421";
+    context.font = '600 32px "PingFang SC", "Microsoft YaHei", sans-serif';
+    context.fillText(section.title, margin + 118, y);
+    context.fillStyle = "#3e443f";
+    context.font = '28px "PingFang SC", "Microsoft YaHei", sans-serif';
+    section.lines.forEach((line, lineIndex) => context.fillText(line, margin + 118, y + 54 + lineIndex * 43));
+    y += 92 + section.lines.length * 43;
+    context.strokeStyle = "#dbdcd5";
+    context.beginPath(); context.moveTo(margin + 118, y - 24); context.lineTo(width - margin, y - 24); context.stroke();
+  });
+  if (actionLayouts.length) {
+    context.fillStyle = "#202421";
+    context.font = '600 32px "PingFang SC", "Microsoft YaHei", sans-serif';
+    context.fillText("会后推进", margin + 118, y + 20);
+    y += 70;
+    context.font = '27px "PingFang SC", "Microsoft YaHei", sans-serif';
+    actionLayouts.forEach((item, index) => {
+      context.fillStyle = "#788474";
+      context.fillText(String(index + 1).padStart(2, "0"), margin + 118, y);
+      context.fillStyle = "#303531";
+      item.lines.forEach((line, lineIndex) => context.fillText(line, margin + 182, y + lineIndex * 38));
+      context.fillStyle = "#656b66";
+      context.fillText(`${item.owner}  ${item.due}`, width - margin - 230, y);
+      y += Math.max(68, item.lines.length * 38);
+    });
+  }
+  if (suggestionLines.length) {
+    y += 24;
+    context.fillStyle = "#eceee8";
+    context.fillRect(margin + 118, y, contentWidth - 118, 105 + suggestionLines.length * 42);
+    context.fillStyle = "#65715f";
+    context.font = '600 29px "PingFang SC", "Microsoft YaHei", sans-serif';
+    context.fillText("AI 推进建议", margin + 155, y + 48);
+    context.fillStyle = "#414741";
+    context.font = '27px "PingFang SC", "Microsoft YaHei", sans-serif';
+    suggestionLines.forEach((line, index) => context.fillText(line, margin + 155, y + 94 + index * 42));
+  }
+  canvas.toBlob((blob) => {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${safeFilename(meeting.title)}-会议简报.png`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }, "image/png");
 }
 
 function microphoneScore(input: AudioInput) {
@@ -629,6 +839,11 @@ export default function Home() {
   const [replaceWholeWord, setReplaceWholeWord] = useState(false);
   const [transcriptSaving, setTranscriptSaving] = useState(false);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+  const [summaryMode, setSummaryMode] = useState<"brief" | "full">("brief");
+  const [briefEditing, setBriefEditing] = useState(false);
+  const [briefDraft, setBriefDraft] = useState<EditableMeetingBrief | null>(null);
+  const [briefSaving, setBriefSaving] = useState(false);
   const [obsidianSaving, setObsidianSaving] = useState(false);
   const [obsidianAutoSave, setObsidianAutoSave] = useState(false);
   const [notebookSettings, setNotebookSettings] = useState<NotebookSettings | null>(null);
@@ -669,6 +884,7 @@ export default function Home() {
   const [templateDraft, setTemplateDraft] = useState<SummaryTemplateId>(DEFAULT_SUMMARY_TEMPLATE);
   const [reportStyleDraft, setReportStyleDraft] = useState<ReportStyle>(DEFAULT_REPORT_STYLE);
   const [settingsPageOpen, setSettingsPageOpen] = useState(false);
+  const [workspacePageOpen, setWorkspacePageOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("general");
   const [miniMaxSettings, setMiniMaxSettings] = useState<MiniMaxSettings | null>(null);
   const [miniMaxKeyDraft, setMiniMaxKeyDraft] = useState("");
@@ -687,6 +903,7 @@ export default function Home() {
   const [segmentSpeakerSavingId, setSegmentSpeakerSavingId] = useState<string | null>(null);
   const [speakerSuggestionSavingId, setSpeakerSuggestionSavingId] = useState<string | null>(null);
   const [showBackToTop, setShowBackToTop] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>("system");
   const [recordingBackdrop, setRecordingBackdrop] = useState<RecordingBackdrop>("paper");
   const [autoSummaryEnabled, setAutoSummaryEnabled] = useState(true);
@@ -740,6 +957,14 @@ export default function Home() {
     window.scrollTo({ top: 0, behavior });
   }, []);
 
+  const toggleSidebarCollapsed = useCallback(() => {
+    setSidebarCollapsed((current) => {
+      const next = !current;
+      window.localStorage.setItem("shiyin.sidebarCollapsed", String(next));
+      return next;
+    });
+  }, []);
+
   const refreshCaptureCapabilities = useCallback(async () => {
     const desktop = window.shiyinDesktop;
     if (!desktop) {
@@ -777,6 +1002,7 @@ export default function Home() {
       const savedBackdrop = window.localStorage.getItem("shiyin.recordingBackdrop") as RecordingBackdrop | null;
       const savedAutoSummary = window.localStorage.getItem("shiyin.autoSummary");
       const savedAutoTitle = window.localStorage.getItem("shiyin.autoTitle");
+      const savedSidebarCollapsed = window.localStorage.getItem("shiyin.sidebarCollapsed");
       if (summaryTemplates.some((template) => template.id === savedTemplate)) {
         setDefaultSummaryTemplate(savedTemplate!);
       }
@@ -791,6 +1017,7 @@ export default function Home() {
       if (recordingBackdrops.some((item) => item.id === savedBackdrop)) setRecordingBackdrop(savedBackdrop!);
       setAutoSummaryEnabled(savedAutoSummary !== "false");
       setAutoTitleEnabled(savedAutoTitle !== "false");
+      setSidebarCollapsed(savedSidebarCollapsed === "true");
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
@@ -868,6 +1095,7 @@ export default function Home() {
   }, [templateDialogOpen]);
 
   const openSettingsDialog = useCallback(async (section: SettingsSection = "general") => {
+    setWorkspacePageOpen(false);
     const desktop = window.shiyinDesktop;
     if (!desktop) {
       setSettingsSection(section);
@@ -1209,6 +1437,16 @@ export default function Home() {
   }, [selectedId, loadMeeting, meeting?.id]);
 
   useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setBriefEditing(false);
+      setBriefDraft(null);
+      setSummaryMode("brief");
+      setMoreMenuOpen(false);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [meeting?.id]);
+
+  useEffect(() => {
     recordingRef.current = recording;
     if (!recording) return;
     const id = window.setInterval(() => setSeconds((value) => value + 1), 1000);
@@ -1297,6 +1535,11 @@ export default function Home() {
     ? "上次生成的总结格式异常，原始内容已被安全隐藏。请重新生成。"
     : meeting?.error || "";
   const usableSummary = finalSummary || liveSummary || null;
+  const generatedBrief = useMemo(
+    () => meeting && usableSummary ? deriveMeetingBrief(meeting, usableSummary) : null,
+    [meeting, usableSummary],
+  );
+  const activeBrief = briefDraft || generatedBrief;
   const actions = usableSummary?.actionItems || [];
   const chapters = usableSummary?.chapters || [];
   const overviewCards = usableSummary?.overviewCards || [];
@@ -1336,6 +1579,15 @@ export default function Home() {
       || formatMeetingDate(item.startedAt).toLocaleLowerCase("zh-CN").includes(normalizedQuery)
     ));
   }, [historyQuery, meetings]);
+  const workspaceStats = useMemo(() => ({
+    totalDurationMs: meetings.reduce((total, item) => total + Math.max(0, item.durationMs || 0), 0),
+    summarizedMeetings: meetings.filter((item) => Boolean(item.summary)).length,
+    attachmentCount: meetings.reduce((total, item) => total + Math.max(0, item.attachmentCount || 0), 0),
+  }), [meetings]);
+  const meetingsWithMaterials = useMemo(
+    () => meetings.filter((item) => item.attachmentCount > 0),
+    [meetings],
+  );
   const preflightReadyCount = meetingPreflight?.checks.filter((item) => item.status === "ready").length || 0;
   const preflightAttentionCount = meetingPreflight?.checks.filter((item) => item.status !== "ready").length || 0;
   const preflightStatusLabel = meetingPreflightLoading && !meetingPreflight
@@ -1383,6 +1635,7 @@ export default function Home() {
   function returnToCurrentMeeting() {
     const targetMeetingId = currentMeetingIdRef.current || selectedId || meeting?.id || null;
     setSettingsPageOpen(false);
+    setWorkspacePageOpen(false);
     setView("transcript");
     if (targetMeetingId) {
       setSelectedId(targetMeetingId);
@@ -1393,6 +1646,20 @@ export default function Home() {
       setMeeting(null);
       setSelectedId(null);
     }
+    window.requestAnimationFrame(scrollWorkspaceToTop);
+  }
+
+  function openLocalWorkspace() {
+    setSettingsPageOpen(false);
+    setWorkspacePageOpen(true);
+    window.requestAnimationFrame(scrollWorkspaceToTop);
+  }
+
+  function openWorkspaceMeeting(meetingId: string) {
+    setWorkspacePageOpen(false);
+    setSettingsPageOpen(false);
+    setSelectedId(meetingId);
+    if (meeting?.id !== meetingId) loadMeeting(meetingId).catch((error) => setNotice(error.message));
     window.requestAnimationFrame(scrollWorkspaceToTop);
   }
 
@@ -2149,6 +2416,63 @@ export default function Home() {
     }
   }
 
+  function beginBriefEditing() {
+    if (!generatedBrief || !finalSummary || !meeting) {
+      setNotice("正式 AI 总结完成后即可编辑会议简报");
+      return;
+    }
+    setBriefDraft(structuredClone(generatedBrief));
+    setBriefEditing(true);
+  }
+
+  function cancelBriefEditing() {
+    setBriefDraft(null);
+    setBriefEditing(false);
+  }
+
+  async function saveBriefEditing() {
+    if (!meeting || !finalSummary || !briefDraft || briefSaving) return;
+    setBriefSaving(true);
+    try {
+      const updated = await api<Meeting>(`/api/meetings/${meeting.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          summary: {
+            ...finalSummary,
+            brief: {
+              ...(finalSummary.brief || {}),
+              subject: briefDraft.subject,
+              participants: briefDraft.participants,
+              sections: briefDraft.sections,
+              aiSuggestions: briefDraft.aiSuggestions,
+              userEdited: true,
+            },
+            actionItems: briefDraft.actionItems,
+          },
+        }),
+      });
+      setMeeting(updated);
+      mergeMeetingList(updated);
+      setBriefDraft(null);
+      setBriefEditing(false);
+      setNotice("会议简报已保存；现在可以导出完整图片");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法保存会议简报");
+    } finally {
+      setBriefSaving(false);
+    }
+  }
+
+  function exportBriefImage() {
+    if (!meeting || !usableSummary || !activeBrief) return;
+    try {
+      downloadBriefImage(meeting, usableSummary, activeBrief);
+      setNotice("会议简报图片已导出");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法导出会议简报图片");
+    }
+  }
+
   function beginRenameMeeting(item: MeetingBrief) {
     if (meetingIsBusy(item.status) || processing || recording) return;
     setRenamingMeeting(item);
@@ -2665,7 +2989,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
       : "点击开始后，macOS 会弹出共享面板，请选择会议所在屏幕并开启系统音频。";
 
   return (
-    <main className={`app-shell recording-backdrop-${recordingBackdrop} ${recording ? "is-recording" : ""}`}>
+    <main className={`app-shell recording-backdrop-${recordingBackdrop} ${recording ? "is-recording" : ""} ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       <header className="window-chrome" aria-label="拾音 AI 软件窗口">
         <div className="window-chrome-safe-area">
           <button type="button" className="window-chrome-brand" onClick={returnToCurrentMeeting} title="返回本次会议" aria-label="返回本次会议">
@@ -2688,16 +3012,39 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
         accept=".txt,.md,.markdown,.csv,.json,.log,.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.png,.jpg,.jpeg,.webp,.heic"
         onChange={(event) => handleAttachmentFiles(event.target.files)}
       />
-      <aside className="sidebar">
-        <button type="button" className="brand" onClick={returnToCurrentMeeting} title="返回本次会议" aria-label="返回本次会议">
-          <span className="brand-mark">听</span><span>拾音</span><em>AI</em>
-        </button>
+      <aside className="sidebar" id="app-sidebar">
+        <div className="sidebar-brand-row">
+          <button type="button" className="brand" onClick={returnToCurrentMeeting} title="返回本次会议" aria-label="返回本次会议">
+            <span className="brand-mark">听</span><span>拾音</span><em>AI</em>
+          </button>
+          <button
+            type="button"
+            className="sidebar-collapse-toggle"
+            onClick={toggleSidebarCollapsed}
+            aria-controls="app-sidebar"
+            aria-expanded={!sidebarCollapsed}
+            aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
+            title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
+          >
+            <ArrowRight size={15} />
+          </button>
+        </div>
         <button className="new-note" disabled={processing} onClick={() => {
-          if (!recording) setSettingsPageOpen(false);
+          if (!recording) {
+            setSettingsPageOpen(false);
+            setWorkspacePageOpen(false);
+          }
           void toggleRecording();
         }}>
           <span>{recording ? "■" : "●"}</span>{recording ? "结束听记" : "开始新听记"}
         </button>
+        <details className="sidebar-quick-settings">
+          <summary>
+            <span><Waveform size={16} weight="duotone" /><b>本次会议设置</b></span>
+            <small>{audioSourceMode === "mixed" ? "混合录音" : audioSourceMode === "system" ? "电脑声音" : "麦克风"} · {speakerLimitMode === "auto" ? "自动识别人声" : `最多 ${speakerLimit} 人`}</small>
+            <ArrowRight size={13} />
+          </summary>
+          <div className="sidebar-quick-settings-body">
         <button type="button" className="local-storage-note" onClick={() => void openSettingsDialog("data")}>
           <HardDrives size={17} weight="duotone" />
           <span><b>本机存储</b><small>管理录音与空间</small></span>
@@ -2887,6 +3234,8 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             <em>{globalShortcutStatus.openWindow && globalShortcutStatus.toggleRecording ? "桌面全局快捷键" : "快捷键被其他应用占用"}</em>
           </div>
         )}
+          </div>
+        </details>
         <div className="nav-label history-heading">
           <span>历史会议</span>
           <span><b>{meetings.length}</b><button type="button" onClick={() => void openTrashDialog()}><Trash size={12} /> 最近删除</button></span>
@@ -2909,6 +3258,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                 className={`meeting ${selectedId === item.id ? "active" : ""}`}
                 onClick={() => {
                   setSettingsPageOpen(false);
+                  setWorkspacePageOpen(false);
                   setSelectedId(item.id);
                 }}
                 aria-label={`查看会议：${item.title}`}
@@ -2958,11 +3308,13 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             <GearSix size={17} weight="duotone" />
             <span><b>设置</b><small>{miniMaxSettings?.configured ? `v${displayedAppVersion} · 偏好、AI 与数据` : `v${displayedAppVersion} · 需要配置 MiniMax`}</small></span>
           </button>
-          <div className="profile"><span>本</span><p><b>本机工作区</b><small>{speakerLimitMode === "auto" ? "新会议自动检测发言人" : `新会议最多 ${speakerLimit} 人`}</small></p></div>
+          <button type="button" className={`profile workspace-entry ${workspacePageOpen ? "active" : ""}`} onClick={openLocalWorkspace} aria-label="打开本机工作区">
+            <span>本</span><p><b>本机工作区</b><small>{meetings.length} 场会议 · {workspaceStats.attachmentCount} 份资料</small></p><ArrowRight size={14} />
+          </button>
         </div>
       </aside>
 
-      <section className={`workspace ${settingsPageOpen ? "settings-workspace" : ""}`} ref={workspaceRef}>
+      <section className={`workspace ${settingsPageOpen ? "settings-workspace" : ""} ${workspacePageOpen ? "workspace-hub-surface" : ""}`} ref={workspaceRef}>
         {settingsPageOpen ? (
           <div className="settings-page">
             <header className="settings-page-hero">
@@ -3023,6 +3375,19 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                         {speakerLimitOptions.map((option) => <button key={option.value} className={speakerLimitMode === "manual" && speakerLimit === option.value ? "active" : ""} onClick={() => { setSpeakerLimitMode("manual"); setSpeakerLimit(option.value); window.localStorage.setItem("shiyin.speakerLimitMode", "manual"); window.localStorage.setItem("shiyin.maxSpeakers", String(option.value)); }}><b>{option.label}</b><small>{option.detail}</small></button>)}
                       </div>
                     </div>
+                    <section className={`settings-preflight meeting-preflight ${meetingPreflight?.status || "checking"}`} aria-label="会议前自检" aria-live="polite">
+                      <header>
+                        <span><ShieldCheck size={18} weight="duotone" /></span>
+                        <div><b>会议前自检</b><small>{meetingPreflightLoading && !meetingPreflight ? "正在检查录音与本地环境…" : `${preflightReadyCount} 项正常${preflightAttentionCount ? ` · ${preflightAttentionCount} 项需要留意` : ""}`}</small></div>
+                        <em>{preflightStatusLabel}</em>
+                        <button type="button" disabled={meetingPreflightLoading} onClick={() => void refreshMeetingPreflight()}><ArrowClockwise size={14} className={meetingPreflightLoading ? "spinning" : ""} /> 重新检查</button>
+                      </header>
+                      {meetingPreflight?.checks.length ? (
+                        <div className="meeting-preflight-grid">
+                          {meetingPreflight.checks.map((item) => <article key={item.id} className={item.status}>{item.status === "ready" ? <CheckCircle size={15} weight="fill" /> : <WarningCircle size={15} weight="fill" />}<span><b>{item.label}</b><small>{item.detail}</small></span></article>)}
+                        </div>
+                      ) : <div className="meeting-preflight-loading"><i /><i /><i /></div>}
+                    </section>
                     <div className="settings-info-note"><CheckCircle size={17} weight="fill" /><p><b>本地智能处理</b><span>标点恢复、实时声纹匹配和会后多人发言检查保持启用，原始识别文本不会被覆盖。</span></p></div>
                   </section>
                 )}
@@ -3031,7 +3396,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                   <section className="settings-panel" aria-labelledby="settings-ai-title">
                     <header><span><Brain size={20} weight="duotone" /></span><div><h2 id="settings-ai-title">AI 与纪要</h2><p>控制会议结束后的 MiniMax 整理流程。</p></div></header>
                     <div className="settings-switch-row"><div><b>会议结束后自动总结</b><small>关闭后只保存录音、逐字稿和发言人，可稍后手动总结。</small></div><button role="switch" aria-checked={autoSummaryEnabled} className={`settings-switch ${autoSummaryEnabled ? "on" : ""}`} onClick={() => selectAutoSummary(!autoSummaryEnabled)}><i /></button></div>
-                    <div className="settings-switch-row"><div><b>总结后自动命名会议</b><small>根据纪要生成简短名称；手动改过的名称不会被覆盖。</small></div><button role="switch" aria-checked={autoTitleEnabled} disabled={!autoSummaryEnabled} className={`settings-switch ${autoTitleEnabled ? "on" : ""}`} onClick={() => selectAutoTitle(!autoTitleEnabled)}><i /></button></div>
+                    <div className="settings-switch-row"><div><b>总结后自动命名会议</b><small>按会议类型组合对方单位、联系人或项目、主题和日期；不猜测，也不覆盖手动名称。</small></div><button role="switch" aria-checked={autoTitleEnabled} disabled={!autoSummaryEnabled} className={`settings-switch ${autoTitleEnabled ? "on" : ""}`} onClick={() => selectAutoTitle(!autoTitleEnabled)}><i /></button></div>
                     <div className="settings-block"><div><b>默认纪要方式</b><small>内容模板决定关注重点，报告样式只改变展示。</small></div><div className="settings-template-summary"><span><Sparkle size={17} weight="duotone" /><b>{summaryTemplateName(defaultSummaryTemplate)}</b><small>{defaultReportStyle === "visual" ? "图文纪要" : "深度纪要"}</small></span><button onClick={openTemplateDialog}>选择模板</button></div></div>
                     <form className="settings-credentials" onSubmit={(event) => { event.preventDefault(); void saveSettings(); }}>
                       <div className="settings-section-title"><div><b>MiniMax 连接</b><small>密钥使用当前系统安全加密，只保存在这台电脑。</small></div><em className={miniMaxSettings?.configured ? "ready" : ""}>{miniMaxSettings?.configured ? "已配置" : "未配置"}</em></div>
@@ -3102,6 +3467,57 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
               </div>
             </div>
           </div>
+        ) : workspacePageOpen ? (
+          <main className="workspace-hub" aria-labelledby="workspace-hub-title">
+            <header className="workspace-hub-hero">
+              <div>
+                <span><HardDrives size={16} weight="duotone" /> 会议资产保存在这台电脑</span>
+                <h1 id="workspace-hub-title">本机工作区</h1>
+                <p>集中查看历史会议、累计时长和会议资料。这里会逐步成为你的个人会议知识库。</p>
+              </div>
+              <button type="button" onClick={returnToCurrentMeeting}><ArrowLeft size={17} /> 返回会议</button>
+            </header>
+
+            <section className="workspace-metrics" aria-label="工作区统计">
+              <article><span><ChartBar size={19} weight="duotone" /></span><p><small>历史会议</small><strong>{meetings.length}</strong><em>场</em></p></article>
+              <article><span><Clock size={19} weight="duotone" /></span><p><small>累计时长</small><strong>{formatWorkspaceDuration(workspaceStats.totalDurationMs)}</strong></p></article>
+              <article><span><FileText size={19} weight="duotone" /></span><p><small>已生成纪要</small><strong>{workspaceStats.summarizedMeetings}</strong><em>场</em></p></article>
+              <article><span><Paperclip size={19} weight="duotone" /></span><p><small>会议资料</small><strong>{workspaceStats.attachmentCount}</strong><em>份</em></p></article>
+            </section>
+
+            <div className="workspace-hub-grid">
+              <section className="workspace-library" aria-labelledby="workspace-library-title">
+                <header>
+                  <div><span>会议档案</span><h2 id="workspace-library-title">全部历史会议</h2></div>
+                  <label><MagnifyingGlass size={14} /><input type="search" value={historyQuery} onChange={(event) => setHistoryQuery(event.target.value)} placeholder="搜索会议名称或日期" aria-label="搜索工作区会议" />{historyQuery && <button type="button" onClick={() => setHistoryQuery("")} aria-label="清空工作区搜索"><X size={12} /></button>}</label>
+                </header>
+                <div className="workspace-meeting-list">
+                  {visibleMeetings.map((item) => (
+                    <button type="button" key={item.id} onClick={() => openWorkspaceMeeting(item.id)}>
+                      <span className="workspace-meeting-date"><b>{new Date(item.startedAt).getDate().toString().padStart(2, "0")}</b><small>{new Date(item.startedAt).toLocaleDateString("zh-CN", { month: "short" })}</small></span>
+                      <span className="workspace-meeting-copy"><b>{item.title}</b><small>{formatMeetingDate(item.startedAt)} · {formatClock(item.durationMs)}{item.attachmentCount ? ` · ${item.attachmentCount} 份资料` : ""}</small></span>
+                      <span className={`workspace-summary-state ${item.summary ? "ready" : ""}`}>{item.summary ? "已有纪要" : "仅记录"}</span>
+                      <ArrowRight size={15} />
+                    </button>
+                  ))}
+                  {!loading && !meetings.length && <div className="workspace-empty"><Waveform size={30} weight="duotone" /><b>还没有会议档案</b><p>开始第一次听记后，录音、逐字稿和纪要会出现在这里。</p></div>}
+                  {!loading && Boolean(meetings.length) && !visibleMeetings.length && <div className="workspace-empty"><MagnifyingGlass size={28} /><b>没有找到匹配会议</b><p>换一个名称或日期再试试。</p></div>}
+                </div>
+              </section>
+
+              <aside className="workspace-knowledge" aria-labelledby="workspace-knowledge-title">
+                <header><span>资料库</span><h2 id="workspace-knowledge-title">会议相关资料</h2><p>资料跟随原会议保存，点击会议即可查看或继续补充。</p></header>
+                {meetingsWithMaterials.length ? (
+                  <div>{meetingsWithMaterials.slice(0, 8).map((item) => (
+                    <button type="button" key={item.id} onClick={() => openWorkspaceMeeting(item.id)}><span><FileText size={17} weight="duotone" /></span><p><b>{item.title}</b><small>{item.attachmentCount} 份资料 · {formatMeetingDate(item.startedAt)}</small></p><ArrowRight size={14} /></button>
+                  ))}</div>
+                ) : (
+                  <div className="workspace-material-empty"><Paperclip size={24} weight="duotone" /><b>还没有会议资料</b><p>可以在开始会议前或会议详情中添加 PDF、Office、Markdown 和图片。</p></div>
+                )}
+                <footer><Brain size={17} weight="duotone" /><p><b>会议知识问答</b><small>后续会在引用逐字稿与资料来源的基础上开放。</small></p></footer>
+              </aside>
+            </div>
+          </main>
         ) : (
           <>
         <header className="topbar">
@@ -3119,11 +3535,6 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
           </div>
           {meeting ? <div className="top-actions">
             <button disabled={attachmentUploading} onClick={() => attachmentInputRef.current?.click()}><Paperclip size={15} /> 资料 {meeting.attachments.length || ""}</button>
-            <button disabled={recording || processing} onClick={openTemplateDialog}><Compass size={15} /> 模板</button>
-            <button disabled={!meeting || processing || meetingIsBusy(meeting.status)} onClick={rerunCorrection}>↻ 重新校正</button>
-            <button disabled={!meeting || processing || meetingIsBusy(meeting.status)} onClick={rerunSummary}>✦ 重新总结</button>
-            <button disabled={!meeting || processing || meetingAutoNaming || meetingIsBusy(meeting.status)} onClick={() => void autoNameMeeting()}><Sparkle size={15} weight="fill" /> {meetingAutoNaming ? "正在命名" : "智能命名"}</button>
-            <button disabled={!meeting || processing || meetingIsBusy(meeting?.status)} onClick={() => setTranscriptionDialogOpen(true)}><Waveform size={15} /> 转写版本</button>
             <div className="export-control">
               <button
                 className="primary"
@@ -3146,9 +3557,22 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                 </div>
               )}
             </div>
-            <button className="more danger" disabled={!meeting || processing || meetingIsBusy(meeting.status)} onClick={deleteMeeting}>删除</button>
+            <div className="more-control">
+              <button disabled={recording || processing} onClick={() => setMoreMenuOpen((open) => !open)} aria-expanded={moreMenuOpen}>··· 更多</button>
+              {moreMenuOpen && (
+                <div className="more-menu" role="menu">
+                  <button onClick={() => { setMoreMenuOpen(false); openTemplateDialog(); }}><Compass size={15} /> 更换总结模板</button>
+                  <button disabled={meetingIsBusy(meeting.status)} onClick={() => { setMoreMenuOpen(false); void rerunCorrection(); }}><ArrowClockwise size={15} /> 重新校正发言人</button>
+                  <button disabled={meetingIsBusy(meeting.status)} onClick={() => { setMoreMenuOpen(false); void rerunSummary(); }}><Sparkle size={15} /> 重新生成总结</button>
+                  <button disabled={meetingAutoNaming || meetingIsBusy(meeting.status)} onClick={() => { setMoreMenuOpen(false); void autoNameMeeting(); }}><PencilSimple size={15} /> {meetingAutoNaming ? "正在命名" : "智能命名会议"}</button>
+                  <button disabled={meetingIsBusy(meeting.status)} onClick={() => { setMoreMenuOpen(false); setTranscriptionDialogOpen(true); }}><Waveform size={15} /> 查看转写版本</button>
+                  <button className="danger" disabled={meetingIsBusy(meeting.status)} onClick={() => { setMoreMenuOpen(false); void deleteMeeting(); }}><Trash size={15} /> 删除会议</button>
+                </div>
+              )}
+            </div>
           </div> : (
             <div className="top-actions start-top-actions">
+              <button type="button" onClick={openLocalWorkspace}><HardDrives size={15} /> 本机工作区</button>
               <button disabled={recording || processing} onClick={openTemplateDialog}><Compass size={15} /> 选择总结模板</button>
             </div>
           )}
@@ -3238,45 +3662,8 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
               <section className="meeting-start-page" aria-labelledby="meeting-start-title">
                 <div className="meeting-start-copy">
                   <span className={`meeting-start-kicker ${meetingPreflight?.status || "checking"}`}><i /> {meetingPreflightLoading && !meetingPreflight ? "正在执行会议前自检" : meetingPreflight?.status === "blocked" ? "请先处理会议前检查项" : "本地听记已准备就绪"}</span>
-                  <h2 id="meeting-start-title">让讨论留下清晰结论</h2>
-                  <p>开始后实时转写、识别发言人并保存原始录音。会议结束时，MiniMax 会整理决策、风险和行动项。</p>
-                  <div className="meeting-material-prep">
-                    <button type="button" disabled={attachmentUploading} onClick={() => attachmentInputRef.current?.click()}>
-                      <Paperclip size={16} weight="duotone" />
-                      <span><b>{pendingAttachments.length ? `已选择 ${pendingAttachments.length} 份资料` : "添加会议资料"}</b><small>PDF、Office、Markdown、图片等 · 单份不超过 12 MB</small></span>
-                    </button>
-                    {pendingAttachments.length > 0 && (
-                      <div className="pending-materials" aria-label="待添加的会议资料">
-                        {pendingAttachments.map((file, index) => (
-                          <span key={`${file.name}-${file.lastModified}-${index}`}><FileText size={12} />{file.name}<button type="button" aria-label={`移除 ${file.name}`} onClick={() => setPendingAttachments((items) => items.filter((_, itemIndex) => itemIndex !== index))}><X size={10} /></button></span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                  <section className={`meeting-preflight ${meetingPreflight?.status || "checking"}`} aria-label="会议前自检" aria-live="polite">
-                    <header>
-                      <span><ShieldCheck size={18} weight="duotone" /></span>
-                      <div>
-                        <b>会议前自检</b>
-                        <small>{meetingPreflightLoading && !meetingPreflight ? "正在检查录音与本地环境…" : `${preflightReadyCount} 项正常${preflightAttentionCount ? ` · ${preflightAttentionCount} 项需要留意` : ""}`}</small>
-                      </div>
-                      <em>{preflightStatusLabel}</em>
-                      <button type="button" disabled={meetingPreflightLoading} onClick={() => void refreshMeetingPreflight()} aria-label="重新执行会议前自检"><ArrowClockwise size={14} className={meetingPreflightLoading ? "spinning" : ""} /> 重新检查</button>
-                    </header>
-                    {meetingPreflight?.checks.length ? (
-                      <div className="meeting-preflight-grid">
-                        {meetingPreflight.checks.map((item) => (
-                          <article key={item.id} className={item.status} title={item.detail}>
-                            {item.status === "ready" ? <CheckCircle size={15} weight="fill" /> : <WarningCircle size={15} weight="fill" />}
-                            <span><b>{item.label}</b><small>{item.detail}</small></span>
-                          </article>
-                        ))}
-                      </div>
-                    ) : <div className="meeting-preflight-loading"><i /><i /><i /></div>}
-                    {meetingPreflight?.status === "blocked" && (
-                      <p><WarningCircle size={14} weight="fill" /> 请先处理红色项目，随后重新检查；已有会议记录不会受到影响。</p>
-                    )}
-                  </section>
+                  <h2 id="meeting-start-title">听见讨论，看见下一步</h2>
+                  <p>本地记录每一次发言，会议结束后自动整理会议简报与行动项。</p>
                   <button
                     type="button"
                     className="meeting-start-button"
@@ -3286,73 +3673,35 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                   >
                     <span><Waveform size={22} weight="fill" /></span>
                     <strong>{recording ? "正在启动…" : meetingPreflightLoading ? "正在检查…" : meetingPreflight?.status === "blocked" ? "请先处理检查项" : "开始会议"}</strong>
-                    <small>
-                      {audioSourceMode === "mixed" ? "电脑声音 + 麦克风" : audioSourceMode === "system" ? "电脑声音" : "麦克风"}
-                      {speakerLimitMode === "auto" ? " · 自动检测发言人" : ` · 最多 ${speakerLimit} 人`}
-                    </small>
                   </button>
-                  <button
-                    type="button"
-                    className={`meeting-import-button ${audioImportDragActive ? "drag-active" : ""}`}
-                    disabled={recording || processing || audioImportStarting}
-                    onClick={() => void importMeetingAudio()}
-                    onDragEnter={(event) => { event.preventDefault(); if (!processing) setAudioImportDragActive(true); }}
-                    onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; }}
-                    onDragLeave={(event) => {
-                      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setAudioImportDragActive(false);
-                    }}
-                    onDrop={(event) => {
-                      event.preventDefault();
-                      setAudioImportDragActive(false);
-                      const file = event.dataTransfer.files[0];
-                      if (file) void importMeetingAudio(file);
-                    }}
-                  >
-                    <FolderOpen size={21} weight="duotone" />
-                    <span>
-                      <strong>{audioImportStarting ? "正在选择并解析…" : "导入已有会议录音"}</strong>
-                      <small>{audioImportDragActive ? "松开即可导入并开始本地解析" : "点击选择或拖入 MP3、M4A、WAV、FLAC、MP4 等 · 原文件不变"}</small>
-                    </span>
-                    <ArrowRight size={17} />
-                  </button>
-                  <div className="meeting-start-features" aria-label="会议处理方式">
-                    <span><CheckCircle size={15} weight="fill" /> 本地实时转写</span>
-                    <span><HardDrives size={15} weight="duotone" /> 数据保存在本机</span>
-                    <span><Sparkle size={15} weight="fill" /> MiniMax 整理纪要</span>
+                  <div className={`meeting-start-state ${meetingPreflight?.status || "checking"}`} aria-live="polite">
+                    {meetingPreflight?.status === "blocked" ? <WarningCircle size={14} weight="fill" /> : <CheckCircle size={14} weight="fill" />}
+                    <span>{preflightStatusLabel}</span>
+                    {(meetingPreflight?.status === "blocked" || meetingPreflight?.status === "warning") && <button onClick={() => void openSettingsDialog("meeting")}>查看原因</button>}
                   </div>
-                  {meetings.length > 0 && <small className="meeting-start-history-hint">需要回看旧内容？请从左侧“历史会议”中选择。</small>}
-                </div>
-                <aside className="meeting-start-context" aria-label="本次会议设置">
-                  <div className="meeting-start-orb" aria-hidden="true">
-                    <Waveform size={38} weight="duotone" />
+                  <div className="meeting-start-secondary" aria-label="其他会议操作">
+                    <button
+                      type="button"
+                      className={audioImportDragActive ? "drag-active" : ""}
+                      disabled={recording || processing || audioImportStarting}
+                      onClick={() => void importMeetingAudio()}
+                      onDragEnter={(event) => { event.preventDefault(); if (!processing) setAudioImportDragActive(true); }}
+                      onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; }}
+                      onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setAudioImportDragActive(false); }}
+                      onDrop={(event) => { event.preventDefault(); setAudioImportDragActive(false); const file = event.dataTransfer.files[0]; if (file) void importMeetingAudio(file); }}
+                      title="导入 MP3、M4A、WAV、FLAC、MP4 等会议录音"
+                    ><FolderOpen size={16} weight="duotone" /> {audioImportStarting ? "正在导入…" : "导入录音"}</button>
+                    <button type="button" disabled={attachmentUploading} onClick={() => attachmentInputRef.current?.click()} title="添加 PDF、Office、Markdown 或图片资料"><Paperclip size={16} weight="duotone" />{pendingAttachments.length ? `资料 ${pendingAttachments.length}` : "会议资料"}</button>
+                    <button type="button" onClick={() => void openSettingsDialog("meeting")}><GearSix size={16} weight="duotone" />会议设置</button>
                   </div>
-                  <div className="meeting-start-context-heading">
-                    <span>本次会议设置</span>
-                    <b className={meetingPreflight?.status || "checking"}>{preflightStatusLabel}</b>
-                  </div>
-                  <dl>
-                    <div><dt>录音来源</dt><dd>{audioSourceMode === "mixed" ? "电脑声音 + 麦克风" : audioSourceMode === "system" ? "电脑声音" : "麦克风"}</dd></div>
-                    <div><dt>发言人</dt><dd>{speakerLimitMode === "auto" ? "自动检测" : `最多 ${speakerLimit} 人`}</dd></div>
-                    <div><dt>纪要模板</dt><dd>{summaryTemplateName(defaultSummaryTemplate)}</dd></div>
-                    <div><dt>会议资料</dt><dd>{pendingAttachments.length ? `${pendingAttachments.length} 份待归档` : "尚未添加"}</dd></div>
-                  </dl>
-                  <div className="recording-background-picker">
-                    <span><Palette size={14} /> 录音界面背景</span>
-                    <div role="radiogroup" aria-label="选择录音界面背景">
-                      {recordingBackdrops.map((backdrop) => (
-                        <button
-                          type="button"
-                          key={backdrop.id}
-                          className={`${backdrop.id} ${recordingBackdrop === backdrop.id ? "active" : ""}`}
-                          aria-pressed={recordingBackdrop === backdrop.id}
-                          title={`${backdrop.name}：${backdrop.detail}`}
-                          onClick={() => selectRecordingBackdrop(backdrop.id)}
-                        ><i /><b>{backdrop.name}</b></button>
+                  {pendingAttachments.length > 0 && (
+                    <div className="pending-materials meeting-start-pending" aria-label="待添加的会议资料">
+                      {pendingAttachments.map((file, index) => (
+                        <span key={`${file.name}-${file.lastModified}-${index}`}><FileText size={12} />{file.name}<button type="button" aria-label={`移除 ${file.name}`} onClick={() => setPendingAttachments((items) => items.filter((_, itemIndex) => itemIndex !== index))}><X size={10} /></button></span>
                       ))}
                     </div>
-                  </div>
-                  <p><CheckCircle size={15} weight="fill" /> 录音、转写和声纹均在本地处理</p>
-                </aside>
+                  )}
+                </div>
               </section>
             ) : (
               <>
@@ -3542,7 +3891,97 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                     </button>
                   </div>
                 ) : usableSummary ? (
-                  meeting?.reportStyle === "visual" ? (
+                  <>
+                  <div className="summary-mode-switch" role="tablist" aria-label="AI 总结查看方式">
+                    <button className={summaryMode === "brief" ? "active" : ""} onClick={() => setSummaryMode("brief")}><FileText size={15} /> 会议简报</button>
+                    <button className={summaryMode === "full" ? "active" : ""} onClick={() => setSummaryMode("full")}><ListChecks size={15} /> 完整总结</button>
+                  </div>
+                  {summaryMode === "brief" && activeBrief && meeting ? (
+                    <section className="meeting-brief-workspace" aria-label="可编辑会议简报">
+                      <header className="meeting-brief-toolbar">
+                        <div>
+                          <span>{meetingTypeNames[usableSummary.meetingType || "general"]}</span>
+                          <small>{usableSummary.meetingTypeConfidence || "中"}可信度{usableSummary.meetingTypeReason ? ` · ${usableSummary.meetingTypeReason}` : " · AI 根据会议内容自动分类"}</small>
+                        </div>
+                        <div>
+                          {briefEditing ? (
+                            <>
+                              <button onClick={cancelBriefEditing} disabled={briefSaving}>取消</button>
+                              <button className="primary" onClick={() => void saveBriefEditing()} disabled={briefSaving}>{briefSaving ? "保存中…" : "保存修改"}</button>
+                            </>
+                          ) : <button onClick={beginBriefEditing} disabled={usingLiveSummary || processing}><PencilSimple size={15} /> 编辑内容</button>}
+                          <button onClick={exportBriefImage}><DownloadSimple size={15} /> 导出图片</button>
+                        </div>
+                      </header>
+                      <article className={`meeting-brief-canvas ${briefEditing ? "editing" : ""}`} onDoubleClick={() => !briefEditing && beginBriefEditing()}>
+                        <header>
+                          <p>会议简报</p>
+                          {briefEditing ? (
+                            <input aria-label="会议简报主题" value={activeBrief.subject} onChange={(event) => setBriefDraft((current) => current ? { ...current, subject: event.target.value } : current)} />
+                          ) : <h2>{activeBrief.subject}</h2>}
+                          <div className="meeting-brief-meta">
+                            <span>{briefDate(meeting.startedAt)}</span><i />
+                            <span>{formatClock(meeting.durationMs)}</span><i />
+                            {briefEditing ? (
+                              <input aria-label="会议简报参会人员" value={activeBrief.participants} onChange={(event) => setBriefDraft((current) => current ? { ...current, participants: event.target.value } : current)} />
+                            ) : <span>{activeBrief.participants}</span>}
+                          </div>
+                        </header>
+                        <div className="meeting-brief-timeline">
+                          {activeBrief.sections.map((section, index) => (
+                            <section key={`${section.id}-${index}`}>
+                              <span>{String(index + 1).padStart(2, "0")}</span><i />
+                              <div>
+                                {briefEditing ? (
+                                  <>
+                                    <input aria-label={`第 ${index + 1} 个简报板块标题`} value={section.title} onChange={(event) => setBriefDraft((current) => current ? { ...current, sections: current.sections.map((item, itemIndex) => itemIndex === index ? { ...item, title: event.target.value } : item) } : current)} />
+                                    <textarea aria-label={`第 ${index + 1} 个简报板块内容`} value={section.content} onChange={(event) => setBriefDraft((current) => current ? { ...current, sections: current.sections.map((item, itemIndex) => itemIndex === index ? { ...item, content: event.target.value } : item) } : current)} />
+                                    <div className="brief-section-actions">
+                                      <button disabled={index === 0} onClick={() => setBriefDraft((current) => { if (!current || index === 0) return current; const sections = [...current.sections]; [sections[index - 1], sections[index]] = [sections[index], sections[index - 1]]; return { ...current, sections }; })}>上移</button>
+                                      <button disabled={index === activeBrief.sections.length - 1} onClick={() => setBriefDraft((current) => { if (!current || index === current.sections.length - 1) return current; const sections = [...current.sections]; [sections[index], sections[index + 1]] = [sections[index + 1], sections[index]]; return { ...current, sections }; })}>下移</button>
+                                      <button className="danger" onClick={() => setBriefDraft((current) => current ? { ...current, sections: current.sections.filter((_, itemIndex) => itemIndex !== index) } : current)}>隐藏此栏</button>
+                                    </div>
+                                  </>
+                                ) : (
+                                  <><h3>{section.title}</h3><p>{section.content}</p></>
+                                )}
+                              </div>
+                            </section>
+                          ))}
+                          {briefEditing && (
+                            <button className="brief-add-section" onClick={() => setBriefDraft((current) => current ? { ...current, sections: [...current.sections, { id: `custom-${Date.now()}`, title: "补充栏目", content: "请输入内容", evidenceSeqs: [] }] } : current)}>＋ 添加栏目</button>
+                          )}
+                        </div>
+                        {(activeBrief.actionItems.length > 0 || briefEditing) && (
+                          <section className="meeting-brief-actions">
+                            <h3>会后推进</h3>
+                            <div>
+                              {activeBrief.actionItems.map((item, index) => briefEditing ? (
+                                <div className="brief-action-edit" key={`${index}-${item.task}`}>
+                                  <input aria-label="推进事项" value={item.task} onChange={(event) => setBriefDraft((current) => current ? { ...current, actionItems: current.actionItems.map((entry, itemIndex) => itemIndex === index ? { ...entry, task: event.target.value } : entry) } : current)} />
+                                  <input aria-label="负责人" value={item.owner} onChange={(event) => setBriefDraft((current) => current ? { ...current, actionItems: current.actionItems.map((entry, itemIndex) => itemIndex === index ? { ...entry, owner: event.target.value } : entry) } : current)} />
+                                  <input aria-label="截止时间" value={item.due} onChange={(event) => setBriefDraft((current) => current ? { ...current, actionItems: current.actionItems.map((entry, itemIndex) => itemIndex === index ? { ...entry, due: event.target.value } : entry) } : current)} />
+                                  <button aria-label="删除推进事项" onClick={() => setBriefDraft((current) => current ? { ...current, actionItems: current.actionItems.filter((_, itemIndex) => itemIndex !== index) } : current)}><X size={13} /></button>
+                                </div>
+                              ) : (
+                                <div key={`${item.task}-${index}`}><span>{String(index + 1).padStart(2, "0")}</span><p>{item.task}</p><small>{item.owner} · {item.due}</small></div>
+                              ))}
+                              {briefEditing && <button className="brief-add-action" onClick={() => setBriefDraft((current) => current ? { ...current, actionItems: [...current.actionItems, { owner: "待确认", task: "新的推进事项", due: "待确认", priority: "中", evidenceSeqs: [] }] } : current)}>＋ 添加推进事项</button>}
+                            </div>
+                          </section>
+                        )}
+                        {(activeBrief.aiSuggestions.length > 0 || briefEditing) && (
+                          <aside className="meeting-brief-suggestion">
+                            <h3>AI 推进建议</h3>
+                            {briefEditing ? (
+                              <textarea aria-label="AI 推进建议" value={activeBrief.aiSuggestions.join("\n")} onChange={(event) => setBriefDraft((current) => current ? { ...current, aiSuggestions: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean) } : current)} />
+                            ) : <ul>{activeBrief.aiSuggestions.map((item) => <li key={item}>{item}</li>)}</ul>}
+                          </aside>
+                        )}
+                        {!briefEditing && <small className="meeting-brief-edit-hint">双击内容或使用上方“编辑内容”进行修改</small>}
+                      </article>
+                    </section>
+                  ) : meeting?.reportStyle === "visual" ? (
                     <div className="visual-report">
                       <header className="visual-report-hero">
                         <div className="visual-hero-topline">
@@ -3952,7 +4391,8 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                       </section>
                     )}
                   </div>
-                  )
+                  )}
+                  </>
                 ) : (
                   <div className="empty-summary">
                     <Sparkle size={28} weight="duotone" />

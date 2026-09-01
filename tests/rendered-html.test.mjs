@@ -22,20 +22,21 @@ test("server-renders the meeting transcription product", async () => {
   const html = await response.text();
   assert.match(html, /<title>拾音 AI｜MiniMax 智能会议听记<\/title>/i);
   assert.match(html, /开始新听记/);
-  assert.match(html, /让讨论留下清晰结论/);
+  assert.match(html, /听见讨论，看见下一步/);
+  assert.match(html, /本地记录每一次发言，会议结束后自动整理会议简报与行动项/);
   assert.match(html, /本次会议设置/);
-  assert.match(html, /添加会议资料/);
-  assert.match(html, /录音界面背景/);
+  assert.match(html, /会议资料/);
+  assert.doesNotMatch(html, /录音界面背景/);
   assert.match(html, /aria-label="返回本次会议"/);
+  assert.match(html, /aria-label="收起侧边栏"/);
+  assert.match(html, /aria-controls="app-sidebar"/);
   assert.match(html, /界面外观/);
   assert.match(html, /跟随系统|系统/);
   assert.match(html, /开始会议/);
-  assert.match(html, /导入已有会议录音/);
-  assert.match(html, /原文件不变/);
+  assert.match(html, /导入录音/);
   assert.match(html, /正在执行会议前自检/);
   assert.match(html, /会议前自检/);
-  assert.match(html, /重新检查/);
-  assert.match(html, /本地实时转写/);
+  assert.doesNotMatch(html, /重新检查/);
   assert.match(html, /录音来源/);
   assert.match(html, /电脑声音 \+ 麦克风/);
   assert.match(html, /v0\.6\.6/);
@@ -49,7 +50,7 @@ test("server-renders the meeting transcription product", async () => {
   assert.match(html, /搜索历史会议/);
   assert.match(html, /12 人/);
   assert.match(html, /20 人/);
-  assert.match(html, /保存原始录音/);
+  assert.match(html, /本地后台已连接/);
   assert.doesNotMatch(html, /录音和转写会保存在这台 Mac/);
   assert.doesNotMatch(html, /转写版本|完整记录|会议速览/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/);
@@ -75,10 +76,11 @@ test("normalizes vinext static asset cache keys on Windows", () => {
 });
 
 test("supports local transcription and keeps cloud keys behind the realtime proxy", async () => {
-  const [proxy, localAsr, page, worklet, envExample, desktopMain, preload, packageJson, versionHistoryJson] = await Promise.all([
+  const [proxy, localAsr, page, styles, worklet, envExample, desktopMain, preload, packageJson, versionHistoryJson] = await Promise.all([
     readFile(new URL("../server/realtime-proxy.mjs", import.meta.url), "utf8"),
     readFile(new URL("../server/local-asr-engine.mjs", import.meta.url), "utf8"),
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
     readFile(new URL("../public/pcm-worklet.js", import.meta.url), "utf8"),
     readFile(new URL("../.env.example", import.meta.url), "utf8"),
     readFile(new URL("../desktop/main.mjs", import.meta.url), "utf8"),
@@ -97,8 +99,29 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(proxy, /\/api\/preflight/);
   assert.match(page, /recordingSourcePreflight/);
   assert.match(page, /会议前自检未通过/);
+  assert.match(page, /meeting-start-state/);
+  assert.match(page, /meeting-start-secondary/);
+  assert.match(page, /settings-preflight/);
+  assert.match(page, /会议简报/);
+  assert.match(page, /meetingTypeNames/);
+  assert.match(page, /按会议类型组合对方单位、联系人或项目、主题和日期/);
+  assert.match(page, /打开本机工作区/);
+  assert.match(page, /onClick=\{openLocalWorkspace\}/);
+  assert.match(page, /全部历史会议/);
+  assert.match(page, /会议相关资料/);
+  assert.match(page, /会议知识问答/);
+  assert.match(styles, /workspace-hub-grid/);
+  assert.match(page, /downloadBriefImage/);
+  assert.match(page, /导出图片/);
+  assert.match(page, /编辑内容/);
+  assert.match(styles, /meeting-brief-canvas/);
+  assert.match(styles, /sidebar-quick-settings/);
   assert.match(page, /currentMeetingIdRef/);
   assert.match(page, /returnToCurrentMeeting/);
+  assert.doesNotMatch(page, /recordingBackdrop === "midnight" \? "dark"/);
+  assert.match(styles, /recording-backdrop-midnight[\s\S]*\.sidebar/);
+  assert.match(styles, /--atmosphere-wash/);
+  assert.match(styles, /appearance controls contrast; backdrop controls atmosphere only/);
   assert.match(localAsr, /sherpa-onnx-node/);
   assert.match(localAsr, /encoder\.int8\.onnx/);
   assert.match(localAsr, /decoder\.int8\.onnx/);

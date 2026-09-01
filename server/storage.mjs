@@ -291,19 +291,31 @@ export class MeetingStorage {
   }
 
   getMeeting(id) {
-    const meeting = this.db.prepare("SELECT * FROM meetings WHERE id = ?").get(id);
+    const meeting = this.db.prepare(`
+      SELECT meetings.*,
+        (SELECT COUNT(*) FROM meeting_attachments WHERE meeting_id = meetings.id) AS attachment_count
+      FROM meetings WHERE id = ?
+    `).get(id);
     if (!meeting) return null;
     return this.hydrateMeeting(meeting);
   }
 
   listMeetings(options = {}) {
     const where = options.includeDeleted ? "" : "WHERE deleted_at IS NULL";
-    return this.db.prepare(`SELECT * FROM meetings ${where} ORDER BY started_at DESC`).all()
+    return this.db.prepare(`
+      SELECT meetings.*,
+        (SELECT COUNT(*) FROM meeting_attachments WHERE meeting_id = meetings.id) AS attachment_count
+      FROM meetings ${where} ORDER BY started_at DESC
+    `).all()
       .map((meeting) => this.hydrateMeeting(meeting, false));
   }
 
   listDeletedMeetings() {
-    return this.db.prepare("SELECT * FROM meetings WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC").all()
+    return this.db.prepare(`
+      SELECT meetings.*,
+        (SELECT COUNT(*) FROM meeting_attachments WHERE meeting_id = meetings.id) AS attachment_count
+      FROM meetings WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC
+    `).all()
       .map((meeting) => this.hydrateMeeting(meeting, false));
   }
 
@@ -332,6 +344,7 @@ export class MeetingStorage {
       sourceType: meeting.source_type === "imported" ? "imported" : "recorded",
       sourceName: meeting.source_name || null,
       deletedAt: meeting.deleted_at || null,
+      attachmentCount: Math.max(0, Number(meeting.attachment_count) || 0),
     };
     if (!includeDetails) return value;
     value.speakers = this.listSpeakers(meeting.id);
@@ -341,6 +354,7 @@ export class MeetingStorage {
     }));
     value.jobs = this.listJobs(meeting.id);
     value.attachments = this.listAttachments(meeting.id);
+    value.attachmentCount = value.attachments.length;
     value.audioClips = this.listAudioClips(meeting.id);
     value.transcriptVersions = this.listTranscriptVersions(meeting.id);
     value.canUndoTranscriptEdit = Boolean(this.latestTranscriptEdit(meeting.id));
@@ -505,8 +519,14 @@ export class MeetingStorage {
     if (!options.force && meeting.titleSource === "manual") {
       return { changed: false, reason: "manual", meeting };
     }
-    const title = deriveAutomaticMeetingTitle(meeting, summary);
+    let title = deriveAutomaticMeetingTitle(meeting, summary);
     if (!title) return { changed: false, reason: "unavailable", meeting };
+    const collision = this.db.prepare(`
+      SELECT id FROM meetings
+      WHERE id != ? AND deleted_at IS NULL AND title = ?
+      LIMIT 1
+    `).get(id, title);
+    if (collision) title = deriveAutomaticMeetingTitle(meeting, summary, { includeTime: true }) || title;
     this.db.prepare("UPDATE meetings SET title = ?, title_source = 'automatic' WHERE id = ?")
       .run(title, id);
     return { changed: title !== meeting.title, reason: "automatic", meeting: this.getMeeting(id) };

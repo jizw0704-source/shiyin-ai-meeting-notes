@@ -143,6 +143,27 @@ test("imports a compatible WAV without modifying the selected source file", asyn
   }
 });
 
+test("exposes meeting material counts in workspace meeting lists", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-workspace-"));
+  const storage = new MeetingStorage(root);
+  try {
+    const meeting = storage.createMeeting("资料统计会议");
+    storage.addAttachment(meeting.id, {
+      originalName: "调研提纲.md",
+      storedName: "outline.md",
+      mimeType: "text/markdown",
+      sizeBytes: 18,
+      extractedText: "# 调研提纲",
+    });
+    const listed = storage.listMeetings().find((item) => item.id === meeting.id);
+    assert.equal(listed.attachmentCount, 1);
+    assert.equal(storage.getMeeting(meeting.id).attachmentCount, 1);
+  } finally {
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("automatically names summarized meetings without overwriting manual titles", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-title-"));
   const storage = new MeetingStorage(root);
@@ -155,7 +176,7 @@ test("automatically names summarized meetings without overwriting manual titles"
     };
     const automatic = storage.applyAutomaticTitle(meeting.id, summary);
     assert.equal(automatic.changed, true);
-    assert.equal(automatic.meeting.title, "Pulse 项目竞标流程与界面设计讨论");
+    assert.match(automatic.meeting.title, /^Pulse 项目竞标流程与界面设计讨论｜\d{4}-\d{2}-\d{2}$/);
     assert.equal(automatic.meeting.titleSource, "automatic");
 
     const manual = storage.renameMeeting(meeting.id, "我自己确定的会议名称");
@@ -167,9 +188,67 @@ test("automatically names summarized meetings without overwriting manual titles"
 
     const forced = storage.applyAutomaticTitle(meeting.id, { headline: "产品发布计划讨论" }, { force: true });
     assert.equal(forced.changed, true);
-    assert.equal(forced.meeting.title, "产品发布计划讨论");
+    assert.match(forced.meeting.title, /^产品发布计划讨论｜\d{4}-\d{2}-\d{2}$/);
     assert.equal(normalizeAutomaticMeetingTitle("会议主题：供应链风险复盘。"), "供应链风险复盘");
     assert.equal(deriveAutomaticMeetingTitle({}, { topics: ["预算", "交付"] }), "预算与交付讨论");
+  } finally {
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("adapts automatic meeting titles to external and internal meetings", () => {
+  const startedAt = "2026-09-01T04:30:00.000Z";
+  const date = new Date(startedAt);
+  const pad = (value) => String(value).padStart(2, "0");
+  const localDate = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  const meeting = { startedAt };
+
+  assert.equal(deriveAutomaticMeetingTitle(meeting, {
+    meetingIdentity: {
+      scope: "external",
+      counterpartyOrganization: "清华大学",
+      primaryContact: "王老师",
+      subject: "实验室数字化流程调研",
+    },
+  }), `清华大学｜王老师｜实验室数字化流程调研｜${localDate}`);
+
+  assert.equal(deriveAutomaticMeetingTitle(meeting, {
+    meetingIdentity: {
+      scope: "internal",
+      projectOrDepartment: "Pulse 项目",
+      subject: "知识库下一阶段规划",
+    },
+  }), `Pulse 项目｜知识库下一阶段规划｜${localDate}`);
+
+  assert.equal(deriveAutomaticMeetingTitle(meeting, {
+    meetingIdentity: {
+      scope: "external",
+      counterpartyOrganization: "某研究院",
+      primaryContact: "未明确",
+      subject: "联合测试方案",
+    },
+  }), `某研究院｜联合测试方案｜${localDate}`);
+});
+
+test("adds the meeting time only when an automatic title collides", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-title-collision-"));
+  const storage = new MeetingStorage(root);
+  try {
+    const summary = {
+      meetingIdentity: {
+        scope: "external",
+        counterpartyOrganization: "材料研究院",
+        primaryContact: "李工",
+        subject: "中试验证安排",
+      },
+    };
+    const first = storage.createMeeting("第一次会议");
+    const second = storage.createMeeting("第二次会议");
+    const firstResult = storage.applyAutomaticTitle(first.id, summary);
+    const secondResult = storage.applyAutomaticTitle(second.id, summary);
+    assert.match(firstResult.meeting.title, /^材料研究院｜李工｜中试验证安排｜\d{4}-\d{2}-\d{2}$/);
+    assert.match(secondResult.meeting.title, /^材料研究院｜李工｜中试验证安排｜\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
   } finally {
     storage.close();
     rmSync(root, { recursive: true, force: true });
@@ -640,12 +719,14 @@ test("stores organized punctuation without overwriting original ASR text", () =>
 });
 
 test("normalizes template and report settings", () => {
+  assert.equal(normalizeSummaryTemplateId("meeting-brief"), "meeting-brief");
   assert.equal(normalizeSummaryTemplateId("brainstorm"), "brainstorm");
   assert.equal(normalizeSummaryTemplateId("unknown"), "meeting-minutes");
   assert.equal(normalizeReportStyle("visual"), "visual");
   assert.equal(normalizeReportStyle("poster"), "detailed");
   assert.match(summaryTemplatePrompt("daily-log"), /日常记录/);
   assert.match(summaryTemplatePrompt("project-sync"), /项目进度/);
+  assert.match(summaryTemplatePrompt("meeting-brief"), /自动判断会议类型/);
 });
 
 test("writes recoverable PCM and a valid mono 16 kHz WAV", async () => {
@@ -1469,6 +1550,23 @@ test("normalizes deep reports and removes invalid evidence references", () => {
   };
   const summary = normalizeMeetingSummary({
     overview: "形成详细纪要",
+    meetingType: "research",
+    meetingTypeReason: "以访谈提问和被调研方反馈为主",
+    meetingTypeConfidence: "高",
+    meetingIdentity: {
+      scope: "external",
+      counterpartyOrganization: "某高校",
+      primaryContact: "周老师",
+      projectOrDepartment: "",
+      subject: "高校实验流程调研",
+      evidenceSeqs: [0, 99],
+    },
+    brief: {
+      subject: "高校实验流程调研",
+      participants: "调研组 · 被调研高校",
+      sections: [{ id: "pain-points", title: "核心痛点", content: "重复录入较多", evidenceSeqs: [0, 99] }],
+      aiSuggestions: ["下一轮确认验收指标"],
+    },
     overviewCards: [{ title: "产品", summary: "确定方向", points: ["先做MVP"], evidenceSeqs: [0, 99] }],
     keyFacts: [{ value: "12所", label: "调研高校", context: "访谈范围", evidenceSeqs: [1] }],
     detailedTopics: [{ title: "实施", points: ["先试用"], evidenceSeqs: [1] }],
@@ -1478,6 +1576,13 @@ test("normalizes deep reports and removes invalid evidence references", () => {
   }, meeting);
 
   assert.deepEqual(summary.overviewCards[0].evidenceSeqs, [0]);
+  assert.equal(summary.meetingType, "research");
+  assert.equal(summary.meetingTypeConfidence, "高");
+  assert.equal(summary.meetingIdentity.scope, "external");
+  assert.equal(summary.meetingIdentity.primaryContact, "周老师");
+  assert.deepEqual(summary.meetingIdentity.evidenceSeqs, [0]);
+  assert.equal(summary.brief.sections[0].title, "核心痛点");
+  assert.deepEqual(summary.brief.sections[0].evidenceSeqs, [0]);
   assert.equal(summary.keyFacts[0].value, "12所");
   assert.equal(summary.aiInsights[0].confidence, "中");
   assert.equal(summary.actionItems[0].owner, "待确认");
