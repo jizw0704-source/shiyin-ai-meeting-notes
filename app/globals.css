@@ -1902,6 +1902,38 @@ body { min-height:100dvh; }
 .meeting-start-kicker { margin:0 0 18px; color:#5f6d84; font-size:10px; letter-spacing:.06em; }
 .meeting-start-page h2 { max-width:580px; margin:0; color:#152039; font-size:clamp(36px,4.2vw,60px); font-weight:690; line-height:1.08; letter-spacing:-.055em; text-wrap:balance; }
 .meeting-start-copy>p { max-width:55ch; margin:22px 0 0; color:#69758a; font-size:13px; line-height:1.85; text-wrap:pretty; }
+.meeting-preflight {
+  width:min(620px,100%);
+  margin-top:20px;
+  overflow:hidden;
+  border:1px solid rgba(60,78,108,.1);
+  border-radius:15px;
+  background:rgba(247,250,254,.72);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.78);
+}
+.meeting-preflight>header { display:grid; grid-template-columns:32px minmax(0,1fr) auto auto; align-items:center; gap:9px; padding:12px 13px; border-bottom:1px solid rgba(64,80,109,.08); }
+.meeting-preflight>header>span { width:32px; height:32px; display:grid; place-items:center; border-radius:10px; color:#2e9b63; background:#e4f4ea; }
+.meeting-preflight>header>div b,.meeting-preflight>header>div small { display:block; }
+.meeting-preflight>header>div b { color:#344158; font-size:10px; }
+.meeting-preflight>header>div small { margin-top:3px; color:#8791a1; font-size:8px; }
+.meeting-preflight>header em { padding:4px 7px; border-radius:999px; color:#2d8356; background:#e4f3e9; font-size:7px; font-style:normal; font-weight:760; white-space:nowrap; }
+.meeting-preflight.warning>header em { color:#9a672d; background:#f7edda; }
+.meeting-preflight.blocked>header em { color:#b24e49; background:#f8e5e3; }
+.meeting-preflight>header>button { min-height:28px; display:flex; align-items:center; gap:5px; padding:0 8px; border:1px solid rgba(63,80,111,.1); border-radius:8px; color:#657289; background:rgba(255,255,255,.72); font-size:8px; font-weight:680; }
+.meeting-preflight>header>button:disabled { opacity:.55; }
+.meeting-preflight .spinning { animation:spin .8s linear infinite; }
+.meeting-preflight-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1px; background:rgba(65,80,107,.07); }
+.meeting-preflight-grid article { min-width:0; min-height:48px; display:grid; grid-template-columns:17px minmax(0,1fr); align-items:center; gap:7px; padding:8px 12px; color:#2f9a63; background:rgba(250,252,255,.92); }
+.meeting-preflight-grid article.warning { color:#b27a36; background:#fffaf0; }
+.meeting-preflight-grid article.blocked { color:#c4544d; background:#fff4f3; }
+.meeting-preflight-grid article span,.meeting-preflight-grid article b,.meeting-preflight-grid article small { display:block; min-width:0; }
+.meeting-preflight-grid article b { color:#4b5669; font-size:8px; }
+.meeting-preflight-grid article small { display:-webkit-box; margin-top:2px; overflow:hidden; color:#8a94a4; font-size:7px; line-height:1.35; -webkit-box-orient:vertical; -webkit-line-clamp:2; }
+.meeting-preflight>p { display:flex; align-items:flex-start; gap:6px; margin:0; padding:9px 12px; color:#a54e49; background:#fff0ef; font-size:8px; line-height:1.5; }
+.meeting-preflight>p svg { flex:0 0 auto; margin-top:1px; }
+.meeting-preflight-loading { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; padding:12px; }
+.meeting-preflight-loading i { height:38px; border-radius:9px; background:linear-gradient(90deg,#edf1f6,#f7f9fc,#edf1f6); background-size:200% 100%; animation:preflight-shimmer 1.2s ease-in-out infinite; }
+@keyframes preflight-shimmer { to { background-position:-200% 0; } }
 .meeting-start-button {
   width:min(390px,100%);
   min-height:76px;
@@ -1933,6 +1965,9 @@ body { min-height:100dvh; }
 .meeting-start-context-heading { display:flex; align-items:center; justify-content:space-between; margin-top:28px; }
 .meeting-start-context-heading span { color:#39465b; font-size:13px; font-weight:680; }
 .meeting-start-context-heading b { padding:4px 7px; border-radius:5px; color:#23764d; background:#dcefe5; font-size:8px; font-weight:700; }
+.meeting-start-context-heading b.warning { color:#93642f; background:#f6ecd9; }
+.meeting-start-context-heading b.blocked { color:#a94b47; background:#f7e3e1; }
+.meeting-start-context-heading b.checking { color:#52688f; background:#e3eaf5; }
 .meeting-start-context dl { margin:18px 0 0; }
 .meeting-start-context dl div { display:flex; align-items:center; justify-content:space-between; gap:24px; padding:13px 0; border-bottom:1px solid rgba(65,80,106,.09); }
 .meeting-start-context dt { color:#7b8697; font-size:9px; }
@@ -1976,6 +2011,10 @@ body { min-height:100dvh; }
   .meeting-start-copy>p { font-size:12px; }
   .meeting-start-context { display:none; }
   .meeting-start-features { justify-content:flex-start; }
+  .meeting-preflight>header { grid-template-columns:32px minmax(0,1fr) auto; }
+  .meeting-preflight>header em { display:none; }
+  .meeting-preflight>header>button { grid-column:2/4; justify-self:start; }
+  .meeting-preflight-grid { grid-template-columns:1fr; }
 }
 .visually-hidden{position:fixed!important;left:-10000px!important;width:1px!important;height:1px!important;opacity:0!important;pointer-events:none!important}
 .appearance-picker{padding:11px;border:1px solid rgba(62,76,102,.07);border-radius:11px;background:rgba(235,240,247,.64)}
@@ -2091,3 +2130,90 @@ html[data-theme="dark"] .settings-workspace{background:radial-gradient(circle at
 .window-chrome-meta{display:flex;align-items:center;gap:7px}.window-version{padding:4px 7px;border:1px solid rgba(255,255,255,.58);border-radius:999px;color:#7a8495;background:rgba(255,255,255,.26);font:700 8px var(--font-number);letter-spacing:.02em}.settings-current-release,.settings-available-release{margin:14px 24px 0;padding:16px 18px;border:1px solid rgba(68,84,114,.1);border-radius:14px;background:rgba(255,255,255,.55)}.settings-current-release>div,.settings-available-release>div{display:flex;align-items:center;justify-content:space-between;gap:12px}.settings-current-release>div span,.settings-available-release>div span{padding:4px 7px;border-radius:999px;color:#5268c4;background:#edf1ff;font-size:7px;font-weight:780}.settings-current-release time,.settings-available-release>div b{color:#8a94a5;font:700 8px var(--font-number)}.settings-current-release h3,.settings-available-release h3{margin:10px 0 0;color:#3e4a60;font-size:11px}.settings-current-release ul,.settings-available-release ul{margin:9px 0 0;padding-left:17px;color:#737f92;font-size:8px;line-height:1.7}.settings-available-release{border-color:rgba(74,104,215,.2);background:linear-gradient(135deg,rgba(235,242,255,.92),rgba(244,239,255,.8))}.settings-available-release>div span{color:#fff;background:linear-gradient(135deg,#3c7be8,#675fe3)}.settings-available-release>p{margin:9px 0 0;color:#7d8798;font-size:8px;line-height:1.6}.settings-version-history{margin:14px 24px 0;border:1px solid rgba(68,84,114,.1);border-radius:14px;background:rgba(248,250,253,.68)}.settings-version-history>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 16px;cursor:pointer;color:#4b586e;font-size:9px;font-weight:740;list-style:none}.settings-version-history>summary::-webkit-details-marker{display:none}.settings-version-history>summary:after{content:"⌄";margin-left:auto;color:#8c96a6;font-size:12px}.settings-version-history[open]>summary:after{content:"⌃"}.settings-version-history>summary span{color:#929cab;font-size:7px;font-weight:650}.settings-version-history>div{max-height:320px;overflow:auto;padding:0 14px 14px}.settings-version-history article{padding:12px 4px;border-top:1px solid rgba(69,84,112,.08)}.settings-version-history article.current{margin:0 -5px;padding:12px 9px;border-radius:10px;background:rgba(232,238,255,.65)}.settings-version-history article>div{display:flex;align-items:center;justify-content:space-between}.settings-version-history article b{color:#43516a;font:760 9px var(--font-number)}.settings-version-history article time{color:#9aa3b1;font:650 7px var(--font-number)}.settings-version-history article p{margin:5px 0 0;color:#667286;font-size:8px}.settings-version-history article ul{margin:6px 0 0;padding-left:15px;color:#8a94a4;font-size:7px;line-height:1.6}
 html[data-theme="dark"] .window-version{color:#aeb7c6;border-color:rgba(255,255,255,.1);background:rgba(255,255,255,.06)}html[data-theme="dark"] .settings-current-release,html[data-theme="dark"] .settings-version-history{border-color:rgba(255,255,255,.08);background:rgba(255,255,255,.035)}html[data-theme="dark"] .settings-available-release{border-color:rgba(112,137,225,.2);background:linear-gradient(135deg,rgba(48,67,109,.55),rgba(65,50,91,.46))}html[data-theme="dark"] .settings-current-release h3,html[data-theme="dark"] .settings-available-release h3,html[data-theme="dark"] .settings-version-history>summary,html[data-theme="dark"] .settings-version-history article b{color:#d8dfea}html[data-theme="dark"] .settings-current-release ul,html[data-theme="dark"] .settings-available-release ul,html[data-theme="dark"] .settings-version-history article p,html[data-theme="dark"] .settings-version-history article ul{color:#97a2b2}html[data-theme="dark"] .settings-current-release>div span{color:#b9c8ff;background:rgba(79,102,191,.25)}html[data-theme="dark"] .settings-version-history article{border-color:rgba(255,255,255,.07)}html[data-theme="dark"] .settings-version-history article.current{background:rgba(66,88,169,.18)}
 @media(max-width:720px){.window-version{display:none}.settings-current-release,.settings-available-release,.settings-version-history{margin-left:14px;margin-right:14px}}
+
+/* Meeting preflight */
+html[data-theme="dark"] .meeting-preflight{border-color:rgba(255,255,255,.09);background:rgba(255,255,255,.045);box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}
+html[data-theme="dark"] .meeting-preflight>header{border-color:rgba(255,255,255,.07)}
+html[data-theme="dark"] .meeting-preflight>header>span{color:#80d3a4;background:rgba(60,151,96,.18)}
+html[data-theme="dark"] .meeting-preflight>header>div b,html[data-theme="dark"] .meeting-preflight-grid article b{color:#dce3ed}
+html[data-theme="dark"] .meeting-preflight>header>div small,html[data-theme="dark"] .meeting-preflight-grid article small{color:#929dad}
+html[data-theme="dark"] .meeting-preflight>header>button{color:#bec8d8;border-color:rgba(255,255,255,.1);background:#28313f}
+html[data-theme="dark"] .meeting-preflight-grid{background:rgba(255,255,255,.07)}
+html[data-theme="dark"] .meeting-preflight-grid article{background:rgba(255,255,255,.035)}
+html[data-theme="dark"] .meeting-preflight-grid article.warning{background:rgba(171,113,40,.12)}
+html[data-theme="dark"] .meeting-preflight-grid article.blocked{background:rgba(187,70,64,.13)}
+html[data-theme="dark"] .meeting-preflight>p{color:#f0a19b;background:rgba(184,68,63,.14)}
+html[data-theme="dark"] .meeting-preflight-loading i{background:linear-gradient(90deg,#252d39,#303947,#252d39);background-size:200% 100%}
+
+/* Brand navigation and clearly differentiated recording atmospheres */
+.brand,.window-chrome-brand{border:0;background:transparent;text-align:left}
+.brand{width:max-content;color:inherit}
+.window-chrome-brand{padding:0;color:inherit;app-region:no-drag;-webkit-app-region:no-drag}
+.brand:focus-visible,.window-chrome-brand:focus-visible{outline:2px solid rgba(36,95,212,.42);outline-offset:5px}
+.brand .brand-mark,.window-chrome-brand .window-chrome-mark{transition:transform .22s var(--ease-out),box-shadow .22s var(--ease-out)}
+.workspace{transition:background .42s var(--ease-out)}
+.meeting-start-page{transition:background .42s var(--ease-out),color .3s ease}
+.recording-background-picker button,.settings-backdrop-grid>button{transition:transform .18s var(--ease-out),background .2s ease,border-color .2s ease,box-shadow .2s ease}
+.recording-background-picker button i{height:36px;box-shadow:inset 0 0 0 1px rgba(56,71,99,.07);transition:transform .22s var(--ease-out),box-shadow .22s ease}
+.recording-background-picker button.paper i,.settings-backdrop-grid>button.paper>i{background:repeating-linear-gradient(0deg,rgba(126,104,68,.08) 0 1px,transparent 1px 7px),linear-gradient(145deg,#fffdf7,#eee6d8)}
+.recording-background-picker button.focus i,.settings-backdrop-grid>button.focus>i{background:radial-gradient(circle at 72% 22%,#83aaf1 0 9%,transparent 38%),linear-gradient(145deg,#eaf2ff,#b9cff6)}
+.recording-background-picker button.wave i,.settings-backdrop-grid>button.wave>i{background:repeating-radial-gradient(ellipse at 68% 112%,rgba(25,126,151,.42) 0 3px,transparent 4px 9px),linear-gradient(145deg,#e8f8f4,#a8d9df)}
+.recording-background-picker button.midnight i,.settings-backdrop-grid>button.midnight>i{background:radial-gradient(circle at 72% 18%,#49668f 0 7%,transparent 36%),linear-gradient(145deg,#273852,#0e1520)}
+.recording-background-picker button.active{color:#245fd4;border-color:rgba(36,95,212,.28);background:rgba(36,95,212,.08);box-shadow:0 0 0 2px rgba(36,95,212,.06)}
+.recording-background-picker button.active i{transform:translateY(-2px);box-shadow:0 7px 14px rgba(40,63,104,.16),inset 0 0 0 1px rgba(255,255,255,.45)}
+
+.app-shell.recording-backdrop-paper .start-screen .meeting-start-page{
+  background:
+    repeating-linear-gradient(0deg,rgba(116,94,58,.045) 0 1px,transparent 1px 25px),
+    radial-gradient(circle at 87% 14%,rgba(226,202,157,.38),transparent 34%),
+    linear-gradient(132deg,#fffdf8 0%,#f6f0e5 58%,#eee6d9 100%);
+}
+.app-shell.recording-backdrop-focus .start-screen .meeting-start-page{
+  background:
+    radial-gradient(circle at 84% 16%,rgba(62,111,216,.42),transparent 30%),
+    radial-gradient(circle at 20% 86%,rgba(121,160,230,.2),transparent 36%),
+    linear-gradient(132deg,#f3f7ff 0%,#dce8fb 58%,#c9daf5 100%);
+}
+.app-shell.recording-backdrop-wave .start-screen .meeting-start-page{
+  background:
+    repeating-radial-gradient(ellipse at 78% 112%,rgba(27,129,151,.15) 0 7px,transparent 8px 24px),
+    radial-gradient(circle at 18% 14%,rgba(74,175,166,.2),transparent 32%),
+    linear-gradient(135deg,#f2fbf8 0%,#dcefed 52%,#c7e1e6 100%);
+}
+.app-shell.recording-backdrop-midnight .start-screen .meeting-start-page{
+  background:
+    radial-gradient(circle at 82% 13%,rgba(80,118,180,.34),transparent 29%),
+    radial-gradient(circle at 18% 86%,rgba(46,81,124,.18),transparent 36%),
+    linear-gradient(138deg,#1c2a3f 0%,#121c2a 55%,#0c121c 100%);
+}
+.app-shell.recording-backdrop-midnight .start-screen .meeting-start-page h2{color:#f4f7fc}
+.app-shell.recording-backdrop-midnight .start-screen .meeting-start-copy>p,
+.app-shell.recording-backdrop-midnight .start-screen .meeting-start-kicker,
+.app-shell.recording-backdrop-midnight .start-screen .meeting-start-history-hint,
+.app-shell.recording-backdrop-midnight .start-screen .meeting-start-features span{color:#b7c2d2}
+.app-shell.recording-backdrop-midnight .start-screen .meeting-start-context{color:#e7edf6;border-color:rgba(255,255,255,.1);background:rgba(23,33,48,.72);box-shadow:0 24px 52px rgba(0,0,0,.3),inset 0 1px 0 rgba(255,255,255,.06)}
+.app-shell.recording-backdrop-midnight .start-screen .meeting-start-context-heading span,
+.app-shell.recording-backdrop-midnight .start-screen .meeting-start-context dd{color:#eef3fa}
+.app-shell.recording-backdrop-midnight .start-screen .meeting-start-context dt,
+.app-shell.recording-backdrop-midnight .start-screen .meeting-start-context>p,
+.app-shell.recording-backdrop-midnight .start-screen .recording-background-picker>span{color:#9eabbf}
+.app-shell.recording-backdrop-midnight .start-screen .meeting-start-context dl div{border-color:rgba(255,255,255,.09)}
+
+.app-shell.is-recording.recording-backdrop-paper .workspace{
+  background:repeating-linear-gradient(0deg,rgba(113,91,55,.04) 0 1px,transparent 1px 28px),linear-gradient(135deg,#f8f4ec,#eae2d5);
+}
+.app-shell.is-recording.recording-backdrop-focus .workspace{
+  background:radial-gradient(circle at 76% 17%,rgba(72,121,222,.34),transparent 32%),linear-gradient(135deg,#eaf2ff,#cbdcf7);
+}
+.app-shell.is-recording.recording-backdrop-wave .workspace{
+  background:repeating-radial-gradient(ellipse at 72% 112%,rgba(28,126,151,.15) 0 8px,transparent 9px 27px),linear-gradient(135deg,#e8f7f3,#bfdde2);
+}
+.app-shell.is-recording.recording-backdrop-midnight .workspace{
+  background:radial-gradient(circle at 73% 15%,#30486d 0%,#182538 34%,#0c131d 72%);
+}
+
+@media(hover:hover) and (pointer:fine){
+  .brand:hover .brand-mark,.window-chrome-brand:hover .window-chrome-mark{transform:translateY(-1px) rotate(-2deg);box-shadow:0 10px 22px rgba(36,95,212,.3),inset 0 1px 0 rgba(255,255,255,.35)}
+  .recording-background-picker button:hover i{transform:translateY(-2px)}
+  .settings-backdrop-grid>button:hover{transform:translateY(-1px);border-color:rgba(68,96,214,.24);box-shadow:0 8px 18px rgba(42,58,92,.08)}
+}

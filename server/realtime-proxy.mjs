@@ -13,6 +13,7 @@ import { createEditedWav } from "./audio-editing.mjs";
 import { correctMeetingSpeakers } from "./correction.mjs";
 import { transcribeHistoricalWav } from "./historical-transcription.mjs";
 import { LocalAsrEngine } from "./local-asr-engine.mjs";
+import { buildMeetingPreflight, inspectMeetingStorage } from "./meeting-preflight.mjs";
 import { enhanceOverlappingSegments, OverlapSeparationEngine } from "./overlap-enhancement.mjs";
 import { SpeakerEngine } from "./speaker-engine.mjs";
 import { MeetingStorage } from "./storage.mjs";
@@ -501,10 +502,23 @@ const httpServer = createServer(async (request, response) => {
         speakerModelAvailable: speakerEngine.available,
         overlapSeparationModelAvailable: overlapSeparationEngine.available,
         audioImportAvailable: Boolean(ffmpegPath && existsSync(ffmpegPath)),
-        activeMeetings: activeSessions.size,
+        activeMeetings: workspaceIsBusy() ? 1 : 0,
         liveSummaryStartMs,
         liveSummaryIntervalMs,
       });
+    }
+    if (request.method === "GET" && url.pathname === "/api/preflight") {
+      const autoSummary = url.searchParams.get("autoSummary") !== "false";
+      return jsonResponse(response, 200, buildMeetingPreflight({
+        asrMode,
+        localAsrAvailable: localAsrEngine.available,
+        punctuationModelAvailable: localAsrEngine.punctuationAvailable,
+        speakerModelAvailable: speakerEngine.available,
+        miniMaxConfigured: Boolean(miniMaxApiKey),
+        autoSummary,
+        activeMeetings: workspaceIsBusy() ? 1 : 0,
+        storage: inspectMeetingStorage(dataRoot),
+      }));
     }
     if (request.method === "POST" && url.pathname === "/api/audio-imports") {
       if (!desktopControlToken || request.headers["x-shiyin-control-token"] !== desktopControlToken) {

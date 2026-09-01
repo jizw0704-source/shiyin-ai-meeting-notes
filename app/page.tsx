@@ -26,6 +26,7 @@ import {
   PushPin,
   Quotes,
   Scissors,
+  ShieldCheck,
   Sparkle,
   Sun,
   Target,
@@ -258,6 +259,20 @@ type Job = {
   error: string | null;
 };
 type AudioInput = { deviceId: string; label: string };
+type PreflightStatus = "ready" | "warning" | "blocked";
+type MeetingPreflightCheck = {
+  id: string;
+  label: string;
+  status: PreflightStatus;
+  detail: string;
+  blocking: boolean;
+};
+type MeetingPreflight = {
+  checkedAt: string;
+  status: PreflightStatus;
+  freeBytes: number | null;
+  checks: MeetingPreflightCheck[];
+};
 type MeetingBrief = {
   id: string;
   title: string;
@@ -339,7 +354,7 @@ declare global {
 const websocketBase = process.env.NEXT_PUBLIC_ASR_PROXY_URL || "ws://127.0.0.1:8788";
 const apiBase = process.env.NEXT_PUBLIC_API_URL || websocketBase.replace(/^ws/, "http");
 const versionHistory = versionHistoryData as VersionHistoryItem[];
-const CURRENT_APP_VERSION = versionHistory[0]?.version || "0.6.5";
+const CURRENT_APP_VERSION = versionHistory[0]?.version || "0.6.6";
 const DEFAULT_SUMMARY_TEMPLATE: SummaryTemplateId = "meeting-minutes";
 const DEFAULT_REPORT_STYLE: ReportStyle = "detailed";
 const DEFAULT_SPEAKER_LIMIT: SpeakerLimit = 6;
@@ -349,10 +364,10 @@ const speakerLimitOptions: Array<{ value: SpeakerLimit; label: string; detail: s
   { value: 20, label: "20 人", detail: "大型会议" },
 ];
 const recordingBackdrops: Array<{ id: RecordingBackdrop; name: string; detail: string }> = [
-  { id: "paper", name: "清爽", detail: "浅灰留白" },
-  { id: "focus", name: "专注", detail: "柔和蓝光" },
-  { id: "wave", name: "声场", detail: "动态波纹" },
-  { id: "midnight", name: "夜间", detail: "深色低干扰" },
+  { id: "paper", name: "清爽", detail: "暖白纸面" },
+  { id: "focus", name: "专注", detail: "沉浸蓝光" },
+  { id: "wave", name: "声场", detail: "青蓝声场" },
+  { id: "midnight", name: "夜间", detail: "深夜专注" },
 ];
 const summaryTemplates: Array<{
   id: SummaryTemplateId;
@@ -471,6 +486,61 @@ function preferredMicrophone(inputs: AudioInput[]) {
     .sort((left, right) => microphoneScore(right) - microphoneScore(left))[0] || null;
 }
 
+function combinePreflightStatus(checks: MeetingPreflightCheck[]): PreflightStatus {
+  if (checks.some((item) => item.status === "blocked")) return "blocked";
+  if (checks.some((item) => item.status === "warning")) return "warning";
+  return "ready";
+}
+
+function recordingSourcePreflight(
+  mode: AudioSourceMode,
+  capabilities: AudioCaptureCapabilities | null,
+  devices: AudioInput[],
+  desktopAvailable: boolean,
+): MeetingPreflightCheck {
+  const needsMicrophone = mode === "microphone" || mode === "mixed";
+  const needsSystemAudio = mode === "system" || mode === "mixed";
+  const problems: string[] = [];
+  const reminders: string[] = [];
+
+  if (needsMicrophone) {
+    if (["denied", "restricted"].includes(capabilities?.microphonePermission || "")) {
+      problems.push("麦克风权限未开启");
+    } else if (capabilities?.microphonePermission === "not-determined") {
+      reminders.push("开始时将请求麦克风权限");
+    } else if (!devices.length) {
+      reminders.push("开始时将确认麦克风设备");
+    }
+  }
+  if (needsSystemAudio) {
+    if (!desktopAvailable) {
+      problems.push("电脑声音录制需要桌面版");
+    } else if (!capabilities?.systemAudioSupported) {
+      problems.push(capabilities?.platform === "darwin" ? "当前 macOS 版本不支持电脑声音录制" : "当前系统不支持电脑声音录制");
+    } else if (["denied", "restricted"].includes(capabilities.screenPermission || "")) {
+      problems.push("屏幕与系统音频录制权限未开启");
+    } else if (capabilities.platform === "darwin") {
+      reminders.push("开始时需要在系统面板选择会议所在屏幕");
+    }
+  }
+
+  const sourceName = mode === "mixed" ? "电脑声音和麦克风" : mode === "system" ? "电脑声音" : "麦克风";
+  if (problems.length) {
+    return { id: "recording-source", label: "录音来源", status: "blocked", detail: problems.join("；"), blocking: true };
+  }
+  if (reminders.length) {
+    return { id: "recording-source", label: "录音来源", status: "warning", detail: reminders.join("；"), blocking: false };
+  }
+  const preferred = preferredMicrophone(devices);
+  return {
+    id: "recording-source",
+    label: "录音来源",
+    status: "ready",
+    detail: mode === "microphone" && preferred?.label ? preferred.label : `${sourceName}可用`,
+    blocking: false,
+  };
+}
+
 function escapeHtml(value: unknown) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -581,6 +651,8 @@ export default function Home() {
   const [activeDeviceLabel, setActiveDeviceLabel] = useState("自动选择麦克风");
   const [inputLevel, setInputLevel] = useState(0);
   const [audioWarning, setAudioWarning] = useState("");
+  const [meetingPreflight, setMeetingPreflight] = useState<MeetingPreflight | null>(null);
+  const [meetingPreflightLoading, setMeetingPreflightLoading] = useState(true);
   const [highlightedSeq, setHighlightedSeq] = useState<number | null>(null);
   const [renamingMeeting, setRenamingMeeting] = useState<MeetingBrief | null>(null);
   const [meetingTitleDraft, setMeetingTitleDraft] = useState("");
@@ -639,6 +711,7 @@ export default function Home() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const mediaStreamsRef = useRef<MediaStream[]>([]);
   const recordingRef = useRef(false);
+  const currentMeetingIdRef = useRef<string | null>(null);
   const sessionPeakRef = useRef(0);
   const captureStartedAtRef = useRef(0);
   const lastLevelUpdateRef = useRef(0);
@@ -982,6 +1055,45 @@ export default function Home() {
     return { devices, preferred };
   }, []);
 
+  const refreshMeetingPreflight = useCallback(async () => {
+    setMeetingPreflightLoading(true);
+    try {
+      const [backend, capabilities, audio] = await Promise.all([
+        api<MeetingPreflight>(`/api/preflight?autoSummary=${String(autoSummaryEnabled)}`),
+        refreshCaptureCapabilities().catch(() => null),
+        refreshAudioInputs().catch(() => ({ devices: [] as AudioInput[], preferred: null })),
+      ]);
+      const sourceCheck = recordingSourcePreflight(
+        audioSourceMode,
+        capabilities,
+        audio.devices,
+        Boolean(window.shiyinDesktop),
+      );
+      const checks = [sourceCheck, ...backend.checks];
+      const result = { ...backend, status: combinePreflightStatus(checks), checks };
+      setMeetingPreflight(result);
+      return result;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "";
+      const result: MeetingPreflight = {
+        checkedAt: new Date().toISOString(),
+        status: "blocked",
+        freeBytes: null,
+        checks: [{
+          id: "backend",
+          label: "本地服务",
+          status: "blocked",
+          detail: /failed to fetch/i.test(detail) ? "无法连接本地听记服务" : detail || "无法连接本地听记服务",
+          blocking: true,
+        }],
+      };
+      setMeetingPreflight(result);
+      return result;
+    } finally {
+      setMeetingPreflightLoading(false);
+    }
+  }, [audioSourceMode, autoSummaryEnabled, refreshAudioInputs, refreshCaptureCapabilities]);
+
   const refreshMeetings = useCallback(async (preferredId?: string) => {
     const result = await api<{ meetings: MeetingBrief[] }>("/api/meetings");
     setMeetings(result.meetings);
@@ -998,6 +1110,7 @@ export default function Home() {
   const processAudioImportResult = useCallback(async (result: { canceled: boolean; meeting?: Meeting }) => {
     if (result.canceled || !result.meeting) return;
     const meetingId = result.meeting.id;
+    currentMeetingIdRef.current = meetingId;
     setMeeting(result.meeting);
     setSelectedId(meetingId);
     setMeetings((items) => [result.meeting!, ...items.filter((item) => item.id !== meetingId)]);
@@ -1077,6 +1190,14 @@ export default function Home() {
       navigator.mediaDevices?.removeEventListener("devicechange", refresh);
     };
   }, [refreshAudioInputs]);
+
+  useEffect(() => {
+    if (meeting || recording) return;
+    const timer = window.setTimeout(() => {
+      refreshMeetingPreflight().catch(() => undefined);
+    }, 80);
+    return () => window.clearTimeout(timer);
+  }, [meeting, recording, refreshMeetingPreflight]);
 
   useEffect(() => {
     if (!selectedId) return;
@@ -1215,6 +1336,12 @@ export default function Home() {
       || formatMeetingDate(item.startedAt).toLocaleLowerCase("zh-CN").includes(normalizedQuery)
     ));
   }, [historyQuery, meetings]);
+  const preflightReadyCount = meetingPreflight?.checks.filter((item) => item.status === "ready").length || 0;
+  const preflightAttentionCount = meetingPreflight?.checks.filter((item) => item.status !== "ready").length || 0;
+  const preflightStatusLabel = meetingPreflightLoading && !meetingPreflight
+    ? "检查中"
+    : meetingPreflight?.status === "blocked" ? "需要处理"
+      : meetingPreflight?.status === "warning" ? "可以开始 · 有提醒" : "可以开始";
 
   function mergeMeetingList(value: MeetingBrief) {
     setMeetings((items) => [value, ...items.filter((item) => item.id !== value.id)]);
@@ -1251,6 +1378,22 @@ export default function Home() {
     setRecordingBackdrop(backdrop);
     window.localStorage.setItem("shiyin.recordingBackdrop", backdrop);
     setNotice(`录音界面已切换为“${recordingBackdrops.find((item) => item.id === backdrop)?.name}”背景`);
+  }
+
+  function returnToCurrentMeeting() {
+    const targetMeetingId = currentMeetingIdRef.current || selectedId || meeting?.id || null;
+    setSettingsPageOpen(false);
+    setView("transcript");
+    if (targetMeetingId) {
+      setSelectedId(targetMeetingId);
+      if (meeting?.id !== targetMeetingId) {
+        loadMeeting(targetMeetingId).catch((error) => setNotice(error.message));
+      }
+    } else {
+      setMeeting(null);
+      setSelectedId(null);
+    }
+    window.requestAnimationFrame(scrollWorkspaceToTop);
   }
 
   function selectAutoSummary(enabled: boolean) {
@@ -1419,6 +1562,11 @@ export default function Home() {
     try {
       setNotice("");
       setSourceWarning("");
+      const preflight = await refreshMeetingPreflight();
+      const blockingCheck = preflight.checks.find((item) => item.blocking || item.status === "blocked");
+      if (blockingCheck) {
+        throw new Error(`会议前自检未通过：${blockingCheck.detail}`);
+      }
       const captureMode = audioSourceMode;
       const needsMicrophone = captureMode === "microphone" || captureMode === "mixed";
       const needsSystemAudio = captureMode === "system" || captureMode === "mixed";
@@ -1542,6 +1690,7 @@ export default function Home() {
             sessionAsrLabel = message.asrLabel || "实时转写";
             window.clearTimeout(timeout);
             const value = message.meeting as Meeting;
+            currentMeetingIdRef.current = value.id;
             setLiveText("");
             setLiveConfirmedText("");
             setMeeting(value);
@@ -2519,12 +2668,12 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
     <main className={`app-shell recording-backdrop-${recordingBackdrop} ${recording ? "is-recording" : ""}`}>
       <header className="window-chrome" aria-label="拾音 AI 软件窗口">
         <div className="window-chrome-safe-area">
-          <div className="window-chrome-brand">
+          <button type="button" className="window-chrome-brand" onClick={returnToCurrentMeeting} title="返回本次会议" aria-label="返回本次会议">
             <span className="window-chrome-mark">听</span>
             <strong>拾音 AI</strong>
             <i />
             <span>会议听记工作台</span>
-          </div>
+          </button>
           <div className="window-chrome-meta">
             <span className="window-version">v{displayedAppVersion}</span>
             <div className="window-chrome-state"><i /> 本地运行</div>
@@ -2540,7 +2689,9 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
         onChange={(event) => handleAttachmentFiles(event.target.files)}
       />
       <aside className="sidebar">
-        <div className="brand"><span className="brand-mark">听</span><span>拾音</span><em>AI</em></div>
+        <button type="button" className="brand" onClick={returnToCurrentMeeting} title="返回本次会议" aria-label="返回本次会议">
+          <span className="brand-mark">听</span><span>拾音</span><em>AI</em>
+        </button>
         <button className="new-note" disabled={processing} onClick={() => {
           if (!recording) setSettingsPageOpen(false);
           void toggleRecording();
@@ -3086,7 +3237,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             {!meeting ? (
               <section className="meeting-start-page" aria-labelledby="meeting-start-title">
                 <div className="meeting-start-copy">
-                  <span className="meeting-start-kicker"><i /> 本地听记已准备就绪</span>
+                  <span className={`meeting-start-kicker ${meetingPreflight?.status || "checking"}`}><i /> {meetingPreflightLoading && !meetingPreflight ? "正在执行会议前自检" : meetingPreflight?.status === "blocked" ? "请先处理会议前检查项" : "本地听记已准备就绪"}</span>
                   <h2 id="meeting-start-title">让讨论留下清晰结论</h2>
                   <p>开始后实时转写、识别发言人并保存原始录音。会议结束时，MiniMax 会整理决策、风险和行动项。</p>
                   <div className="meeting-material-prep">
@@ -3102,14 +3253,39 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                       </div>
                     )}
                   </div>
+                  <section className={`meeting-preflight ${meetingPreflight?.status || "checking"}`} aria-label="会议前自检" aria-live="polite">
+                    <header>
+                      <span><ShieldCheck size={18} weight="duotone" /></span>
+                      <div>
+                        <b>会议前自检</b>
+                        <small>{meetingPreflightLoading && !meetingPreflight ? "正在检查录音与本地环境…" : `${preflightReadyCount} 项正常${preflightAttentionCount ? ` · ${preflightAttentionCount} 项需要留意` : ""}`}</small>
+                      </div>
+                      <em>{preflightStatusLabel}</em>
+                      <button type="button" disabled={meetingPreflightLoading} onClick={() => void refreshMeetingPreflight()} aria-label="重新执行会议前自检"><ArrowClockwise size={14} className={meetingPreflightLoading ? "spinning" : ""} /> 重新检查</button>
+                    </header>
+                    {meetingPreflight?.checks.length ? (
+                      <div className="meeting-preflight-grid">
+                        {meetingPreflight.checks.map((item) => (
+                          <article key={item.id} className={item.status} title={item.detail}>
+                            {item.status === "ready" ? <CheckCircle size={15} weight="fill" /> : <WarningCircle size={15} weight="fill" />}
+                            <span><b>{item.label}</b><small>{item.detail}</small></span>
+                          </article>
+                        ))}
+                      </div>
+                    ) : <div className="meeting-preflight-loading"><i /><i /><i /></div>}
+                    {meetingPreflight?.status === "blocked" && (
+                      <p><WarningCircle size={14} weight="fill" /> 请先处理红色项目，随后重新检查；已有会议记录不会受到影响。</p>
+                    )}
+                  </section>
                   <button
                     type="button"
                     className="meeting-start-button"
-                    disabled={recording || processing}
+                    aria-label="开始会议"
+                    disabled={recording || processing || meetingPreflightLoading || !meetingPreflight || meetingPreflight.status === "blocked"}
                     onClick={() => void startRecording()}
                   >
                     <span><Waveform size={22} weight="fill" /></span>
-                    <strong>{recording ? "正在启动…" : "开始会议"}</strong>
+                    <strong>{recording ? "正在启动…" : meetingPreflightLoading ? "正在检查…" : meetingPreflight?.status === "blocked" ? "请先处理检查项" : "开始会议"}</strong>
                     <small>
                       {audioSourceMode === "mixed" ? "电脑声音 + 麦克风" : audioSourceMode === "system" ? "电脑声音" : "麦克风"}
                       {speakerLimitMode === "auto" ? " · 自动检测发言人" : ` · 最多 ${speakerLimit} 人`}
@@ -3152,7 +3328,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                   </div>
                   <div className="meeting-start-context-heading">
                     <span>本次会议设置</span>
-                    <b>已准备</b>
+                    <b className={meetingPreflight?.status || "checking"}>{preflightStatusLabel}</b>
                   </div>
                   <dl>
                     <div><dt>录音来源</dt><dd>{audioSourceMode === "mixed" ? "电脑声音 + 麦克风" : audioSourceMode === "system" ? "电脑声音" : "麦克风"}</dd></div>

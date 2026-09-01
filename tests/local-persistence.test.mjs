@@ -20,6 +20,11 @@ import {
 import { createWorkspaceBackup, restoreWorkspaceBackup } from "../server/workspace-backup.mjs";
 import { findAvailableLocalPort } from "../server/local-port.mjs";
 import { deriveAutomaticMeetingTitle, normalizeAutomaticMeetingTitle } from "../server/meeting-title.mjs";
+import {
+  buildMeetingPreflight,
+  inspectMeetingStorage,
+  PREFLIGHT_MINIMUM_FREE_BYTES,
+} from "../server/meeting-preflight.mjs";
 import { normalizeMaxSpeakers, normalizeSpeakerLimitMode } from "../server/speaker-settings.mjs";
 import { SpeakerEngine } from "../server/speaker-engine.mjs";
 import { detectPotentialOverlap } from "../server/overlap-detection.mjs";
@@ -37,6 +42,50 @@ import {
   normalizeSummaryTemplateId,
   summaryTemplatePrompt,
 } from "../server/summary-templates.mjs";
+
+test("blocks meetings when required preflight checks fail but keeps optional AI as a warning", () => {
+  const storage = inspectMeetingStorage("/virtual-data", {
+    mkdirSync() {},
+    accessSync() {},
+    statfsSync() { return { bavail: 10_000, bsize: 4096 }; },
+  });
+  assert.equal(storage.status, "blocked");
+  assert.ok(storage.freeBytes < PREFLIGHT_MINIMUM_FREE_BYTES);
+
+  const blocked = buildMeetingPreflight({
+    asrMode: null,
+    localAsrAvailable: false,
+    punctuationModelAvailable: false,
+    speakerModelAvailable: false,
+    miniMaxConfigured: false,
+    autoSummary: true,
+    activeMeetings: 1,
+    storage,
+  });
+  assert.equal(blocked.status, "blocked");
+  assert.equal(blocked.checks.find((item) => item.id === "transcription")?.blocking, true);
+  assert.equal(blocked.checks.find((item) => item.id === "summary")?.status, "warning");
+});
+
+test("passes meeting preflight with local models, writable storage, and optional summary disabled", () => {
+  const storage = inspectMeetingStorage("/virtual-data", {
+    mkdirSync() {},
+    accessSync() {},
+    statfsSync() { return { bavail: 2_000_000, bsize: 4096 }; },
+  });
+  const result = buildMeetingPreflight({
+    asrMode: "local",
+    localAsrAvailable: true,
+    punctuationModelAvailable: true,
+    speakerModelAvailable: true,
+    miniMaxConfigured: false,
+    autoSummary: false,
+    activeMeetings: 0,
+    storage,
+  });
+  assert.equal(result.status, "ready");
+  assert.equal(result.checks.every((item) => item.status === "ready"), true);
+});
 
 test("selects another local port when the preferred desktop port is occupied", async () => {
   const blocker = createServer();
