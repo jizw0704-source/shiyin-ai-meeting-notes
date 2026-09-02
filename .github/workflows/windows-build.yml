@@ -40,8 +40,8 @@ jobs:
       PUNCTUATION_ARCHIVE_SHA256: c0d5aa5f8eeb686032345e180bedf39319dc2e0556781c6264bcadba8328a6e1
       PUNCTUATION_MODEL_SHA256: 65a3fb9f5ad7bfb96bf69e0dc4481df97f6ee60513c1d94ce981ba6effd524b1
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
-      FFMPEG_WINDOWS_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-lgpl-8.1.zip
-      FFMPEG_WINDOWS_SHA256: 74b127e0bc82c7d132f93311a4f9e1b78001e9daecbe0459d66dfe333a3bfd8f
+      FFMPEG_WINDOWS_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-01-13-13/ffmpeg-n8.1.2-50-g1a748fe2cd-win64-lgpl-8.1.zip
+      FFMPEG_WINDOWS_SHA256: 14fea72ee692a5f832b8d7b0c7f1c050af124f72cf43d6a948faf98ff3c0072d
 
     steps:
       - name: Check out source
