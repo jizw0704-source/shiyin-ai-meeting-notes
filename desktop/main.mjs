@@ -954,12 +954,18 @@ ipcMain.handle("obsidian:save-meeting", async (_event, payload = {}) => {
   return { canceled: false, ...result };
 });
 ipcMain.handle("audio-privacy-settings:open", async (_event, kind) => {
-  if (process.platform !== "darwin") return false;
-  const privacyPane = kind === "microphone" ? "Privacy_Microphone" : "Privacy_ScreenCapture";
-  await shell.openExternal(
-    `x-apple.systempreferences:com.apple.preference.security?${privacyPane}`,
-  );
-  return true;
+  if (process.platform === "darwin") {
+    const privacyPane = kind === "microphone" ? "Privacy_Microphone" : "Privacy_ScreenCapture";
+    await shell.openExternal(
+      `x-apple.systempreferences:com.apple.preference.security?${privacyPane}`,
+    );
+    return true;
+  }
+  if (process.platform === "win32" && kind === "microphone") {
+    await shell.openExternal("ms-settings:privacy-microphone");
+    return true;
+  }
+  return false;
 });
 ipcMain.on("application:relaunch", () => {
   quitting = true;

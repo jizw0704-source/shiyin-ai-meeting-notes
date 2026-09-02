@@ -100,6 +100,8 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(proxy, /\/api\/preflight/);
   assert.match(page, /recordingSourcePreflight/);
   assert.match(page, /会议前自检未通过/);
+  assert.match(page, /打开麦克风权限/);
+  assert.match(page, /麦克风权限设置，请允许拾音 AI 后返回应用/);
   assert.match(page, /meeting-start-state/);
   assert.match(page, /meeting-start-secondary/);
   assert.match(page, /settings-preflight/);
@@ -253,6 +255,7 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(desktopMain, /macOSMajorVersion\(\) >= 15/);
   assert.match(desktopMain, /Privacy_ScreenCapture/);
   assert.match(desktopMain, /shell\.openExternal/);
+  assert.match(desktopMain, /ms-settings:privacy-microphone/);
   assert.match(desktopMain, /application:relaunch/);
   assert.match(desktopMain, /electron-updater/);
   assert.match(desktopMain, /normalizeReleaseNotes/);

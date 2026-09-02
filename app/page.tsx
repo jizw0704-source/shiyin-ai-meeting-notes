@@ -1089,15 +1089,6 @@ export default function Home() {
   }, [refreshCaptureCapabilities]);
 
   useEffect(() => {
-    if (!window.shiyinDesktop) return;
-    const refreshOnFocus = () => {
-      refreshCaptureCapabilities().catch(() => undefined);
-    };
-    window.addEventListener("focus", refreshOnFocus);
-    return () => window.removeEventListener("focus", refreshOnFocus);
-  }, [refreshCaptureCapabilities]);
-
-  useEffect(() => {
     if (!templateDialogOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") setTemplateDialogOpen(false);
@@ -1333,6 +1324,16 @@ export default function Home() {
       setMeetingPreflightLoading(false);
     }
   }, [audioSourceMode, autoSummaryEnabled, refreshAudioInputs, refreshCaptureCapabilities]);
+
+  useEffect(() => {
+    if (!window.shiyinDesktop) return;
+    const refreshOnFocus = () => {
+      if (meeting || recordingRef.current) return;
+      refreshMeetingPreflight().catch(() => undefined);
+    };
+    window.addEventListener("focus", refreshOnFocus);
+    return () => window.removeEventListener("focus", refreshOnFocus);
+  }, [meeting, refreshMeetingPreflight]);
 
   const refreshMeetings = useCallback(async (preferredId?: string) => {
     const result = await api<{ meetings: MeetingBrief[] }>("/api/meetings");
@@ -1828,27 +1829,41 @@ export default function Home() {
 
   async function openAudioPrivacySettings(kind: "microphone" | "screen") {
     const opened = await window.shiyinDesktop?.openAudioPrivacySettings(kind);
-    if (!opened) return;
+    if (!opened) return false;
     if (kind === "screen") setCaptureSettingsOpened(true);
     setNotice(
       kind === "screen"
         ? "已打开“屏幕与系统音频录制”，请允许拾音 AI 后返回应用"
         : "已打开“麦克风”权限设置，请允许拾音 AI 后返回应用",
     );
+    return true;
   }
 
   async function startRecording() {
     try {
       setNotice("");
       setSourceWarning("");
-      const preflight = await refreshMeetingPreflight();
-      const blockingCheck = preflight.checks.find((item) => item.blocking || item.status === "blocked");
-      if (blockingCheck) {
-        throw new Error(`会议前自检未通过：${blockingCheck.detail}`);
-      }
       const captureMode = audioSourceMode;
       const needsMicrophone = captureMode === "microphone" || captureMode === "mixed";
       const needsSystemAudio = captureMode === "system" || captureMode === "mixed";
+      const preflight = await refreshMeetingPreflight();
+      const blockingCheck = preflight.checks.find((item) => item.blocking || item.status === "blocked");
+      if (blockingCheck) {
+        if (
+          needsMicrophone
+          && blockingCheck.id === "recording-source"
+          && blockingCheck.detail.includes("麦克风权限未开启")
+        ) {
+          const opened = await openAudioPrivacySettings("microphone");
+          const permissionMessage = opened
+            ? "已打开麦克风权限设置，请允许拾音 AI 后返回应用"
+            : "麦克风权限未开启，请在系统隐私设置中允许拾音 AI";
+          setAudioWarning(permissionMessage);
+          setNotice(permissionMessage);
+          return;
+        }
+        throw new Error(`会议前自检未通过：${blockingCheck.detail}`);
+      }
       if (needsSystemAudio && !systemAudioAvailable) {
         throw new Error("电脑声音录制仅在拾音 AI 桌面版中可用");
       }
@@ -2172,13 +2187,27 @@ export default function Home() {
       let userMessage = message;
       if (error instanceof DOMException && error.name === "NotAllowedError") {
         if (audioSourceMode === "microphone") {
-          userMessage = "麦克风权限未开启，请在“系统设置 → 隐私与安全性 → 麦克风”中允许拾音 AI";
+          const opened = await openAudioPrivacySettings("microphone").catch(() => false);
+          userMessage = opened
+            ? "已打开麦克风权限设置，请允许拾音 AI 后返回应用"
+            : "麦克风权限未开启，请在系统隐私设置中允许拾音 AI";
           setAudioWarning(userMessage);
         } else {
           const latestCapabilities = await refreshCaptureCapabilities().catch(() => null);
-          userMessage = ["denied", "restricted"].includes(latestCapabilities?.screenPermission || "")
-            ? "Mac 系统音频权限未开启，请在“屏幕与系统音频录制”中允许拾音 AI"
-            : "已取消 Mac 声音共享；重新开始后请选择会议所在屏幕并开启系统音频";
+          if (["denied", "restricted"].includes(latestCapabilities?.microphonePermission || "")) {
+            const opened = await openAudioPrivacySettings("microphone").catch(() => false);
+            userMessage = opened
+              ? "已打开麦克风权限设置，请允许拾音 AI 后返回应用"
+              : "麦克风权限未开启，请在系统隐私设置中允许拾音 AI";
+            setAudioWarning(userMessage);
+          } else if (["denied", "restricted"].includes(latestCapabilities?.screenPermission || "")) {
+            const opened = await openAudioPrivacySettings("screen").catch(() => false);
+            userMessage = opened
+              ? "已打开屏幕与系统音频录制设置，请允许拾音 AI 后返回应用"
+              : "系统音频权限未开启，请在系统隐私设置中允许拾音 AI";
+          } else {
+            userMessage = "已取消电脑声音共享；重新开始后请选择会议所在屏幕并开启系统音频";
+          }
         }
       }
       if (audioSourceMode !== "microphone") setSourceWarning(userMessage);
@@ -2982,6 +3011,11 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
   const macMicrophonePermission = audioCaptureCapabilities?.microphonePermission || "unknown";
   const macScreenPermissionBlocked = ["denied", "restricted"].includes(macScreenPermission);
   const macMicrophonePermissionBlocked = ["denied", "restricted"].includes(macMicrophonePermission);
+  const recordingSourceCheck = meetingPreflight?.checks.find((item) => item.id === "recording-source");
+  const microphonePermissionNeedsAction = audioSourceMode !== "system"
+    && recordingSourceCheck?.status === "blocked"
+    && recordingSourceCheck.detail.includes("麦克风权限未开启");
+  const meetingBlockedForOtherReason = meetingPreflight?.status === "blocked" && !microphonePermissionNeedsAction;
   const macSystemMode = audioSourceMode === "system" || audioSourceMode === "mixed";
   const macCaptureState = sourceWarning
     ? "warning"
@@ -3673,23 +3707,25 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             {!meeting ? (
               <section className="meeting-start-page" aria-labelledby="meeting-start-title">
                 <div className="meeting-start-copy">
-                  <span className={`meeting-start-kicker ${meetingPreflight?.status || "checking"}`}><i /> {meetingPreflightLoading && !meetingPreflight ? "正在执行会议前自检" : meetingPreflight?.status === "blocked" ? "请先处理会议前检查项" : "本地听记已准备就绪"}</span>
+                  <span className={`meeting-start-kicker ${meetingPreflight?.status || "checking"}`}><i /> {meetingPreflightLoading && !meetingPreflight ? "正在执行会议前自检" : microphonePermissionNeedsAction ? "开始前需要麦克风权限" : meetingPreflight?.status === "blocked" ? "请先处理会议前检查项" : "本地听记已准备就绪"}</span>
                   <h2 id="meeting-start-title">听见讨论，看见下一步</h2>
                   <p>本地记录每一次发言，会议结束后自动整理会议简报与行动项。</p>
                   <button
                     type="button"
                     className="meeting-start-button"
                     aria-label="开始会议"
-                    disabled={recording || processing || meetingPreflightLoading || !meetingPreflight || meetingPreflight.status === "blocked"}
+                    disabled={recording || processing || meetingPreflightLoading || !meetingPreflight || meetingBlockedForOtherReason}
                     onClick={() => void startRecording()}
                   >
-                    <span><Waveform size={22} weight="fill" /></span>
-                    <strong>{recording ? "正在启动…" : meetingPreflightLoading ? "正在检查…" : meetingPreflight?.status === "blocked" ? "请先处理检查项" : "开始会议"}</strong>
+                    <span>{microphonePermissionNeedsAction ? <ShieldCheck size={22} weight="fill" /> : <Waveform size={22} weight="fill" />}</span>
+                    <strong>{recording ? "正在启动…" : meetingPreflightLoading ? "正在检查…" : microphonePermissionNeedsAction ? "打开麦克风权限" : meetingPreflight?.status === "blocked" ? "请先处理检查项" : "开始会议"}</strong>
                   </button>
                   <div className={`meeting-start-state ${meetingPreflight?.status || "checking"}`} aria-live="polite">
                     {meetingPreflight?.status === "blocked" ? <WarningCircle size={14} weight="fill" /> : <CheckCircle size={14} weight="fill" />}
-                    <span>{preflightStatusLabel}</span>
-                    {(meetingPreflight?.status === "blocked" || meetingPreflight?.status === "warning") && <button onClick={() => void openSettingsDialog("meeting")}>查看原因</button>}
+                    <span>{microphonePermissionNeedsAction ? "点击上方按钮，授权后返回即可开始" : preflightStatusLabel}</span>
+                    {microphonePermissionNeedsAction
+                      ? <button onClick={() => void openAudioPrivacySettings("microphone")}>打开权限</button>
+                      : (meetingPreflight?.status === "blocked" || meetingPreflight?.status === "warning") && <button onClick={() => void openSettingsDialog("meeting")}>查看原因</button>}
                   </div>
                   <div className="meeting-start-secondary" aria-label="其他会议操作">
                     <button
