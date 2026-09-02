@@ -1,4 +1,10 @@
-# 拾音 AI｜听见讨论，看见下一步
+<p align="center">
+  <img src="build/icon.svg" width="112" height="112" alt="拾音 AI Logo">
+</p>
+
+<h1 align="center">拾音 AI｜听见讨论，看见下一步</h1>
+
+<p align="center">把每一次讨论，沉淀为可回顾、可行动的会议知识。</p>
 
 拾音 AI 是一款本地优先的中文会议听记桌面应用。它使用 Sherpa-ONNX 在本机完成实时转写与中英文标点恢复，使用 CAM++ 在本机区分、校正并记忆发言人，再按需调用 MiniMax 自动判断会议类型，生成结构化纪要与可编辑会议简报。
 
@@ -67,12 +73,12 @@ flowchart LR
 
 ### 1. 安装应用
 
-内部测试安装包通过 GitHub Actions 构建：
+正式安装包通过 GitHub Actions 构建，并在 [GitHub Releases](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/releases/latest) 提供：
 
 - macOS：Apple Silicon DMG / ZIP；
 - Windows：x64 NSIS EXE。
 
-当前安装包尚未使用商业代码签名。macOS 可能触发 Gatekeeper，Windows SmartScreen 可能显示“未知发布者”。请只从本仓库成功的构建任务或维护者提供的内部 Draft Release 下载。
+当前安装包尚未使用商业代码签名。macOS 可能触发 Gatekeeper，Windows SmartScreen 可能显示“未知发布者”。请只从本仓库的正式 Release 下载，并在安装前核对版本与 SHA-256 校验信息。
 
 ### 2. 配置 MiniMax（可选）
 
