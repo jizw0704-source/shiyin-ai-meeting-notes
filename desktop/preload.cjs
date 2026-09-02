@@ -9,6 +9,9 @@ contextBridge.exposeInMainWorld("shiyinDesktop", {
   getAudioCaptureCapabilities() {
     return ipcRenderer.invoke("audio-capture-capabilities");
   },
+  requestMicrophoneAccess() {
+    return ipcRenderer.invoke("microphone-access:request");
+  },
   selectAudioImport(options) {
     return ipcRenderer.invoke("audio-import:select", options);
   },

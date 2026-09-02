@@ -852,6 +852,19 @@ function audioCaptureCapabilities() {
   };
 }
 
+async function requestMicrophoneAccess() {
+  if (process.platform !== "darwin") {
+    return { granted: true, status: "granted" };
+  }
+  let status = systemPreferences.getMediaAccessStatus("microphone");
+  let granted = status === "granted";
+  if (status === "not-determined") {
+    granted = await systemPreferences.askForMediaAccess("microphone");
+    status = systemPreferences.getMediaAccessStatus("microphone");
+  }
+  return { granted, status };
+}
+
 ipcMain.on("recording-state", (_event, active) => {
   recordingActive = Boolean(active);
   rebuildTrayMenu();
@@ -864,6 +877,7 @@ ipcMain.on("recording-state", (_event, active) => {
 });
 
 ipcMain.handle("audio-capture-capabilities", () => audioCaptureCapabilities());
+ipcMain.handle("microphone-access:request", () => requestMicrophoneAccess());
 ipcMain.handle("audio-import:select", async (_event, options = {}) => {
   const selection = await dialog.showOpenDialog(mainWindow, {
     title: "选择要解析的会议录音",

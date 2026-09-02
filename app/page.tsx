@@ -338,6 +338,7 @@ declare global {
   interface Window {
     shiyinDesktop?: {
       getAudioCaptureCapabilities: () => Promise<AudioCaptureCapabilities>;
+      requestMicrophoneAccess: () => Promise<{ granted: boolean; status: string }>;
       selectAudioImport: (options: {
         summaryTemplate: SummaryTemplateId;
         reportStyle: ReportStyle;
@@ -1868,6 +1869,38 @@ export default function Home() {
         throw new Error("电脑声音录制仅在拾音 AI 桌面版中可用");
       }
       let currentCaptureCapabilities = audioCaptureCapabilities;
+      if (needsMicrophone && window.shiyinDesktop) {
+        currentCaptureCapabilities = await refreshCaptureCapabilities();
+        if (
+          currentCaptureCapabilities?.platform === "darwin"
+          && currentCaptureCapabilities.microphonePermission === "not-determined"
+        ) {
+          setConnectionStatus("正在请求麦克风权限…");
+          const permission = await window.shiyinDesktop.requestMicrophoneAccess();
+          currentCaptureCapabilities = await refreshCaptureCapabilities();
+          if (!permission.granted) {
+            const opened = await openAudioPrivacySettings("microphone");
+            const permissionMessage = opened
+              ? "麦克风授权未完成，已打开系统设置，请允许拾音 AI 后返回应用"
+              : "麦克风授权未完成，请在系统隐私设置中允许拾音 AI";
+            setAudioWarning(permissionMessage);
+            setNotice(permissionMessage);
+            return;
+          }
+        }
+        if (
+          currentCaptureCapabilities?.platform === "darwin"
+          && ["denied", "restricted"].includes(currentCaptureCapabilities.microphonePermission)
+        ) {
+          const opened = await openAudioPrivacySettings("microphone");
+          const permissionMessage = opened
+            ? "已打开麦克风权限设置，请允许拾音 AI 后返回应用"
+            : "麦克风权限未开启，请在系统隐私设置中允许拾音 AI";
+          setAudioWarning(permissionMessage);
+          setNotice(permissionMessage);
+          return;
+        }
+      }
       if (needsSystemAudio && window.shiyinDesktop) {
         currentCaptureCapabilities = await refreshCaptureCapabilities();
         if (
@@ -3369,7 +3402,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                 <h1>设置</h1>
                 <p>这里保存的是新会议的默认习惯；开始会议前仍可在左侧临时调整。</p>
               </div>
-              <button type="button" onClick={() => setSettingsPageOpen(false)}><X size={17} /> 返回会议</button>
+              <button type="button" onClick={() => setSettingsPageOpen(false)}><ArrowLeft size={17} /> 返回会议</button>
             </header>
             <div className="settings-page-layout">
               <nav className="settings-page-nav" aria-label="设置分类">

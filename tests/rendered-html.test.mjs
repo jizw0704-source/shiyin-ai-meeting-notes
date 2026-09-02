@@ -102,6 +102,7 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(page, /会议前自检未通过/);
   assert.match(page, /打开麦克风权限/);
   assert.match(page, /麦克风权限设置，请允许拾音 AI 后返回应用/);
+  assert.match(page, /<ArrowLeft size=\{17\} \/> 返回会议/);
   assert.match(page, /meeting-start-state/);
   assert.match(page, /meeting-start-secondary/);
   assert.match(page, /settings-preflight/);
@@ -289,6 +290,7 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(desktopMain, /global-shortcuts:get/);
   assert.match(desktopMain, /globalShortcut\.unregisterAll/);
   assert.match(preload, /getAudioCaptureCapabilities/);
+  assert.match(preload, /requestMicrophoneAccess/);
   assert.match(preload, /openAudioPrivacySettings/);
   assert.match(preload, /data-folder:open/);
   assert.match(preload, /workspace-backup:create/);

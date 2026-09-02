@@ -1,6 +1,6 @@
 {
   "name": "shiyin-minimax-meeting-notes",
-  "version": "0.6.9",
+  "version": "0.6.10",
   "description": "基于 Sherpa-ONNX 本地实时转写、CAM++ 本地声纹识别与 MiniMax 的 AI 会议听记工具",
   "author": "LightningFlashEvE",
   "license": "UNLICENSED",
@@ -113,6 +113,8 @@
     },
     "mac": {
       "icon": "build/icon.icns",
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.inherit.plist",
       "artifactName": "Shiyin-AI-${version}-${arch}.${ext}",
       "category": "public.app-category.productivity",
       "target": [

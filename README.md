@@ -10,7 +10,7 @@
 
 本地转写不消耗云端语音时长。原始录音、逐字稿、发言人声纹、历史版本和会议列表默认保存在自己的电脑上；只有主动生成 AI 总结时，会议文本才会发送给 MiniMax。
 
-> 当前开发基线：`0.6.9`<br>
+> 当前开发基线：`0.6.10`<br>
 > 使用阶段：个人使用与团队内部测试<br>
 > 支持平台：Apple Silicon macOS、Windows x64<br>
 > 授权状态：`UNLICENSED`，不是开源许可证；公开分发或商业使用前请先确认授权条件
@@ -18,12 +18,13 @@
 [![macOS build](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/macos-build.yml/badge.svg)](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/macos-build.yml)
 [![Windows build](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/windows-build.yml/badge.svg)](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/windows-build.yml)
 
-## 0.6.9 版本亮点
+## 0.6.10 版本亮点
 
-- **权限问题直接处理**：麦克风未授权时，首页主按钮会切换为明确的权限入口。
-- **一键打开系统设置**：支持直达 macOS 与 Windows 对应的麦克风隐私页面。
-- **返回应用自动复查**：完成授权后无需手动刷新，回到拾音即可重新检测。
-- **准确区分录音权限**：混合录音时分别判断麦克风与系统音频权限，避免跳错设置页面。
+- **补齐 macOS 录音能力**：安装包明确声明麦克风音频输入权限，避免升级后只能录到静音。
+- **原生授权请求**：首次开始会议时由 macOS 正式请求麦克风权限。
+- **失败路径清晰**：拒绝授权后直接打开系统设置，并提示用户完成授权后返回。
+- **保留跨平台体验**：Windows 继续使用系统麦克风设置入口，不改变现有录音流程。
+- **返回操作更直观**：设置页与本机工作区统一使用左箭头返回会议。
 
 ## 为什么做拾音 AI
 
