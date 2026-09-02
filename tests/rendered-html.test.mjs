@@ -39,7 +39,8 @@ test("server-renders the meeting transcription product", async () => {
   assert.doesNotMatch(html, /重新检查/);
   assert.match(html, /录音来源/);
   assert.match(html, /电脑声音 \+ 麦克风/);
-  assert.match(html, /v0\.6\.7/);
+  const packageManifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  assert.match(html, new RegExp(`v(?:<!-- -->)?${packageManifest.version.replaceAll(".", "\\.")}`));
   assert.match(html, /<span><b>设置<\/b>/);
   assert.match(html, /管理录音与空间/);
   assert.match(html, /发言人数识别/);

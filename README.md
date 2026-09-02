@@ -4,7 +4,7 @@
 
 本地转写不消耗云端语音时长。原始录音、逐字稿、发言人声纹、历史版本和会议列表默认保存在自己的电脑上；只有主动生成 AI 总结时，会议文本才会发送给 MiniMax。
 
-> 当前开发基线：`0.6.7`<br>
+> 当前开发基线：`0.6.8`<br>
 > 使用阶段：个人使用与团队内部测试<br>
 > 支持平台：Apple Silicon macOS、Windows x64<br>
 > 授权状态：`UNLICENSED`，不是开源许可证；公开分发或商业使用前请先确认授权条件
@@ -12,13 +12,12 @@
 [![macOS build](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/macos-build.yml/badge.svg)](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/macos-build.yml)
 [![Windows build](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/windows-build.yml/badge.svg)](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/windows-build.yml)
 
-## 0.6.7 版本亮点
+## 0.6.8 版本亮点
 
-- **减少发言人误增**：新声纹需要持续出现并形成足够证据后才会新增发言人，会后继续过滤短暂、孤立的声纹碎片。
-- **默认生成图文简报**：新会议默认使用“会议简报 + 图文总结”，让未参会者优先看懂讨论内容、痛点、期望与下一步。
-- **自动适配会议类型**：调研访谈、项目推进、方案评审等会议分别采用匹配的提炼重点，不虚构会议中没有出现的信息。
-- **采用 C 版简约布局**：以编号分区呈现核心内容，支持编辑栏目、调整顺序并导出完整 PNG 图片。
-- **保留用户原有选择**：已经手动设置过总结模板或展示样式的用户继续沿用自己的设置。
+- **正式启用拾音波形标识**：使用精修的蓝底白色波形，让品牌和录音功能形成直接联系。
+- **统一应用内视觉**：侧边栏和桌面窗口标题栏不再使用旧的“听”字标识。
+- **统一双平台安装图标**：网页图标、macOS ICNS 和 Windows ICO 均使用同一设计。
+- **兼顾不同显示环境**：优化浅色、深色和小尺寸图标下的清晰度。
 
 ## 为什么做拾音 AI
 

@@ -817,6 +817,21 @@ function fileAsBase64(file: File) {
   });
 }
 
+function ShiyinMark({ className }: { className: string }) {
+  return (
+    <span className={className} aria-hidden="true">
+      <span className="shiyin-wave-bars">
+        <i />
+        <i />
+        <i />
+        <i />
+        <i />
+      </span>
+      <i className="shiyin-wave-dot" />
+    </span>
+  );
+}
+
 export default function Home() {
   const [view, setView] = useState<View>("transcript");
   const [meetings, setMeetings] = useState<MeetingBrief[]>([]);
@@ -2990,7 +3005,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
       <header className="window-chrome" aria-label="拾音 AI 软件窗口">
         <div className="window-chrome-safe-area">
           <button type="button" className="window-chrome-brand" onClick={returnToCurrentMeeting} title="返回本次会议" aria-label="返回本次会议">
-            <span className="window-chrome-mark">听</span>
+            <ShiyinMark className="window-chrome-mark" />
             <strong>拾音 AI</strong>
             <i />
             <span>会议听记工作台</span>
@@ -3012,7 +3027,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
       <aside className="sidebar" id="app-sidebar">
         <div className="sidebar-brand-row">
           <button type="button" className="brand" onClick={returnToCurrentMeeting} title="返回本次会议" aria-label="返回本次会议">
-            <span className="brand-mark">听</span><span>拾音</span><em>AI</em>
+            <ShiyinMark className="brand-mark" /><span>拾音</span><em>AI</em>
           </button>
           <button
             type="button"
