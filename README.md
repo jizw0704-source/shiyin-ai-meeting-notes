@@ -10,7 +10,7 @@
 
 本地转写不消耗云端语音时长。原始录音、逐字稿、发言人声纹、历史版本和会议列表默认保存在自己的电脑上；只有主动生成 AI 总结时，会议文本才会发送给 MiniMax。
 
-> 当前开发基线：`0.6.10`<br>
+> 当前开发基线：`0.6.11`<br>
 > 使用阶段：个人使用与团队内部测试<br>
 > 支持平台：Apple Silicon macOS、Windows x64<br>
 > 授权状态：`UNLICENSED`，不是开源许可证；公开分发或商业使用前请先确认授权条件
@@ -18,13 +18,14 @@
 [![macOS build](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/macos-build.yml/badge.svg)](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/macos-build.yml)
 [![Windows build](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/windows-build.yml/badge.svg)](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/windows-build.yml)
 
-## 0.6.10 版本亮点
+## 0.6.11 版本亮点
 
-- **补齐 macOS 录音能力**：安装包明确声明麦克风音频输入权限，避免升级后只能录到静音。
-- **原生授权请求**：首次开始会议时由 macOS 正式请求麦克风权限。
-- **失败路径清晰**：拒绝授权后直接打开系统设置，并提示用户完成授权后返回。
-- **保留跨平台体验**：Windows 继续使用系统麦克风设置入口，不改变现有录音流程。
-- **返回操作更直观**：设置页与本机工作区统一使用左箭头返回会议。
+- **工作区批量管理**：历史会议可以多选、批量移入最近删除，并在回收区批量恢复。
+- **会议操作更集中**：历史列表支持右键与更多菜单，打开、重命名、导出和删除更直接。
+- **返回路径更明确**：会议详情会记住进入来源，返回历史列表或本机工作区时不再迷路。
+- **智能命名建议**：重命名时根据现有会议内容给出最多三个可直接采用的名称。
+- **B 版会议简报**：核心结论优先展示，讨论重点、双方期望和下一步更适合未参会者快速阅读。
+- **首页进一步简化**：开始会议成为占满工作区的第一视觉焦点，次要入口降级呈现。
 
 ## 为什么做拾音 AI
 

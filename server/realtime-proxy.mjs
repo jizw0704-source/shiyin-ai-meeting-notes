@@ -565,6 +565,28 @@ const httpServer = createServer(async (request, response) => {
     if (request.method === "GET" && url.pathname === "/api/meetings/trash") {
       return jsonResponse(response, 200, { meetings: storage.listDeletedMeetings() });
     }
+    if (request.method === "POST" && url.pathname === "/api/meetings/batch-delete") {
+      const body = await readJson(request);
+      const ids = [...new Set((Array.isArray(body.ids) ? body.ids : [])
+        .map((id) => String(id || "").trim()).filter(Boolean))];
+      if (!ids.length) return jsonResponse(response, 400, { error: "请至少选择一场会议" });
+      if (ids.length > 200) return jsonResponse(response, 400, { error: "一次最多管理 200 场会议" });
+      const busyMeetings = ids.map((id) => storage.getMeeting(id)).filter(meetingIsBusy);
+      if (busyMeetings.length) {
+        return jsonResponse(response, 409, { error: "正在录音或处理的会议不能删除" });
+      }
+      const updatedIds = storage.softDeleteMeetings(ids);
+      return jsonResponse(response, 200, { updatedIds, updated: updatedIds.length });
+    }
+    if (request.method === "POST" && url.pathname === "/api/meetings/batch-restore") {
+      const body = await readJson(request);
+      const ids = [...new Set((Array.isArray(body.ids) ? body.ids : [])
+        .map((id) => String(id || "").trim()).filter(Boolean))];
+      if (!ids.length) return jsonResponse(response, 400, { error: "请至少选择一场会议" });
+      if (ids.length > 200) return jsonResponse(response, 400, { error: "一次最多恢复 200 场会议" });
+      const updatedIds = storage.restoreMeetings(ids);
+      return jsonResponse(response, 200, { updatedIds, updated: updatedIds.length });
+    }
     if (request.method === "GET" && url.pathname === "/api/storage") {
       return jsonResponse(response, 200, getStorageStats({ storage, dataRoot }));
     }

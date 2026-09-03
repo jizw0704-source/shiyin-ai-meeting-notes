@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -12,6 +12,7 @@ import {
   Clock,
   Compass,
   DownloadSimple,
+  DotsThree,
   Desktop,
   FileText,
   Flag,
@@ -434,6 +435,7 @@ const meetingTypeNames: Record<MeetingType, string> = {
 type EditableMeetingBrief = {
   subject: string;
   participants: string;
+  conclusion: string;
   sections: Array<{ id: string; title: string; content: string; evidenceSeqs: number[] }>;
   aiSuggestions: string[];
   actionItems: Summary["actionItems"];
@@ -543,10 +545,40 @@ function deriveMeetingBrief(meeting: Meeting, summary: Summary): EditableMeeting
   return {
     subject: summary.brief?.subject || summary.headline || meeting.title,
     participants: summary.brief?.participants || namedSpeakers.join(" · ") || `${meeting.speakers.length} 位参会者`,
+    conclusion: summary.overview || summary.headline || "会议中未形成明确结论",
     sections: summary.brief?.sections?.length ? summary.brief.sections : fallbackSections,
     aiSuggestions: summary.brief?.aiSuggestions || summary.aiInsights?.slice(0, 3).map((item) => item.insight) || [],
     actionItems: summary.actionItems || [],
   };
+}
+
+function meetingTitleSuggestions(item: MeetingBrief) {
+  const identity = item.summary?.meetingIdentity;
+  const date = new Date(item.startedAt);
+  const dateLabel = `${date.getMonth() + 1}月${date.getDate()}日`;
+  const useful = (value: string | null | undefined) => {
+    const text = String(value || "").trim();
+    return text && !/^(未知|未明确|待确认|无|暂无|unknown)$/i.test(text) ? text : "";
+  };
+  const organization = useful(identity?.counterpartyOrganization);
+  const contact = useful(identity?.primaryContact);
+  const project = useful(identity?.projectOrDepartment);
+  const subject = useful(identity?.subject) || useful(item.summary?.headline);
+  const values = identity?.scope === "external"
+    ? [
+        [organization, contact, dateLabel].filter(Boolean).join("－"),
+        [organization, subject].filter(Boolean).join("－"),
+        [subject, "核心结论"].filter(Boolean).join("－"),
+      ]
+    : [
+        [project, subject, dateLabel].filter(Boolean).join("－"),
+        [project, dateLabel].filter(Boolean).join("－"),
+        [subject, dateLabel].filter(Boolean).join("－"),
+      ];
+  return values
+    .map((value) => value.replace(/－{2,}/g, "－").replace(/^－|－$/g, ""))
+    .filter((value, index, items) => value && value !== item.title && items.indexOf(value) === index)
+    .slice(0, 3);
 }
 
 function briefDate(iso: string) {
@@ -591,12 +623,15 @@ function downloadBriefImage(meeting: Meeting, summary: Summary, brief: EditableM
     ...section,
     lines: wrapCanvasText(measure, section.content, contentWidth - 150),
   }));
+  measure.font = '600 34px "PingFang SC", "Microsoft YaHei", sans-serif';
+  const conclusionLines = wrapCanvasText(measure, brief.conclusion, contentWidth - 96);
   const actionLayouts = brief.actionItems.slice(0, 8).map((item) => ({
     ...item,
     lines: wrapCanvasText(measure, item.task, contentWidth - 330),
   }));
   const suggestionLines = brief.aiSuggestions.flatMap((item) => wrapCanvasText(measure, item, contentWidth - 70));
-  const bodyHeight = sectionLayouts.reduce((total, section) => total + 94 + section.lines.length * 43, 0)
+  const bodyHeight = 128 + conclusionLines.length * 48
+    + sectionLayouts.reduce((total, section) => total + 94 + section.lines.length * 43, 0)
     + (actionLayouts.length ? 130 + actionLayouts.reduce((total, item) => total + Math.max(68, item.lines.length * 38), 0) : 0)
     + (suggestionLines.length ? 150 + suggestionLines.length * 42 : 0);
   const height = Math.max(1754, 570 + bodyHeight);
@@ -623,6 +658,16 @@ function downloadBriefImage(meeting: Meeting, summary: Summary, brief: EditableM
   context.lineWidth = 1;
   context.beginPath(); context.moveTo(margin, y); context.lineTo(width - margin, y); context.stroke();
   y += 76;
+  context.fillStyle = "#eef0f5";
+  const conclusionHeight = 74 + conclusionLines.length * 48;
+  context.fillRect(margin, y - 26, contentWidth, conclusionHeight);
+  context.fillStyle = "#315fae";
+  context.font = '600 21px "PingFang SC", "Microsoft YaHei", sans-serif';
+  context.fillText("核心结论", margin + 42, y + 10);
+  context.fillStyle = "#273149";
+  context.font = '600 34px "PingFang SC", "Microsoft YaHei", sans-serif';
+  conclusionLines.forEach((line, index) => context.fillText(line, margin + 42, y + 58 + index * 48));
+  y += conclusionHeight + 42;
   sectionLayouts.forEach((section, index) => {
     context.fillStyle = "#315fae";
     context.font = '500 37px "Georgia", serif';
@@ -887,6 +932,8 @@ export default function Home() {
   const [meetingRenameSaving, setMeetingRenameSaving] = useState(false);
   const [meetingRenameError, setMeetingRenameError] = useState("");
   const [meetingAutoNaming, setMeetingAutoNaming] = useState(false);
+  const [meetingDetailOrigin, setMeetingDetailOrigin] = useState<"home" | "workspace">("home");
+  const [historyMenu, setHistoryMenu] = useState<{ meeting: MeetingBrief; x: number; y: number } | null>(null);
   const [renamingSpeaker, setRenamingSpeaker] = useState<Speaker | null>(null);
   const [speakerNameDraft, setSpeakerNameDraft] = useState("");
   const [templateDialogOpen, setTemplateDialogOpen] = useState(false);
@@ -934,6 +981,10 @@ export default function Home() {
   const [trashDialogOpen, setTrashDialogOpen] = useState(false);
   const [deletedMeetings, setDeletedMeetings] = useState<MeetingBrief[]>([]);
   const [trashLoading, setTrashLoading] = useState(false);
+  const [workspaceManaging, setWorkspaceManaging] = useState(false);
+  const [workspaceSelectedIds, setWorkspaceSelectedIds] = useState<Set<string>>(new Set());
+  const [trashSelectedIds, setTrashSelectedIds] = useState<Set<string>>(new Set());
+  const [workspaceBatchBusy, setWorkspaceBatchBusy] = useState<"delete" | "restore" | null>(null);
   const workspaceRef = useRef<HTMLElement | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
@@ -961,6 +1012,22 @@ export default function Home() {
       window.removeEventListener("scroll", updateVisibility);
     };
   }, []);
+
+  useEffect(() => {
+    if (!historyMenu) return;
+    const close = () => setHistoryMenu(null);
+    const closeOnKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("blur", close);
+    window.addEventListener("keydown", closeOnKey);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("blur", close);
+      window.removeEventListener("keydown", closeOnKey);
+    };
+  }, [historyMenu]);
 
   const scrollWorkspaceToTop = useCallback(() => {
     const behavior: ScrollBehavior = window.matchMedia("(prefers-reduced-motion: reduce)").matches
@@ -1602,6 +1669,14 @@ export default function Home() {
     () => meetings.filter((item) => item.attachmentCount > 0),
     [meetings],
   );
+  const selectableWorkspaceMeetings = useMemo(
+    () => visibleMeetings.filter((item) => !meetingIsBusy(item.status)),
+    [visibleMeetings],
+  );
+  const allVisibleMeetingsSelected = Boolean(selectableWorkspaceMeetings.length)
+    && selectableWorkspaceMeetings.every((item) => workspaceSelectedIds.has(item.id));
+  const allDeletedMeetingsSelected = Boolean(deletedMeetings.length)
+    && deletedMeetings.every((item) => trashSelectedIds.has(item.id));
   const preflightReadyCount = meetingPreflight?.checks.filter((item) => item.status === "ready").length || 0;
   const preflightAttentionCount = meetingPreflight?.checks.filter((item) => item.status !== "ready").length || 0;
   const preflightStatusLabel = meetingPreflightLoading && !meetingPreflight
@@ -1650,6 +1725,8 @@ export default function Home() {
     const targetMeetingId = currentMeetingIdRef.current || selectedId || meeting?.id || null;
     setSettingsPageOpen(false);
     setWorkspacePageOpen(false);
+    setWorkspaceManaging(false);
+    setWorkspaceSelectedIds(new Set());
     setView("transcript");
     if (targetMeetingId) {
       setSelectedId(targetMeetingId);
@@ -1670,11 +1747,53 @@ export default function Home() {
   }
 
   function openWorkspaceMeeting(meetingId: string) {
+    setMeetingDetailOrigin("workspace");
     setWorkspacePageOpen(false);
+    setWorkspaceManaging(false);
+    setWorkspaceSelectedIds(new Set());
     setSettingsPageOpen(false);
     setSelectedId(meetingId);
     if (meeting?.id !== meetingId) loadMeeting(meetingId).catch((error) => setNotice(error.message));
     window.requestAnimationFrame(scrollWorkspaceToTop);
+  }
+
+  function openHistoryMeeting(meetingId: string) {
+    setMeetingDetailOrigin("home");
+    setSettingsPageOpen(false);
+    setWorkspacePageOpen(false);
+    setSelectedId(meetingId);
+    if (meeting?.id !== meetingId) loadMeeting(meetingId).catch((error) => setNotice(error.message));
+    window.requestAnimationFrame(scrollWorkspaceToTop);
+  }
+
+  function returnFromMeetingDetail() {
+    const activeMeetingId = currentMeetingIdRef.current;
+    if (activeMeetingId && activeMeetingId !== meeting?.id) {
+      setSelectedId(activeMeetingId);
+      loadMeeting(activeMeetingId).catch((error) => setNotice(error.message));
+      setNotice("已返回正在进行的会议");
+    } else if (meetingDetailOrigin === "workspace") {
+      openLocalWorkspace();
+      return;
+    } else {
+      setMeeting(null);
+      setSelectedId(null);
+      setSettingsPageOpen(false);
+      setWorkspacePageOpen(false);
+    }
+    window.requestAnimationFrame(scrollWorkspaceToTop);
+  }
+
+  function openHistoryMenu(event: ReactMouseEvent, item: MeetingBrief) {
+    event.preventDefault();
+    event.stopPropagation();
+    const menuWidth = 214;
+    const menuHeight = 270;
+    setHistoryMenu({
+      meeting: item,
+      x: Math.max(10, Math.min(event.clientX, window.innerWidth - menuWidth - 10)),
+      y: Math.max(10, Math.min(event.clientY, window.innerHeight - menuHeight - 10)),
+    });
   }
 
   function selectAutoSummary(enabled: boolean) {
@@ -2513,6 +2632,7 @@ export default function Home() {
         body: JSON.stringify({
           summary: {
             ...finalSummary,
+            overview: briefDraft.conclusion,
             brief: {
               ...(finalSummary.brief || {}),
               subject: briefDraft.subject,
@@ -2614,8 +2734,25 @@ export default function Home() {
     }
   }
 
+  async function deleteMeetingItem(item: MeetingBrief) {
+    if (meetingIsBusy(item.status)) return;
+    if (!window.confirm(`将“${item.title}”移入最近删除？之后可以恢复。`)) return;
+    try {
+      await api(`/api/meetings/${item.id}`, { method: "DELETE" });
+      if (meeting?.id === item.id) {
+        setMeeting(null);
+        setSelectedId(null);
+      }
+      await refreshMeetings();
+      setNotice("会议已移入最近删除，录音和资料仍保存在本机");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "删除失败");
+    }
+  }
+
   async function openTrashDialog() {
     setTrashDialogOpen(true);
+    setTrashSelectedIds(new Set());
     setTrashLoading(true);
     try {
       const result = await api<{ meetings: MeetingBrief[] }>("/api/meetings/trash");
@@ -2632,6 +2769,11 @@ export default function Home() {
     try {
       const restored = await api<Meeting>(`/api/meetings/${item.id}/restore`, { method: "POST" });
       setDeletedMeetings((items) => items.filter((meetingItem) => meetingItem.id !== item.id));
+      setTrashSelectedIds((items) => {
+        const next = new Set(items);
+        next.delete(item.id);
+        return next;
+      });
       await refreshMeetings(restored.id);
       setMeeting(restored);
       setSelectedId(restored.id);
@@ -2644,12 +2786,102 @@ export default function Home() {
     }
   }
 
+  function toggleWorkspaceManagement() {
+    setWorkspaceManaging((current) => !current);
+    setWorkspaceSelectedIds(new Set());
+  }
+
+  function toggleWorkspaceMeetingSelection(meetingId: string) {
+    setWorkspaceSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(meetingId)) next.delete(meetingId);
+      else next.add(meetingId);
+      return next;
+    });
+  }
+
+  function toggleAllVisibleMeetings() {
+    setWorkspaceSelectedIds((current) => {
+      const next = new Set(current);
+      if (allVisibleMeetingsSelected) selectableWorkspaceMeetings.forEach((item) => next.delete(item.id));
+      else selectableWorkspaceMeetings.forEach((item) => next.add(item.id));
+      return next;
+    });
+  }
+
+  async function deleteSelectedMeetings() {
+    const ids = [...workspaceSelectedIds];
+    if (!ids.length || workspaceBatchBusy) return;
+    if (!window.confirm(`将选中的 ${ids.length} 场会议移入最近删除？之后仍可恢复。`)) return;
+    setWorkspaceBatchBusy("delete");
+    try {
+      const result = await api<{ updatedIds: string[]; updated: number }>("/api/meetings/batch-delete", {
+        method: "POST",
+        body: JSON.stringify({ ids }),
+      });
+      const updatedIds = new Set(result.updatedIds);
+      setMeetings((items) => items.filter((item) => !updatedIds.has(item.id)));
+      if (meeting && updatedIds.has(meeting.id)) {
+        setMeeting(null);
+        setSelectedId(null);
+      }
+      setWorkspaceSelectedIds(new Set());
+      setWorkspaceManaging(false);
+      setNotice(`已将 ${result.updated} 场会议移入最近删除，录音和资料仍保存在本机`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "批量删除失败");
+    } finally {
+      setWorkspaceBatchBusy(null);
+    }
+  }
+
+  function toggleTrashMeetingSelection(meetingId: string) {
+    setTrashSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(meetingId)) next.delete(meetingId);
+      else next.add(meetingId);
+      return next;
+    });
+  }
+
+  function toggleAllDeletedMeetings() {
+    setTrashSelectedIds(allDeletedMeetingsSelected ? new Set() : new Set(deletedMeetings.map((item) => item.id)));
+  }
+
+  async function restoreSelectedMeetings() {
+    const ids = [...trashSelectedIds];
+    if (!ids.length || workspaceBatchBusy) return;
+    setWorkspaceBatchBusy("restore");
+    setTrashLoading(true);
+    try {
+      const result = await api<{ updatedIds: string[]; updated: number }>("/api/meetings/batch-restore", {
+        method: "POST",
+        body: JSON.stringify({ ids }),
+      });
+      const updatedIds = new Set(result.updatedIds);
+      setDeletedMeetings((items) => items.filter((item) => !updatedIds.has(item.id)));
+      setTrashSelectedIds(new Set());
+      await refreshMeetings();
+      setNotice(`已恢复 ${result.updated} 场会议及其录音、资料和总结`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "批量恢复失败");
+    } finally {
+      setTrashLoading(false);
+      setWorkspaceBatchBusy(null);
+    }
+  }
+
   async function permanentlyDeleteMeeting(item: MeetingBrief) {
     if (!window.confirm(`永久删除“${item.title}”及其录音和资料？此操作无法撤销。`)) return;
     setTrashLoading(true);
     try {
       await api(`/api/meetings/${item.id}/permanent`, { method: "DELETE" });
       setDeletedMeetings((items) => items.filter((meetingItem) => meetingItem.id !== item.id));
+      setTrashSelectedIds((items) => {
+        const next = new Set(items);
+        next.delete(item.id);
+        return next;
+      });
       setNotice("会议已永久删除，无法恢复");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "无法永久删除会议");
@@ -3332,14 +3564,10 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
         </div>
         <div className="meeting-list" role="region" aria-label="历史会议列表">
           {visibleMeetings.map((item) => (
-            <div className={`history-meeting-row ${selectedId === item.id ? "active" : ""}`} key={item.id}>
+            <div className={`history-meeting-row ${selectedId === item.id ? "active" : ""}`} key={item.id} onContextMenu={(event) => openHistoryMenu(event, item)}>
               <button
                 className={`meeting ${selectedId === item.id ? "active" : ""}`}
-                onClick={() => {
-                  setSettingsPageOpen(false);
-                  setWorkspacePageOpen(false);
-                  setSelectedId(item.id);
-                }}
+                onClick={() => openHistoryMeeting(item.id)}
                 aria-label={`查看会议：${item.title}`}
               >
                 <span className="meeting-icon">▥</span>
@@ -3350,13 +3578,13 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
               </button>
               <button
                 type="button"
-                className="meeting-rename"
-                onClick={() => beginRenameMeeting(item)}
+                className="meeting-rename meeting-options"
+                onClick={(event) => openHistoryMenu(event, item)}
                 disabled={meetingIsBusy(item.status) || processing || recording}
-                aria-label={`重命名会议：${item.title}`}
-                title="重命名会议"
+                aria-label={`更多操作：${item.title}`}
+                title="更多操作"
               >
-                <PencilSimple size={14} />
+                <DotsThree size={17} weight="bold" />
               </button>
             </div>
           ))}
@@ -3568,16 +3796,29 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
               <section className="workspace-library" aria-labelledby="workspace-library-title">
                 <header>
                   <div><span>会议档案</span><h2 id="workspace-library-title">全部历史会议</h2></div>
-                  <label><MagnifyingGlass size={14} /><input type="search" value={historyQuery} onChange={(event) => setHistoryQuery(event.target.value)} placeholder="搜索会议名称或日期" aria-label="搜索工作区会议" />{historyQuery && <button type="button" onClick={() => setHistoryQuery("")} aria-label="清空工作区搜索"><X size={12} /></button>}</label>
+                  <div className="workspace-library-tools">
+                    <button type="button" className={workspaceManaging ? "active" : ""} onClick={toggleWorkspaceManagement}>{workspaceManaging ? "完成" : "管理"}</button>
+                    <label><MagnifyingGlass size={14} /><input type="search" value={historyQuery} onChange={(event) => setHistoryQuery(event.target.value)} placeholder="搜索会议名称或日期" aria-label="搜索工作区会议" />{historyQuery && <button type="button" onClick={() => setHistoryQuery("")} aria-label="清空工作区搜索"><X size={12} /></button>}</label>
+                  </div>
                 </header>
+                {workspaceManaging && (
+                  <div className="workspace-selection-bar">
+                    <label><input type="checkbox" checked={allVisibleMeetingsSelected} disabled={!selectableWorkspaceMeetings.length || Boolean(workspaceBatchBusy)} onChange={toggleAllVisibleMeetings} /> 全选当前结果</label>
+                    <span>已选择 {workspaceSelectedIds.size} 场</span>
+                    <button type="button" disabled={!workspaceSelectedIds.size || Boolean(workspaceBatchBusy)} onClick={() => void deleteSelectedMeetings()}><Trash size={14} />{workspaceBatchBusy === "delete" ? "正在移动…" : "移入最近删除"}</button>
+                  </div>
+                )}
                 <div className="workspace-meeting-list">
                   {visibleMeetings.map((item) => (
-                    <button type="button" key={item.id} onClick={() => openWorkspaceMeeting(item.id)}>
-                      <span className="workspace-meeting-date"><b>{new Date(item.startedAt).getDate().toString().padStart(2, "0")}</b><small>{new Date(item.startedAt).toLocaleDateString("zh-CN", { month: "short" })}</small></span>
-                      <span className="workspace-meeting-copy"><b>{item.title}</b><small>{formatMeetingDate(item.startedAt)} · {formatClock(item.durationMs)}{item.attachmentCount ? ` · ${item.attachmentCount} 份资料` : ""}</small></span>
-                      <span className={`workspace-summary-state ${item.summary ? "ready" : ""}`}>{item.summary ? "已有纪要" : "仅记录"}</span>
-                      <ArrowRight size={15} />
-                    </button>
+                    <article key={item.id} className={`${workspaceManaging ? "is-managing" : ""} ${workspaceSelectedIds.has(item.id) ? "selected" : ""}`} onContextMenu={(event) => !workspaceManaging && openHistoryMenu(event, item)}>
+                      {workspaceManaging && <label className="workspace-meeting-select"><input type="checkbox" checked={workspaceSelectedIds.has(item.id)} disabled={meetingIsBusy(item.status) || Boolean(workspaceBatchBusy)} onChange={() => toggleWorkspaceMeetingSelection(item.id)} aria-label={`选择会议：${item.title}`} /></label>}
+                      <div className="workspace-meeting-open" role="button" tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); if (workspaceManaging) { if (!meetingIsBusy(item.status)) toggleWorkspaceMeetingSelection(item.id); } else openWorkspaceMeeting(item.id); } }} onClick={() => workspaceManaging ? (!meetingIsBusy(item.status) && toggleWorkspaceMeetingSelection(item.id)) : openWorkspaceMeeting(item.id)}>
+                        <span className="workspace-meeting-date"><b>{new Date(item.startedAt).getDate().toString().padStart(2, "0")}</b><small>{new Date(item.startedAt).toLocaleDateString("zh-CN", { month: "short" })}</small></span>
+                        <span className="workspace-meeting-copy"><b>{item.title}</b><small>{formatMeetingDate(item.startedAt)} · {formatClock(item.durationMs)}{item.attachmentCount ? ` · ${item.attachmentCount} 份资料` : ""}</small></span>
+                        <span className={`workspace-summary-state ${item.summary ? "ready" : ""}`}>{meetingIsBusy(item.status) ? "处理中" : item.summary ? "已有纪要" : "仅记录"}</span>
+                        {!workspaceManaging && <button type="button" className="workspace-meeting-options" aria-label={`更多操作：${item.title}`} onClick={(event) => openHistoryMenu(event, item)}><DotsThree size={17} weight="bold" /></button>}
+                      </div>
+                    </article>
                   ))}
                   {!loading && !meetings.length && <div className="workspace-empty"><Waveform size={30} weight="duotone" /><b>还没有会议档案</b><p>开始第一次听记后，录音、逐字稿和纪要会出现在这里。</p></div>}
                   {!loading && Boolean(meetings.length) && !visibleMeetings.length && <div className="workspace-empty"><MagnifyingGlass size={28} /><b>没有找到匹配会议</b><p>换一个名称或日期再试试。</p></div>}
@@ -3601,6 +3842,14 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
           <>
         <header className="topbar">
           <div>
+            {meeting && meeting.status !== "recording" && (
+              <button type="button" className="meeting-detail-back" onClick={returnFromMeetingDetail}>
+                <ArrowLeft size={15} weight="bold" />
+                {currentMeetingIdRef.current && currentMeetingIdRef.current !== meeting.id
+                  ? "返回正在进行的会议"
+                  : meetingDetailOrigin === "workspace" ? "返回本机工作区" : "返回会议首页"}
+              </button>
+            )}
             <div className="eyebrow">
               <span className={`status-dot ${meeting?.status === "recording" ? "recording" : ""}`} />
               {meeting ? `${statusLabel(meeting.status)} · ${formatMeetingDate(meeting.startedAt)}` : "准备开始本地听记"}
@@ -4008,6 +4257,12 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                             ) : <span>{activeBrief.participants}</span>}
                           </div>
                         </header>
+                        <section className="meeting-brief-conclusion">
+                          <span>核心结论</span>
+                          {briefEditing ? (
+                            <textarea aria-label="会议核心结论" value={activeBrief.conclusion} onChange={(event) => setBriefDraft((current) => current ? { ...current, conclusion: event.target.value } : current)} />
+                          ) : <p>{activeBrief.conclusion}</p>}
+                        </section>
                         <div className="meeting-brief-timeline">
                           {activeBrief.sections.map((section, index) => (
                             <section key={`${section.id}-${index}`}>
@@ -4564,6 +4819,21 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
           </>
         )}
       </section>
+      {historyMenu && (
+        <div
+          className="history-context-menu"
+          role="menu"
+          style={{ left: historyMenu.x, top: historyMenu.y }}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <button role="menuitem" onClick={() => { const item = historyMenu.meeting; setHistoryMenu(null); openHistoryMeeting(item.id); }}><ArrowRight size={15} /> 打开会议</button>
+          <button role="menuitem" disabled={meetingIsBusy(historyMenu.meeting.status)} onClick={() => { const item = historyMenu.meeting; setHistoryMenu(null); beginRenameMeeting(item); }}><PencilSimple size={15} /> 重命名与智能建议</button>
+          <button role="menuitem" onClick={() => { const item = historyMenu.meeting; setHistoryMenu(null); openHistoryMeeting(item.id); setView("summary"); setNotice("已打开会议总结，可从右上角导出报告"); }}><DownloadSimple size={15} /> 打开并导出报告</button>
+          <button role="menuitem" onClick={() => { setHistoryMenu(null); void openDataFolder(); }}><FolderOpen size={15} /> 打开本机数据文件夹</button>
+          <span />
+          <button role="menuitem" className="danger" disabled={meetingIsBusy(historyMenu.meeting.status)} onClick={() => { const item = historyMenu.meeting; setHistoryMenu(null); void deleteMeetingItem(item); }}><Trash size={15} /> 移入最近删除</button>
+        </div>
+      )}
       {showBackToTop && (
         <button
           type="button"
@@ -4965,6 +5235,19 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
               }}
               placeholder="例如：产品设计周会"
             />
+            {meetingTitleSuggestions(renamingMeeting).length > 0 && (
+              <section className="rename-suggestions" aria-label="智能命名建议">
+                <span><Sparkle size={13} weight="fill" /> 智能命名建议</span>
+                <div>
+                  {meetingTitleSuggestions(renamingMeeting).map((suggestion) => (
+                    <button key={suggestion} type="button" disabled={meetingRenameSaving} onClick={() => { setMeetingTitleDraft(suggestion); setMeetingRenameError(""); }}>
+                      {suggestion}<ArrowRight size={12} />
+                    </button>
+                  ))}
+                </div>
+                <small>建议来自现有会议内容，点击后仍可继续修改。</small>
+              </section>
+            )}
             {meetingRenameError && <p className="rename-dialog-error"><WarningCircle size={14} />{meetingRenameError}</p>}
             <div className="rename-dialog-actions">
               <button type="button" onClick={() => setRenamingMeeting(null)} disabled={meetingRenameSaving}>取消</button>
@@ -5045,6 +5328,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             <div className="trash-meeting-list">
               {deletedMeetings.map((item) => (
                 <article key={item.id}>
+                  <label className="trash-meeting-select"><input type="checkbox" checked={trashSelectedIds.has(item.id)} disabled={trashLoading} onChange={() => toggleTrashMeetingSelection(item.id)} aria-label={`选择已删除会议：${item.title}`} /></label>
                   <span><b>{item.title}</b><small>{item.deletedAt ? `删除于 ${formatMeetingDate(item.deletedAt)}` : "已删除"} · {formatClock(item.durationMs)}</small></span>
                   <div><button type="button" disabled={trashLoading} onClick={() => void restoreDeletedMeeting(item)}><ArrowClockwise size={13} /> 恢复</button><button type="button" className="danger" disabled={trashLoading} onClick={() => void permanentlyDeleteMeeting(item)}>永久删除</button></div>
                 </article>
@@ -5052,7 +5336,14 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
               {!trashLoading && !deletedMeetings.length && <div className="trash-empty"><CheckCircle size={24} weight="duotone" /><b>最近没有删除的会议</b><small>从历史列表删除的会议会出现在这里。</small></div>}
               {trashLoading && !deletedMeetings.length && <div className="trash-empty"><b>正在读取…</b></div>}
             </div>
-            <footer><span>最近删除中的会议仍会占用本机存储空间。</span><button type="button" onClick={() => setTrashDialogOpen(false)}>完成</button></footer>
+            <footer>
+              <span>最近删除中的会议仍会占用本机存储空间。</span>
+              <div className="trash-footer-actions">
+                {Boolean(deletedMeetings.length) && <label><input type="checkbox" checked={allDeletedMeetingsSelected} disabled={trashLoading} onChange={toggleAllDeletedMeetings} /> 全选</label>}
+                {Boolean(deletedMeetings.length) && <button type="button" disabled={!trashSelectedIds.size || trashLoading} onClick={() => void restoreSelectedMeetings()}><ArrowClockwise size={13} />{workspaceBatchBusy === "restore" ? "正在恢复…" : `恢复所选${trashSelectedIds.size ? `（${trashSelectedIds.size}）` : ""}`}</button>}
+                <button type="button" onClick={() => setTrashDialogOpen(false)} disabled={trashLoading}>完成</button>
+              </div>
+            </footer>
           </section>
         </div>
       )}

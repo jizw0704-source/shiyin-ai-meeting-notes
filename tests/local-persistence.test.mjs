@@ -1290,6 +1290,31 @@ test("moves meetings to recently deleted and restores all meeting content", () =
   }
 });
 
+test("moves and restores multiple meetings as one workspace action", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-batch-trash-"));
+  const storage = new MeetingStorage(root);
+  try {
+    const first = storage.createMeeting("第一场会议");
+    const second = storage.createMeeting("第二场会议");
+    const third = storage.createMeeting("保留的会议");
+    storage.updateMeeting(first.id, { status: "completed" });
+    storage.updateMeeting(second.id, { status: "completed" });
+    storage.updateMeeting(third.id, { status: "completed" });
+
+    assert.deepEqual(storage.softDeleteMeetings([first.id, second.id, first.id]), [first.id, second.id]);
+    assert.equal(storage.listMeetings().length, 1);
+    assert.equal(storage.listDeletedMeetings().length, 2);
+    assert.equal(storage.getMeeting(third.id).deletedAt, null);
+
+    assert.deepEqual(storage.restoreMeetings([second.id, first.id, second.id]), [second.id, first.id]);
+    assert.equal(storage.listMeetings().length, 3);
+    assert.equal(storage.listDeletedMeetings().length, 0);
+  } finally {
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("rejects a workspace backup when a protected meeting file is modified", async () => {
   const sourceRoot = mkdtempSync(path.join(os.tmpdir(), "shiyin-backup-tamper-source-"));
   const targetRoot = mkdtempSync(path.join(os.tmpdir(), "shiyin-backup-tamper-target-"));

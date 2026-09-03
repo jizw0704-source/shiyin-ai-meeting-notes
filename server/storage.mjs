@@ -1404,10 +1404,55 @@ export class MeetingStorage {
     return this.getMeeting(id);
   }
 
+  softDeleteMeetings(ids) {
+    const uniqueIds = [...new Set((ids || []).map(String).filter(Boolean))];
+    if (!uniqueIds.length) return [];
+    const findMeeting = this.db.prepare("SELECT id, deleted_at FROM meetings WHERE id = ?");
+    const moveToTrash = this.db.prepare("UPDATE meetings SET deleted_at = ? WHERE id = ?");
+    const deletedAt = new Date().toISOString();
+    const updatedIds = [];
+    this.db.exec("BEGIN");
+    try {
+      for (const id of uniqueIds) {
+        const meeting = findMeeting.get(id);
+        if (!meeting || meeting.deleted_at) continue;
+        moveToTrash.run(deletedAt, id);
+        updatedIds.push(id);
+      }
+      this.db.exec("COMMIT");
+      return updatedIds;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   restoreMeeting(id) {
     if (!this.getMeeting(id)) return null;
     this.db.prepare("UPDATE meetings SET deleted_at = NULL WHERE id = ?").run(id);
     return this.getMeeting(id);
+  }
+
+  restoreMeetings(ids) {
+    const uniqueIds = [...new Set((ids || []).map(String).filter(Boolean))];
+    if (!uniqueIds.length) return [];
+    const findMeeting = this.db.prepare("SELECT id, deleted_at FROM meetings WHERE id = ?");
+    const restore = this.db.prepare("UPDATE meetings SET deleted_at = NULL WHERE id = ?");
+    const updatedIds = [];
+    this.db.exec("BEGIN");
+    try {
+      for (const id of uniqueIds) {
+        const meeting = findMeeting.get(id);
+        if (!meeting?.deleted_at) continue;
+        restore.run(id);
+        updatedIds.push(id);
+      }
+      this.db.exec("COMMIT");
+      return updatedIds;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   deleteMeeting(id) {
