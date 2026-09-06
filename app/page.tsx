@@ -53,6 +53,8 @@ type TranscriptOrder = "ascending" | "descending";
 type ThemeMode = "system" | "light" | "dark";
 type RecordingBackdrop = "paper" | "focus" | "wave" | "midnight";
 type SettingsSection = "general" | "meeting" | "ai" | "notebook" | "data" | "updates";
+type MeetingMemoryKind = "person" | "organization" | "project" | "decision" | "need" | "term";
+type MeetingMemoryStatus = "pending" | "confirmed";
 type AudioCaptureCapabilities = {
   platform: string;
   macOSVersion: string;
@@ -157,6 +159,21 @@ type AudioClip = {
   sourceRanges: Array<{ startMs: number; endMs: number }>;
   createdAt: string;
 };
+type MeetingMemory = {
+  id: string;
+  meetingId: string;
+  kind: MeetingMemoryKind;
+  content: string;
+  status: MeetingMemoryStatus;
+  confidence: "high" | "medium" | "low";
+  evidenceSeqs: number[];
+  evidence: Array<{ seq: number; text: string; startMs: number }>;
+  sourceMeetingTitle: string;
+  sourceMeetingStartedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+type MeetingMemoryStats = { total: number; pending: number; confirmed: number };
 type Speaker = {
   id: string;
   meetingId: string;
@@ -202,6 +219,12 @@ type Summary = {
     subject: string;
     evidenceSeqs: number[];
   };
+  memoryCandidates?: Array<{
+    kind: MeetingMemoryKind;
+    content: string;
+    confidence: "高" | "中" | "低";
+    evidenceSeqs: number[];
+  }>;
   brief?: {
     subject: string;
     participants: string;
@@ -430,6 +453,15 @@ const meetingTypeNames: Record<MeetingType, string> = {
   review: "方案评审",
   decision: "决策讨论",
   brainstorm: "头脑风暴",
+};
+
+const meetingMemoryKindNames: Record<MeetingMemoryKind, string> = {
+  person: "人物",
+  organization: "单位",
+  project: "项目",
+  decision: "结论",
+  need: "诉求",
+  term: "术语",
 };
 
 type EditableMeetingBrief = {
@@ -985,6 +1017,14 @@ export default function Home() {
   const [workspaceSelectedIds, setWorkspaceSelectedIds] = useState<Set<string>>(new Set());
   const [trashSelectedIds, setTrashSelectedIds] = useState<Set<string>>(new Set());
   const [workspaceBatchBusy, setWorkspaceBatchBusy] = useState<"delete" | "restore" | null>(null);
+  const [memories, setMemories] = useState<MeetingMemory[]>([]);
+  const [memoryStats, setMemoryStats] = useState<MeetingMemoryStats>({ total: 0, pending: 0, confirmed: 0 });
+  const [memoryDialogOpen, setMemoryDialogOpen] = useState(false);
+  const [memoryFilter, setMemoryFilter] = useState<"all" | MeetingMemoryStatus>("pending");
+  const [memoryLoading, setMemoryLoading] = useState(false);
+  const [memoryBusyId, setMemoryBusyId] = useState<string | null>(null);
+  const [memoryEditingId, setMemoryEditingId] = useState<string | null>(null);
+  const [memoryDraft, setMemoryDraft] = useState("");
   const workspaceRef = useRef<HTMLElement | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
@@ -1410,6 +1450,18 @@ export default function Home() {
     return result.meetings;
   }, []);
 
+  const refreshMemories = useCallback(async () => {
+    setMemoryLoading(true);
+    try {
+      const result = await api<{ memories: MeetingMemory[]; stats: MeetingMemoryStats }>("/api/memories?limit=500");
+      setMemories(result.memories);
+      setMemoryStats(result.stats);
+      return result;
+    } finally {
+      setMemoryLoading(false);
+    }
+  }, []);
+
   const loadMeeting = useCallback(async (meetingId: string) => {
     const value = await api<Meeting>(`/api/meetings/${meetingId}`);
     setMeeting(value);
@@ -1669,6 +1721,10 @@ export default function Home() {
     () => meetings.filter((item) => item.attachmentCount > 0),
     [meetings],
   );
+  const visibleMemories = useMemo(
+    () => memoryFilter === "all" ? memories : memories.filter((item) => item.status === memoryFilter),
+    [memories, memoryFilter],
+  );
   const selectableWorkspaceMeetings = useMemo(
     () => visibleMeetings.filter((item) => !meetingIsBusy(item.status)),
     [visibleMeetings],
@@ -1743,6 +1799,7 @@ export default function Home() {
   function openLocalWorkspace() {
     setSettingsPageOpen(false);
     setWorkspacePageOpen(true);
+    void refreshMemories().catch((error) => setNotice(error instanceof Error ? error.message : "无法读取会议记忆"));
     window.requestAnimationFrame(scrollWorkspaceToTop);
   }
 
@@ -2747,6 +2804,69 @@ export default function Home() {
       setNotice("会议已移入最近删除，录音和资料仍保存在本机");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "删除失败");
+    }
+  }
+
+  async function openMemoryDialog(filter: "all" | MeetingMemoryStatus = "pending") {
+    setMemoryFilter(filter);
+    setMemoryEditingId(null);
+    setMemoryDraft("");
+    setMemoryDialogOpen(true);
+    try {
+      await refreshMemories();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法读取会议记忆");
+    }
+  }
+
+  async function updateMeetingMemory(item: MeetingMemory, patch: { content?: string; status?: MeetingMemoryStatus }) {
+    setMemoryBusyId(item.id);
+    try {
+      await api<MeetingMemory>(`/api/memories/${item.id}`, {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      });
+      await refreshMemories();
+      setMemoryEditingId(null);
+      setMemoryDraft("");
+      setNotice(patch.content ? "记忆已修改并确认" : "记忆已确认并保存在本机");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法更新会议记忆");
+    } finally {
+      setMemoryBusyId(null);
+    }
+  }
+
+  async function dismissMeetingMemory(item: MeetingMemory) {
+    setMemoryBusyId(item.id);
+    try {
+      await api(`/api/memories/${item.id}`, { method: "DELETE" });
+      await refreshMemories();
+      setNotice(item.status === "pending" ? "这条候选记忆已忽略" : "这条长期记忆已删除");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法删除会议记忆");
+    } finally {
+      setMemoryBusyId(null);
+    }
+  }
+
+  async function openMemorySource(item: MeetingMemory) {
+    setMemoryDialogOpen(false);
+    setMeetingDetailOrigin("workspace");
+    setWorkspacePageOpen(false);
+    setSettingsPageOpen(false);
+    setSelectedId(item.meetingId);
+    try {
+      await loadMeeting(item.meetingId);
+      setView("transcript");
+      const seq = item.evidenceSeqs[0];
+      if (seq !== undefined) {
+        setHighlightedSeq(seq);
+        window.setTimeout(() => document.getElementById(`segment-${seq}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 120);
+        window.setTimeout(() => setHighlightedSeq(null), 2600);
+      }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法打开来源会议");
     }
   }
 
@@ -3788,8 +3908,8 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
             <section className="workspace-metrics" aria-label="工作区统计">
               <article><span><ChartBar size={19} weight="duotone" /></span><p><small>历史会议</small><strong>{meetings.length}</strong><em>场</em></p></article>
               <article><span><Clock size={19} weight="duotone" /></span><p><small>累计时长</small><strong>{formatWorkspaceDuration(workspaceStats.totalDurationMs)}</strong></p></article>
-              <article><span><FileText size={19} weight="duotone" /></span><p><small>已生成纪要</small><strong>{workspaceStats.summarizedMeetings}</strong><em>场</em></p></article>
-              <article><span><Paperclip size={19} weight="duotone" /></span><p><small>会议资料</small><strong>{workspaceStats.attachmentCount}</strong><em>份</em></p></article>
+              <article><span><Brain size={19} weight="duotone" /></span><p><small>长期记忆</small><strong>{memoryStats.confirmed}</strong><em>条</em></p></article>
+              <article className={memoryStats.pending ? "attention" : ""}><span><Sparkle size={19} weight="duotone" /></span><p><small>待确认记忆</small><strong>{memoryStats.pending}</strong><em>条</em></p></article>
             </section>
 
             <div className="workspace-hub-grid">
@@ -3826,7 +3946,16 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
               </section>
 
               <aside className="workspace-knowledge" aria-labelledby="workspace-knowledge-title">
-                <header><span>资料库</span><h2 id="workspace-knowledge-title">会议相关资料</h2><p>资料跟随原会议保存，点击会议即可查看或继续补充。</p></header>
+                <section className="workspace-memory-overview">
+                  <header><span>可信记忆</span><h2 id="workspace-knowledge-title">会议记忆</h2><p>AI 提取后先由你确认，每条都保留来源原文。</p></header>
+                  <div className="workspace-memory-counts"><button type="button" onClick={() => void openMemoryDialog("pending")}><strong>{memoryStats.pending}</strong><span>待确认</span></button><button type="button" onClick={() => void openMemoryDialog("confirmed")}><strong>{memoryStats.confirmed}</strong><span>已确认</span></button></div>
+                  {memories.filter((item) => item.status === "pending").slice(0, 2).map((item) => (
+                    <button type="button" className="workspace-memory-preview" key={item.id} onClick={() => void openMemoryDialog("pending")}><span>{meetingMemoryKindNames[item.kind]}</span><p>{item.content}</p><ArrowRight size={13} /></button>
+                  ))}
+                  <button type="button" className="workspace-memory-manage" onClick={() => void openMemoryDialog(memoryStats.pending ? "pending" : "all")}><Brain size={15} weight="duotone" /> 管理会议记忆 <ArrowRight size={13} /></button>
+                </section>
+                <section className="workspace-material-overview">
+                <header><span>资料库</span><h2>会议相关资料</h2><p>资料跟随原会议保存，点击会议即可查看或继续补充。</p></header>
                 {meetingsWithMaterials.length ? (
                   <div>{meetingsWithMaterials.slice(0, 8).map((item) => (
                     <button type="button" key={item.id} onClick={() => openWorkspaceMeeting(item.id)}><span><FileText size={17} weight="duotone" /></span><p><b>{item.title}</b><small>{item.attachmentCount} 份资料 · {formatMeetingDate(item.startedAt)}</small></p><ArrowRight size={14} /></button>
@@ -3834,6 +3963,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                 ) : (
                   <div className="workspace-material-empty"><Paperclip size={24} weight="duotone" /><b>还没有会议资料</b><p>可以在开始会议前或会议详情中添加 PDF、Office、Markdown 和图片。</p></div>
                 )}
+                </section>
                 <footer><Brain size={17} weight="duotone" /><p><b>会议知识问答</b><small>后续会在引用逐字稿与资料来源的基础上开放。</small></p></footer>
               </aside>
             </div>
@@ -5316,6 +5446,36 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
               </div>
             </footer>
           </form>
+        </div>
+      )}
+      {memoryDialogOpen && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target && !memoryBusyId) setMemoryDialogOpen(false); }}>
+          <section className="memory-dialog" role="dialog" aria-modal="true" aria-labelledby="memory-dialog-title">
+            <header>
+              <div><span><Brain size={20} weight="duotone" /></span><div><h2 id="memory-dialog-title">会议记忆</h2><p>只有确认后的内容才会成为长期记忆；所有内容保留会议与原文来源。</p></div></div>
+              <button type="button" onClick={() => setMemoryDialogOpen(false)} disabled={Boolean(memoryBusyId)} aria-label="关闭会议记忆"><X size={17} /></button>
+            </header>
+            <nav className="memory-filter" aria-label="筛选会议记忆">
+              <button type="button" className={memoryFilter === "pending" ? "active" : ""} onClick={() => setMemoryFilter("pending")}>待确认 <span>{memoryStats.pending}</span></button>
+              <button type="button" className={memoryFilter === "confirmed" ? "active" : ""} onClick={() => setMemoryFilter("confirmed")}>已确认 <span>{memoryStats.confirmed}</span></button>
+              <button type="button" className={memoryFilter === "all" ? "active" : ""} onClick={() => setMemoryFilter("all")}>全部 <span>{memoryStats.total}</span></button>
+            </nav>
+            <div className="memory-list">
+              {visibleMemories.map((item) => (
+                <article key={item.id} className={`memory-item ${item.status}`}>
+                  <div className="memory-item-meta"><span>{meetingMemoryKindNames[item.kind]}</span><em className={item.confidence}>{item.confidence === "high" ? "高" : item.confidence === "low" ? "低" : "中"}可信度</em><small>{item.status === "confirmed" ? "已确认" : "待确认"}</small></div>
+                  {memoryEditingId === item.id ? (
+                    <div className="memory-edit"><textarea autoFocus value={memoryDraft} onChange={(event) => setMemoryDraft(event.target.value)} maxLength={280} /><div><button type="button" onClick={() => { setMemoryEditingId(null); setMemoryDraft(""); }} disabled={memoryBusyId === item.id}>取消</button><button type="button" className="primary" onClick={() => void updateMeetingMemory(item, { content: memoryDraft })} disabled={!memoryDraft.trim() || memoryBusyId === item.id}>{memoryBusyId === item.id ? "保存中…" : "保存并确认"}</button></div></div>
+                  ) : <p>{item.content}</p>}
+                  <button type="button" className="memory-source" onClick={() => void openMemorySource(item)}><Quotes size={14} weight="duotone" /><span><b>回看原文 · {item.sourceMeetingTitle}</b><small>{item.sourceMeetingStartedAt ? formatMeetingDate(item.sourceMeetingStartedAt) : "来源会议"}{item.evidence[0]?.text ? ` · “${item.evidence[0].text.slice(0, 48)}${item.evidence[0].text.length > 48 ? "…" : ""}”` : ""}</small></span><ArrowRight size={13} /></button>
+                  {memoryEditingId !== item.id && <footer><button type="button" onClick={() => { setMemoryEditingId(item.id); setMemoryDraft(item.content); }} disabled={Boolean(memoryBusyId)}><PencilSimple size={13} /> 编辑</button>{item.status === "pending" && <button type="button" className="primary" onClick={() => void updateMeetingMemory(item, { status: "confirmed" })} disabled={Boolean(memoryBusyId)}><CheckCircle size={13} />{memoryBusyId === item.id ? "确认中…" : "确认记忆"}</button>}<button type="button" className="danger" onClick={() => void dismissMeetingMemory(item)} disabled={Boolean(memoryBusyId)}><Trash size={13} />{item.status === "pending" ? "不保存" : "删除"}</button></footer>}
+                </article>
+              ))}
+              {!memoryLoading && !visibleMemories.length && <div className="memory-empty"><CheckCircle size={26} weight="duotone" /><b>{memoryFilter === "pending" ? "没有待确认的记忆" : memoryFilter === "confirmed" ? "还没有长期记忆" : "还没有会议记忆"}</b><p>{memoryFilter === "pending" ? "新会议生成 AI 总结后，候选记忆会出现在这里。" : "确认有长期价值的候选内容后，它们会保存在这里。"}</p></div>}
+              {memoryLoading && !visibleMemories.length && <div className="memory-empty"><b>正在读取会议记忆…</b></div>}
+            </div>
+            <footer className="memory-dialog-footer"><p><ShieldCheck size={15} weight="duotone" /> 记忆保存在本机，不会脱离证据自动生效。</p><button type="button" onClick={() => setMemoryDialogOpen(false)} disabled={Boolean(memoryBusyId)}>完成</button></footer>
+          </section>
         </div>
       )}
       {trashDialogOpen && (

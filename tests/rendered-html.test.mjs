@@ -77,9 +77,10 @@ test("normalizes vinext static asset cache keys on Windows", () => {
 });
 
 test("supports local transcription and keeps cloud keys behind the realtime proxy", async () => {
-  const [proxy, localAsr, page, styles, worklet, envExample, desktopMain, preload, packageJson, versionHistoryJson] = await Promise.all([
+  const [proxy, localAsr, meetingMemory, page, styles, worklet, envExample, desktopMain, preload, packageJson, versionHistoryJson] = await Promise.all([
     readFile(new URL("../server/realtime-proxy.mjs", import.meta.url), "utf8"),
     readFile(new URL("../server/local-asr-engine.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../server/meeting-memory.mjs", import.meta.url), "utf8"),
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
     readFile(new URL("../public/pcm-worklet.js", import.meta.url), "utf8"),
@@ -126,9 +127,17 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(page, /核心结论/);
   assert.match(proxy, /\/api\/meetings\/batch-delete/);
   assert.match(proxy, /\/api\/meetings\/batch-restore/);
+  assert.match(proxy, /\/api\/memories/);
+  assert.match(meetingMemory, /deriveMeetingMemoryCandidates/);
+  assert.match(meetingMemory, /evidenceSeqs/);
   assert.match(page, /会议相关资料/);
   assert.match(page, /会议知识问答/);
+  assert.match(page, /会议记忆/);
+  assert.match(page, /管理会议记忆/);
+  assert.match(page, /只有确认后的内容才会成为长期记忆/);
+  assert.match(page, /回看原文/);
   assert.match(styles, /workspace-hub-grid/);
+  assert.match(styles, /memory-dialog/);
   assert.match(styles, /history-context-menu/);
   assert.match(styles, /meeting-brief-conclusion/);
   assert.match(page, /downloadBriefImage/);

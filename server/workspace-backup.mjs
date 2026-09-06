@@ -4,8 +4,8 @@ import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/
 import path from "node:path";
 
 const BACKUP_FORMAT = "shiyin-ai-backup";
-const BACKUP_VERSION = 4;
-const SUPPORTED_BACKUP_VERSIONS = new Set([1, 2, 3, BACKUP_VERSION]);
+const BACKUP_VERSION = 5;
+const SUPPORTED_BACKUP_VERSIONS = new Set([1, 2, 3, 4, BACKUP_VERSION]);
 
 function inside(root, candidate) {
   const resolvedRoot = path.resolve(root);

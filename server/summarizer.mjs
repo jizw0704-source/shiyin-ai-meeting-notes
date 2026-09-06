@@ -42,6 +42,7 @@ function evidence(value, validSeqs) {
 
 const MEETING_TYPES = new Set(["general", "research", "project", "review", "decision", "brainstorm"]);
 const MEETING_SCOPES = new Set(["external", "internal", "unknown"]);
+const MEMORY_KINDS = new Set(["person", "organization", "project", "decision", "need", "term"]);
 
 function meetingType(value) {
   return MEETING_TYPES.has(value) ? value : "general";
@@ -196,6 +197,12 @@ export function normalizeMeetingSummary(value, meeting = null) {
       subject: text(source.meetingIdentity?.subject, text(source.brief?.subject, text(source.headline))),
       evidenceSeqs: evidence(source.meetingIdentity?.evidenceSeqs, validSeqs),
     },
+    memoryCandidates: (Array.isArray(source.memoryCandidates) ? source.memoryCandidates : []).map((item) => ({
+      kind: MEMORY_KINDS.has(item?.kind) ? item.kind : "",
+      content: text(item?.content),
+      confidence: ["高", "中", "低"].includes(text(item?.confidence)) ? text(item?.confidence) : "中",
+      evidenceSeqs: evidence(item?.evidenceSeqs, validSeqs),
+    })).filter((item) => item.kind && item.content && item.evidenceSeqs.length).slice(0, 24),
     brief: {
       subject: text(source.brief?.subject, text(source.headline)),
       participants: text(source.brief?.participants),
@@ -541,6 +548,7 @@ const FINAL_PROMPT = `你是资深中文会议分析师，要制作接近钉钉A
   "meetingTypeReason":"一句话说明分类依据",
   "meetingTypeConfidence":"高/中/低",
   "meetingIdentity":{"scope":"external/internal/unknown之一","counterpartyOrganization":"外部会议中的对方单位；没有证据则空字符串","primaryContact":"原文明确出现的主要联系人及称谓；没有证据则空字符串","projectOrDepartment":"内部会议中明确出现的项目或部门；没有证据则空字符串","subject":"12到28字的会议主题，不写成果口号","evidenceSeqs":[0]},
+  "memoryCandidates":[{"kind":"person/organization/project/decision/need/term之一","content":"脱离上下文也能理解的长期事实","confidence":"高/中/低","evidenceSeqs":[0]}],
   "brief":{"subject":"会议主题","participants":"参会人员或相关方；无法确认则写未明确","sections":[{"id":"current-situation","title":"根据会议类型生成的栏目名","content":"40到140字的简明内容","evidenceSeqs":[0]}],"aiSuggestions":["明确标注为AI建议的会后推进建议"]},
   "meetingBackground":"100到220字，说明召开背景、目标和讨论范围",
   "overviewCards":[{"title":"总览板块名","summary":"一句概括","points":["2到5个浓缩要点"],"evidenceSeqs":[0]}],
@@ -570,7 +578,8 @@ const FINAL_PROMPT = `你是资深中文会议分析师，要制作接近钉钉A
 11. brief.sections生成4到6个按阅读逻辑排列的板块。research优先使用“被调研方现状、核心痛点、当前应对方式、真实期望、待验证问题”；project优先使用“当前进展、阻塞问题、依赖关系、下一步”；review优先使用“评审目标、主要意见、风险、修改要求、结论”；general根据真实内容使用“会议主题、主要问题、各方期望、会议共识、会后推进”。没有出现的内容不得硬凑，未明确时直写“会议中未明确”。
 12. brief.aiSuggestions只能写基于会议事实的模型建议，不能冒充会议共识；brief整体应让未参会者在一分钟内看懂。
 13. meetingIdentity用于自动命名。明确存在外部对方时scope为external，明确是本公司内部协作时为internal；证据不足必须为unknown。external只填写对方单位，不得把本方单位写成counterpartyOrganization；internal只填写原文明确出现的项目或部门。
-14. primaryContact必须保留原文中的姓名和称谓，例如“王老师”“张总”“李工”；原文只出现姓名时不得擅自补加“老师”等称谓。多人时只在原文明确信息足够的情况下使用“王老师等”。任何未知字段都返回空字符串，不得猜测或填写“未明确”。subject只概括讨论主题，不要写“达成共识”等成果口号。`;
+14. primaryContact必须保留原文中的姓名和称谓，例如“王老师”“张总”“李工”；原文只出现姓名时不得擅自补加“老师”等称谓。多人时只在原文明确信息足够的情况下使用“王老师等”。任何未知字段都返回空字符串，不得猜测或填写“未明确”。subject只概括讨论主题，不要写“达成共识”等成果口号。
+15. memoryCandidates只提取值得跨会议长期保留的事实：明确的人物及其单位、单位、项目、已经形成的决定、清晰表达的痛点或期望、明确解释过的专业术语或内部简称。不要保存寒暄、临时过程描述、AI推断或没有证据的内容；每条必须能独立阅读并引用真实evidenceSeqs，建议6到18条，信息不足时可以为空数组。`;
 
 async function extractLongMeeting(transcript, apiKey, model, options = {}) {
   const chunks = splitTranscript(transcript);

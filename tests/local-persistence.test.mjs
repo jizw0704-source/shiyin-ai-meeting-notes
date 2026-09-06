@@ -20,6 +20,7 @@ import {
 import { createWorkspaceBackup, restoreWorkspaceBackup } from "../server/workspace-backup.mjs";
 import { findAvailableLocalPort } from "../server/local-port.mjs";
 import { deriveAutomaticMeetingTitle, normalizeAutomaticMeetingTitle } from "../server/meeting-title.mjs";
+import { deriveMeetingMemoryCandidates } from "../server/meeting-memory.mjs";
 import {
   buildMeetingPreflight,
   inspectMeetingStorage,
@@ -158,6 +159,52 @@ test("exposes meeting material counts in workspace meeting lists", () => {
     const listed = storage.listMeetings().find((item) => item.id === meeting.id);
     assert.equal(listed.attachmentCount, 1);
     assert.equal(storage.getMeeting(meeting.id).attachmentCount, 1);
+  } finally {
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("creates reviewable meeting memories with evidence and preserves user decisions", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-memory-"));
+  const storage = new MeetingStorage(root);
+  try {
+    const meeting = storage.createMeeting("材料研究院调研");
+    storage.addSegment(meeting.id, { seq: 0, startMs: 0, endMs: 2200, text: "我们是材料研究院，目前最痛的是实验数据分散。", source: "local-realtime" });
+    storage.addSegment(meeting.id, { seq: 1, startMs: 2300, endMs: 4800, text: "希望先把项目记录统一到一个知识库里。", source: "local-realtime" });
+    const currentMeeting = storage.getMeeting(meeting.id);
+    const summary = normalizeMeetingSummary({
+      headline: "材料研究院知识库需求调研",
+      overview: "讨论了实验数据分散和项目知识库需求。",
+      memoryCandidates: [
+        { kind: "organization", content: "材料研究院", confidence: "高", evidenceSeqs: [0] },
+        { kind: "need", content: "材料研究院希望将分散的项目记录统一到知识库。", confidence: "高", evidenceSeqs: [0, 1] },
+        { kind: "decision", content: "没有证据的决定", confidence: "低", evidenceSeqs: [99] },
+      ],
+    }, currentMeeting);
+    assert.equal(summary.memoryCandidates.length, 2);
+    assert.equal(deriveMeetingMemoryCandidates(summary, currentMeeting).length, 2);
+
+    storage.saveSummary(meeting.id, summary);
+    let memories = storage.listMemories();
+    assert.equal(memories.length, 2);
+    assert.equal(storage.getMemoryStats().pending, 2);
+    assert.equal(memories[0].evidence[0].text.length > 0, true);
+
+    const organization = memories.find((item) => item.kind === "organization");
+    storage.updateMemory(organization.id, { status: "confirmed" });
+    const need = memories.find((item) => item.kind === "need");
+    const edited = storage.updateMemory(need.id, { content: "材料研究院希望统一管理项目与实验记录。" });
+    assert.equal(edited.status, "confirmed");
+    assert.equal(storage.getMemoryStats().confirmed, 2);
+
+    storage.saveSummary(meeting.id, summary);
+    memories = storage.listMemories();
+    assert.equal(memories.find((item) => item.id === edited.id).content, "材料研究院希望统一管理项目与实验记录。");
+
+    storage.dismissMemory(organization.id);
+    assert.equal(storage.listMemories().length, 1);
+    assert.equal(storage.getMemoryStats().confirmed, 1);
   } finally {
     storage.close();
     rmSync(root, { recursive: true, force: true });
@@ -1145,7 +1192,15 @@ test("creates a verified workspace backup and safely merges it into another work
       topics: [],
       risks: [],
       actionItems: [],
+      memoryCandidates: [{
+        kind: "decision",
+        content: "保留本机完整备份",
+        confidence: "高",
+        evidenceSeqs: [0],
+      }],
     });
+    const backupMemory = sourceStorage.listMemories({ meetingId: meeting.id })[0];
+    sourceStorage.updateMemory(backupMemory.id, { status: "confirmed" });
     const audio = new AudioSession(sourceRoot, meeting.id);
     audio.append(Buffer.alloc(32000, 4));
     const audioPath = await audio.finalize();
@@ -1209,6 +1264,10 @@ test("creates a verified workspace backup and safely merges it into another work
     assert.equal(restoredMeeting.segments[0].overlapConfidence, 0.76);
     assert.deepEqual(restoredMeeting.segments[0].overlapSpeakerIds, [backedUpSpeaker.id]);
     assert.equal(restoredMeeting.summary.overview, "备份总结");
+    const restoredMemories = targetStorage.listMemories({ meetingId: meeting.id });
+    assert.equal(restoredMemories.length, 1);
+    assert.equal(restoredMemories[0].content, "保留本机完整备份");
+    assert.equal(restoredMemories[0].status, "confirmed");
     assert.equal(restoredMeeting.maxSpeakers, 20);
     assert.equal(restoredMeeting.transcriptVersions.length, 1);
     assert.equal(restoredMeeting.attachments.length, 1);

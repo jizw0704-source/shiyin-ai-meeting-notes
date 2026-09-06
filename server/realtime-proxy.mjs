@@ -562,6 +562,23 @@ const httpServer = createServer(async (request, response) => {
     if (request.method === "GET" && url.pathname === "/api/meetings") {
       return jsonResponse(response, 200, { meetings: storage.listMeetings() });
     }
+    if (request.method === "GET" && url.pathname === "/api/memories") {
+      const status = url.searchParams.get("status");
+      return jsonResponse(response, 200, {
+        memories: storage.listMemories({ status, limit: url.searchParams.get("limit") }),
+        stats: storage.getMemoryStats(),
+      });
+    }
+    const memoryMatch = url.pathname.match(/^\/api\/memories\/([^/]+)$/);
+    if (request.method === "PATCH" && memoryMatch) {
+      const body = await readJson(request);
+      const memory = storage.updateMemory(memoryMatch[1], body);
+      return jsonResponse(response, memory ? 200 : 404, memory || { error: "会议记忆不存在" });
+    }
+    if (request.method === "DELETE" && memoryMatch) {
+      const memory = storage.dismissMemory(memoryMatch[1]);
+      return jsonResponse(response, memory ? 200 : 404, memory ? { ok: true } : { error: "会议记忆不存在" });
+    }
     if (request.method === "GET" && url.pathname === "/api/meetings/trash") {
       return jsonResponse(response, 200, { meetings: storage.listDeletedMeetings() });
     }
