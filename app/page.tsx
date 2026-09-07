@@ -6,8 +6,10 @@ import {
   ArrowRight,
   ArrowClockwise,
   ArrowUp,
+  ArrowsMerge,
   Brain,
   ChartBar,
+  ChatCircleText,
   CheckCircle,
   Clock,
   Compass,
@@ -16,8 +18,10 @@ import {
   Desktop,
   FileText,
   Flag,
+  Flask,
   FolderOpen,
   GearSix,
+  Gauge,
   HardDrives,
   ListChecks,
   Moon,
@@ -52,6 +56,7 @@ type TranscriptMode = "organized" | "original";
 type TranscriptOrder = "ascending" | "descending";
 type ThemeMode = "system" | "light" | "dark";
 type RecordingBackdrop = "paper" | "focus" | "wave" | "midnight";
+type WorkspaceView = "meetings" | "knowledge" | "quality";
 type SettingsSection = "general" | "meeting" | "ai" | "notebook" | "data" | "updates";
 type MeetingMemoryKind = "person" | "organization" | "project" | "decision" | "need" | "term";
 type MeetingMemoryStatus = "pending" | "confirmed";
@@ -71,7 +76,7 @@ type GlobalShortcutStatus = {
   openLabel: string;
   recordingLabel: string;
 };
-type ApplicationUpdateStatus = "unavailable" | "idle" | "checking" | "available" | "not-available" | "downloading" | "downloaded" | "error";
+type ApplicationUpdateStatus = "unavailable" | "idle" | "checking" | "available" | "not-available" | "downloading" | "downloaded" | "backing-up" | "error";
 type ApplicationUpdateState = {
   status: ApplicationUpdateStatus;
   currentVersion: string;
@@ -166,14 +171,98 @@ type MeetingMemory = {
   content: string;
   status: MeetingMemoryStatus;
   confidence: "high" | "medium" | "low";
+  mergedIntoId: string | null;
   evidenceSeqs: number[];
   evidence: Array<{ seq: number; text: string; startMs: number }>;
   sourceMeetingTitle: string;
   sourceMeetingStartedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  relatedSourceCount: number;
 };
 type MeetingMemoryStats = { total: number; pending: number; confirmed: number };
+type MemoryInsights = {
+  duplicateCount: number;
+  conflictCount: number;
+  duplicates: Array<{ primary: MeetingMemory; duplicate: MeetingMemory; similarity: number }>;
+  conflicts: Array<{ left: MeetingMemory; right: MeetingMemory; similarity: number }>;
+};
+type KnowledgeSource = {
+  id: string;
+  ref: string;
+  sourceType: "memory" | "transcript" | "attachment";
+  meetingId: string;
+  meetingTitle: string;
+  startedAt: string;
+  seq: number | null;
+  startMs: number | null;
+  text: string;
+};
+type KnowledgeAnswer = {
+  question: string;
+  answer: string;
+  mode: "minimax" | "local-evidence";
+  citations: Array<{ ref: string; quote: string }>;
+  sources: KnowledgeSource[];
+};
+type QualityReview = {
+  meetingId?: string;
+  scenarioTags: string[];
+  transcriptionRating: number | null;
+  punctuationRating: number | null;
+  speakerRating: number | null;
+  summaryRating: number | null;
+  notes: string;
+  createdAt?: string;
+  updatedAt?: string;
+};
+type QualityMeeting = {
+  meetingId: string;
+  title: string;
+  startedAt: string;
+  durationMs: number;
+  speakerCount: number;
+  segmentCount: number;
+  observableScore: number;
+  humanScore: number | null;
+  metrics: {
+    punctuationCoverage: number | null;
+    speakerCoverage: number | null;
+    recognitionConfidence: number | null;
+    evidenceCoverage: number | null;
+    unresolvedOverlap: number;
+    correctionCount: number;
+  };
+  review: QualityReview | null;
+};
+type QualityReport = {
+  generatedAt: string;
+  meetingCount: number;
+  reviewedCount: number;
+  observableScore: number;
+  humanScore: number | null;
+  metrics: QualityMeeting["metrics"];
+  scenarioCounts: Record<string, number>;
+  scenarios: Array<{ id: string; label: string }>;
+  meetings: QualityMeeting[];
+  note: string;
+};
+type DiagnosticReport = {
+  checkedAt: string;
+  appVersion: string;
+  databaseIntegrity: "ok" | "warning";
+  schemaVersion: number;
+  meetingCount: number;
+  deletedMeetingCount: number;
+  speakerProfileCount: number;
+  confirmedMemoryCount: number;
+  localAsrAvailable: boolean;
+  punctuationModelAvailable: boolean;
+  speakerModelAvailable: boolean;
+  overlapSeparationModelAvailable: boolean;
+  miniMaxConfigured: boolean;
+  failedJobs: Array<{ kind: string; error: string; updatedAt: string; meetingTitle: string }>;
+};
 type Speaker = {
   id: string;
   meetingId: string;
@@ -186,6 +275,7 @@ type Speaker = {
   suggestedProfileId: string | null;
   suggestedName: string | null;
   suggestedScore: number | null;
+  profileMatchScore: number | null;
 };
 type Segment = {
   id: string;
@@ -463,6 +553,12 @@ const meetingMemoryKindNames: Record<MeetingMemoryKind, string> = {
   need: "诉求",
   term: "术语",
 };
+const qualityRatingFields: Array<{ key: keyof Pick<QualityReview, "transcriptionRating" | "punctuationRating" | "speakerRating" | "summaryRating">; label: string }> = [
+  { key: "transcriptionRating", label: "转写准确" },
+  { key: "punctuationRating", label: "断句标点" },
+  { key: "speakerRating", label: "发言人识别" },
+  { key: "summaryRating", label: "AI 总结" },
+];
 
 type EditableMeetingBrief = {
   subject: string;
@@ -558,29 +654,36 @@ function summaryLooksInvalid(summary: Summary | null | undefined) {
 }
 
 function deriveMeetingBrief(meeting: Meeting, summary: Summary): EditableMeetingBrief {
-  const fallbackSections = (summary.overviewCards || []).slice(0, 5).map((card, index) => ({
+  const overviewCards = Array.isArray(summary.overviewCards) ? summary.overviewCards : [];
+  const risks = Array.isArray(summary.risks) ? summary.risks : [];
+  const decisions = Array.isArray(summary.decisions) ? summary.decisions : [];
+  const savedSections = Array.isArray(summary.brief?.sections) ? summary.brief.sections : [];
+  const fallbackSections = overviewCards.slice(0, 5).map((card, index) => ({
     id: `overview-${index + 1}`,
     title: card.title,
-    content: [card.summary, ...(card.points || [])].filter(Boolean).join("；"),
-    evidenceSeqs: card.evidenceSeqs || [],
+    content: [card.summary, ...(Array.isArray(card.points) ? card.points : [])].filter(Boolean).join("；"),
+    evidenceSeqs: Array.isArray(card.evidenceSeqs) ? card.evidenceSeqs : [],
   }));
   if (!fallbackSections.length) {
     fallbackSections.push(
       { id: "overview", title: "核心讨论", content: summary.overview, evidenceSeqs: [] },
-      { id: "problems", title: "主要问题", content: summary.risks.join("；") || "会议中未明确", evidenceSeqs: [] },
-      { id: "consensus", title: "会议共识", content: summary.decisions.join("；") || "会议中未明确", evidenceSeqs: [] },
+      { id: "problems", title: "主要问题", content: risks.join("；") || "会议中未明确", evidenceSeqs: [] },
+      { id: "consensus", title: "会议共识", content: decisions.join("；") || "会议中未明确", evidenceSeqs: [] },
     );
   }
-  const namedSpeakers = meeting.speakers
+  const speakers = Array.isArray(meeting.speakers) ? meeting.speakers : [];
+  const namedSpeakers = speakers
     .map((speaker) => speaker.displayName)
     .filter((name) => name && !/^发言人\d+$/.test(name));
   return {
     subject: summary.brief?.subject || summary.headline || meeting.title,
-    participants: summary.brief?.participants || namedSpeakers.join(" · ") || `${meeting.speakers.length} 位参会者`,
+    participants: summary.brief?.participants || namedSpeakers.join(" · ") || `${speakers.length} 位参会者`,
     conclusion: summary.overview || summary.headline || "会议中未形成明确结论",
-    sections: summary.brief?.sections?.length ? summary.brief.sections : fallbackSections,
-    aiSuggestions: summary.brief?.aiSuggestions || summary.aiInsights?.slice(0, 3).map((item) => item.insight) || [],
-    actionItems: summary.actionItems || [],
+    sections: savedSections.length ? savedSections : fallbackSections,
+    aiSuggestions: Array.isArray(summary.brief?.aiSuggestions)
+      ? summary.brief.aiSuggestions
+      : (Array.isArray(summary.aiInsights) ? summary.aiInsights.slice(0, 3).map((item) => item.insight) : []),
+    actionItems: Array.isArray(summary.actionItems) ? summary.actionItems : [],
   };
 }
 
@@ -977,6 +1080,7 @@ export default function Home() {
   const [reportStyleDraft, setReportStyleDraft] = useState<ReportStyle>(DEFAULT_REPORT_STYLE);
   const [settingsPageOpen, setSettingsPageOpen] = useState(false);
   const [workspacePageOpen, setWorkspacePageOpen] = useState(false);
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("meetings");
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("general");
   const [miniMaxSettings, setMiniMaxSettings] = useState<MiniMaxSettings | null>(null);
   const [miniMaxKeyDraft, setMiniMaxKeyDraft] = useState("");
@@ -1025,6 +1129,18 @@ export default function Home() {
   const [memoryBusyId, setMemoryBusyId] = useState<string | null>(null);
   const [memoryEditingId, setMemoryEditingId] = useState<string | null>(null);
   const [memoryDraft, setMemoryDraft] = useState("");
+  const [memoryInsights, setMemoryInsights] = useState<MemoryInsights>({ duplicateCount: 0, conflictCount: 0, duplicates: [], conflicts: [] });
+  const [memoryMergingId, setMemoryMergingId] = useState<string | null>(null);
+  const [knowledgeQuestion, setKnowledgeQuestion] = useState("");
+  const [knowledgeAnswer, setKnowledgeAnswer] = useState<KnowledgeAnswer | null>(null);
+  const [knowledgeAsking, setKnowledgeAsking] = useState(false);
+  const [qualityReport, setQualityReport] = useState<QualityReport | null>(null);
+  const [qualityLoading, setQualityLoading] = useState(false);
+  const [qualityReviewMeeting, setQualityReviewMeeting] = useState<QualityMeeting | null>(null);
+  const [qualityReviewDraft, setQualityReviewDraft] = useState<QualityReview>({ scenarioTags: [], transcriptionRating: null, punctuationRating: null, speakerRating: null, summaryRating: null, notes: "" });
+  const [qualitySaving, setQualitySaving] = useState(false);
+  const [diagnosticReport, setDiagnosticReport] = useState<DiagnosticReport | null>(null);
+  const [diagnosticLoading, setDiagnosticLoading] = useState(false);
   const workspaceRef = useRef<HTMLElement | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
@@ -1453,12 +1569,41 @@ export default function Home() {
   const refreshMemories = useCallback(async () => {
     setMemoryLoading(true);
     try {
-      const result = await api<{ memories: MeetingMemory[]; stats: MeetingMemoryStats }>("/api/memories?limit=500");
+      const [result, insights] = await Promise.all([
+        api<{ memories: MeetingMemory[]; stats: MeetingMemoryStats }>("/api/memories?limit=500"),
+        api<MemoryInsights>("/api/memories/insights"),
+      ]);
       setMemories(result.memories);
       setMemoryStats(result.stats);
+      setMemoryInsights(insights);
       return result;
     } finally {
       setMemoryLoading(false);
+    }
+  }, []);
+
+  const refreshQualityReport = useCallback(async () => {
+    setQualityLoading(true);
+    try {
+      const result = await api<QualityReport>("/api/quality-report");
+      setQualityReport(result);
+      return result;
+    } finally {
+      setQualityLoading(false);
+    }
+  }, []);
+
+  const runDiagnostics = useCallback(async () => {
+    setDiagnosticLoading(true);
+    setStorageError("");
+    try {
+      const result = await api<DiagnosticReport>("/api/diagnostics");
+      setDiagnosticReport(result);
+      setNotice(result.databaseIntegrity === "ok" ? "本机诊断完成，会议数据库状态正常" : "诊断发现需要关注的数据库状态");
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : "无法完成本机诊断");
+    } finally {
+      setDiagnosticLoading(false);
     }
   }, []);
 
@@ -1800,6 +1945,7 @@ export default function Home() {
     setSettingsPageOpen(false);
     setWorkspacePageOpen(true);
     void refreshMemories().catch((error) => setNotice(error instanceof Error ? error.message : "无法读取会议记忆"));
+    void refreshQualityReport().catch((error) => setNotice(error instanceof Error ? error.message : "无法读取质量报告"));
     window.requestAnimationFrame(scrollWorkspaceToTop);
   }
 
@@ -2847,6 +2993,111 @@ export default function Home() {
       setNotice(error instanceof Error ? error.message : "无法删除会议记忆");
     } finally {
       setMemoryBusyId(null);
+    }
+  }
+
+  async function mergeMeetingMemories(primary: MeetingMemory, duplicate: MeetingMemory) {
+    setMemoryMergingId(duplicate.id);
+    try {
+      await api("/api/memories/merge", {
+        method: "POST",
+        body: JSON.stringify({ primaryId: primary.id, duplicateIds: [duplicate.id] }),
+      });
+      await refreshMemories();
+      setNotice("重复记忆已合并，两个来源仍然保留");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法合并会议记忆");
+    } finally {
+      setMemoryMergingId(null);
+    }
+  }
+
+  async function unmergeMeetingMemory(item: MeetingMemory) {
+    setMemoryMergingId(item.id);
+    try {
+      await api(`/api/memories/${item.id}/unmerge`, { method: "POST" });
+      await refreshMemories();
+      setNotice("合并来源已恢复为独立记忆，可分别核对和编辑");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法恢复合并来源");
+    } finally {
+      setMemoryMergingId(null);
+    }
+  }
+
+  async function askWorkspaceKnowledge(event?: { preventDefault(): void }) {
+    event?.preventDefault();
+    const question = knowledgeQuestion.trim();
+    if (!question || knowledgeAsking) return;
+    setKnowledgeAsking(true);
+    try {
+      const result = await api<KnowledgeAnswer>("/api/knowledge/ask", {
+        method: "POST",
+        body: JSON.stringify({ question }),
+      });
+      setKnowledgeAnswer(result);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法回答这个会议问题");
+    } finally {
+      setKnowledgeAsking(false);
+    }
+  }
+
+  async function openKnowledgeSource(source: KnowledgeSource) {
+    setMeetingDetailOrigin("workspace");
+    setWorkspacePageOpen(false);
+    setSettingsPageOpen(false);
+    setSelectedId(source.meetingId);
+    try {
+      await loadMeeting(source.meetingId);
+      setView("transcript");
+      if (source.seq !== null) {
+        setHighlightedSeq(source.seq);
+        window.setTimeout(() => document.getElementById(`segment-${source.seq}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 120);
+        window.setTimeout(() => setHighlightedSeq(null), 2600);
+      }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法打开来源会议");
+    }
+  }
+
+  function beginQualityReview(item: QualityMeeting) {
+    setQualityReviewMeeting(item);
+    setQualityReviewDraft(item.review || {
+      scenarioTags: [],
+      transcriptionRating: null,
+      punctuationRating: null,
+      speakerRating: null,
+      summaryRating: null,
+      notes: "",
+    });
+  }
+
+  function toggleQualityScenario(id: string) {
+    setQualityReviewDraft((current) => ({
+      ...current,
+      scenarioTags: current.scenarioTags.includes(id)
+        ? current.scenarioTags.filter((item) => item !== id)
+        : [...current.scenarioTags, id],
+    }));
+  }
+
+  async function saveQualityReview(event: { preventDefault(): void }) {
+    event.preventDefault();
+    if (!qualityReviewMeeting || qualitySaving) return;
+    setQualitySaving(true);
+    try {
+      const result = await api<{ review: QualityReview; report: QualityReport }>(
+        `/api/meetings/${qualityReviewMeeting.meetingId}/quality-review`,
+        { method: "PATCH", body: JSON.stringify(qualityReviewDraft) },
+      );
+      setQualityReport(result.report);
+      setQualityReviewMeeting(null);
+      setNotice("这场会议的人工评测已保存，可用于后续版本对比");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法保存会议质量评测");
+    } finally {
+      setQualitySaving(false);
     }
   }
 
@@ -3912,7 +4163,13 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
               <article className={memoryStats.pending ? "attention" : ""}><span><Sparkle size={19} weight="duotone" /></span><p><small>待确认记忆</small><strong>{memoryStats.pending}</strong><em>条</em></p></article>
             </section>
 
-            <div className="workspace-hub-grid">
+            <nav className="workspace-view-switcher" aria-label="本机工作区栏目">
+              <button type="button" className={workspaceView === "meetings" ? "active" : ""} onClick={() => setWorkspaceView("meetings")}><HardDrives size={16} /> 会议档案</button>
+              <button type="button" className={workspaceView === "knowledge" ? "active" : ""} onClick={() => setWorkspaceView("knowledge")}><Brain size={16} /> 记忆与问答{memoryStats.pending ? <span>{memoryStats.pending}</span> : null}</button>
+              <button type="button" className={workspaceView === "quality" ? "active" : ""} onClick={() => { setWorkspaceView("quality"); if (!qualityReport) void refreshQualityReport(); }}><Gauge size={16} /> 质量报告</button>
+            </nav>
+
+            <div className={`workspace-hub-grid workspace-view-${workspaceView}`}>
               <section className="workspace-library" aria-labelledby="workspace-library-title">
                 <header>
                   <div><span>会议档案</span><h2 id="workspace-library-title">全部历史会议</h2></div>
@@ -3954,6 +4211,31 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                   ))}
                   <button type="button" className="workspace-memory-manage" onClick={() => void openMemoryDialog(memoryStats.pending ? "pending" : "all")}><Brain size={15} weight="duotone" /> 管理会议记忆 <ArrowRight size={13} /></button>
                 </section>
+                <section className="workspace-qa" aria-labelledby="workspace-qa-title">
+                  <header><span>有据可查</span><h2 id="workspace-qa-title">问问会议知识库</h2><p>综合历史会议、已确认记忆和可读取资料，答案可以回到原文。</p></header>
+                  <form onSubmit={(event) => void askWorkspaceKnowledge(event)}>
+                    <textarea value={knowledgeQuestion} onChange={(event) => setKnowledgeQuestion(event.target.value)} maxLength={240} placeholder="例如：材料研究院过去提出过哪些需求？" aria-label="会议知识库问题" />
+                    <button type="submit" disabled={!knowledgeQuestion.trim() || knowledgeAsking}><ChatCircleText size={16} weight="duotone" />{knowledgeAsking ? "正在查找证据…" : "开始回答"}</button>
+                  </form>
+                  {knowledgeAnswer && (
+                    <article className="workspace-answer">
+                      <div><span>{knowledgeAnswer.mode === "minimax" ? "MiniMax 综合回答" : "本机证据检索"}</span><small>{knowledgeAnswer.citations.length} 条引用</small></div>
+                      <p>{knowledgeAnswer.answer}</p>
+                      <div className="workspace-answer-sources">
+                        {knowledgeAnswer.citations.map((citation) => {
+                          const source = knowledgeAnswer.sources.find((item) => item.ref === citation.ref);
+                          return source ? (
+                            <button type="button" key={`${citation.ref}-${source.id}`} onClick={() => void openKnowledgeSource(source)}>
+                              <span>{citation.ref} · {source.meetingTitle}</span>
+                              <small>{source.startMs !== null ? `${formatClock(source.startMs)} · ` : ""}{citation.quote || source.text.slice(0, 100)}</small>
+                              <ArrowRight size={13} />
+                            </button>
+                          ) : null;
+                        })}
+                      </div>
+                    </article>
+                  )}
+                </section>
                 <section className="workspace-material-overview">
                 <header><span>资料库</span><h2>会议相关资料</h2><p>资料跟随原会议保存，点击会议即可查看或继续补充。</p></header>
                 {meetingsWithMaterials.length ? (
@@ -3964,9 +4246,40 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                   <div className="workspace-material-empty"><Paperclip size={24} weight="duotone" /><b>还没有会议资料</b><p>可以在开始会议前或会议详情中添加 PDF、Office、Markdown 和图片。</p></div>
                 )}
                 </section>
-                <footer><Brain size={17} weight="duotone" /><p><b>会议知识问答</b><small>后续会在引用逐字稿与资料来源的基础上开放。</small></p></footer>
+                <footer><Gauge size={17} weight="duotone" /><p><b>真实会议质量</b><small>{qualityReport?.reviewedCount ? `已人工评测 ${qualityReport.reviewedCount} 场` : "为真实会议标记场景并评分，形成可比较基线。"}</small></p><button type="button" onClick={() => setWorkspaceView("quality")}>查看</button></footer>
               </aside>
             </div>
+
+            {workspaceView === "quality" && (
+              <section className="workspace-quality" aria-labelledby="workspace-quality-title">
+                <header><div><span><Flask size={17} weight="duotone" /> 真实会议评测</span><h2 id="workspace-quality-title">质量报告</h2><p>自动指标用于发现风险；人工评分才用于判断转写、断句、发言人和总结是否真的准确。</p></div><button type="button" onClick={() => void refreshQualityReport()} disabled={qualityLoading}><ArrowClockwise size={15} />{qualityLoading ? "正在统计…" : "重新统计"}</button></header>
+                {qualityReport && (
+                  <>
+                    <div className="quality-score-grid">
+                      <article><span>自动健康度</span><strong>{qualityReport.observableScore}<small>/100</small></strong><p>用于发现低置信、缺少标点和未解决重叠发言</p></article>
+                      <article><span>人工体验分</span><strong>{qualityReport.humanScore ?? "—"}<small>{qualityReport.humanScore === null ? "" : "/100"}</small></strong><p>{qualityReport.reviewedCount} / {qualityReport.meetingCount} 场完成真实评测</p></article>
+                      <article><span>断句覆盖</span><strong>{qualityReport.metrics.punctuationCoverage ?? "—"}<small>{qualityReport.metrics.punctuationCoverage === null ? "" : "%"}</small></strong><p>片段末尾具有明确断句符号</p></article>
+                      <article><span>发言人覆盖</span><strong>{qualityReport.metrics.speakerCoverage ?? "—"}<small>{qualityReport.metrics.speakerCoverage === null ? "" : "%"}</small></strong><p>{qualityReport.metrics.unresolvedOverlap} 段重叠发言仍待确认</p></article>
+                    </div>
+                    <div className="quality-scenarios">
+                      {qualityReport.scenarios.map((scenario) => <span key={scenario.id} className={qualityReport.scenarioCounts[scenario.id] ? "covered" : ""}><b>{qualityReport.scenarioCounts[scenario.id] || 0}</b>{scenario.label}</span>)}
+                    </div>
+                    <div className="quality-meeting-list">
+                      {qualityReport.meetings.map((item) => (
+                        <article key={item.meetingId}>
+                          <div><b>{item.title}</b><small>{formatMeetingDate(item.startedAt)} · {item.speakerCount} 位发言人 · {item.segmentCount} 段记录</small></div>
+                          <span className="quality-health"><b>{item.observableScore}</b><small>自动健康度</small></span>
+                          <span className="quality-human"><b>{item.humanScore ?? "—"}</b><small>{item.review ? "人工评分" : "尚未评测"}</small></span>
+                          <button type="button" onClick={() => beginQualityReview(item)}>{item.review ? "更新评测" : "填写评测"}</button>
+                        </article>
+                      ))}
+                    </div>
+                    <p className="quality-disclaimer"><ShieldCheck size={14} /> {qualityReport.note}</p>
+                  </>
+                )}
+                {!qualityReport && !qualityLoading && <div className="workspace-empty"><Gauge size={30} weight="duotone" /><b>还没有质量数据</b><p>完成一次会议后即可生成自动风险指标。</p></div>}
+              </section>
+            )}
           </main>
         ) : (
           <>
@@ -4262,7 +4575,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                             </button>
                             {segment.source === "corrected" && <em>已校正</em>}
                             {segment.source === "overlap-separated" && <em className="overlap-separated-badge">会后拆解</em>}
-                            {speaker?.autoMatched && <em className="speaker-auto-match">声纹匹配</em>}
+                            {speaker?.autoMatched && <em className="speaker-auto-match">声纹匹配{speaker.profileMatchScore !== null ? ` ${Math.round(speaker.profileMatchScore * 100)}%` : ""}</em>}
                             {speaker?.suggestedName && !speaker.autoMatched && !speaker.manuallyNamed && (
                               <button
                                 type="button"
@@ -4925,7 +5238,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                   <div className="speaker-list-item" key={speaker.id}>
                     <button className="speaker-list-main" onClick={() => beginRenameSpeaker(speaker)}>
                       <i className={`avatar ${speaker.color}`}>{speaker.displayName.slice(0, 1)}</i>
-                      <span>{speaker.displayName}<small>{speaker.manuallyNamed ? "已确认并记住" : speaker.autoMatched ? "本机声纹自动匹配" : speaker.suggestedName ? `声纹候选：${speaker.suggestedName}` : "点击重命名"}</small></span>
+                      <span>{speaker.displayName}<small>{speaker.manuallyNamed ? "已确认并记住" : speaker.autoMatched ? `本机声纹自动匹配${speaker.profileMatchScore !== null ? ` · ${Math.round(speaker.profileMatchScore * 100)}%` : ""}` : speaker.suggestedName ? `声纹候选：${speaker.suggestedName}` : "点击重命名"}</small></span>
                     </button>
                     {speaker.suggestedName && !speaker.autoMatched && !speaker.manuallyNamed && (
                       <button
@@ -5085,6 +5398,12 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                     </button>
                   </div>
                 </div>
+                <div className="storage-diagnostic-card">
+                  <div><b>本机运行诊断</b><span>检查数据库完整性、本地模型和近期失败任务；报告不包含密钥或会议正文。</span></div>
+                  <button type="button" onClick={() => void runDiagnostics()} disabled={diagnosticLoading || Boolean(backupBusy)}><Gauge size={15} />{diagnosticLoading ? "正在检查…" : diagnosticReport ? "重新检查" : "开始诊断"}</button>
+                  {diagnosticReport && <p className={diagnosticReport.databaseIntegrity === "ok" ? "ready" : "warning"}><CheckCircle size={14} weight="fill" /><span><b>{diagnosticReport.databaseIntegrity === "ok" ? "数据库状态正常" : "数据库需要关注"}</b><small>架构 v{diagnosticReport.schemaVersion} · {diagnosticReport.speakerProfileCount} 个声纹 · {diagnosticReport.confirmedMemoryCount} 条长期记忆 · {diagnosticReport.failedJobs.length} 个近期失败任务</small></span></p>}
+                </div>
+                <p className="storage-auto-backup-note"><ShieldCheck size={14} /> 安装版每天保留轻量数据库快照；正式更新安装前会再创建完整工作区备份。</p>
                 <div className="storage-path">
                   <span>数据位置</span>
                   <code>{storageInfo.dataRoot}</code>
@@ -5448,8 +5767,19 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
           </form>
         </div>
       )}
+      {qualityReviewMeeting && qualityReport && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target && !qualitySaving) setQualityReviewMeeting(null); }}>
+          <form className="quality-review-dialog" role="dialog" aria-modal="true" aria-labelledby="quality-review-title" onSubmit={(event) => void saveQualityReview(event)}>
+            <header><div><span><Flask size={20} weight="duotone" /></span><div><h2 id="quality-review-title">评测这场真实会议</h2><p>{qualityReviewMeeting.title}</p></div></div><button type="button" onClick={() => setQualityReviewMeeting(null)} disabled={qualitySaving} aria-label="关闭质量评测"><X size={17} /></button></header>
+            <section className="quality-review-scenarios"><b>测试场景</b><p>选择这场会议实际包含的情况，后续版本可以按同类场景比较。</p><div>{qualityReport.scenarios.map((scenario) => <button type="button" key={scenario.id} aria-pressed={qualityReviewDraft.scenarioTags.includes(scenario.id)} className={qualityReviewDraft.scenarioTags.includes(scenario.id) ? "selected" : ""} onClick={() => toggleQualityScenario(scenario.id)}><CheckCircle size={14} weight={qualityReviewDraft.scenarioTags.includes(scenario.id) ? "fill" : "regular"} />{scenario.label}</button>)}</div></section>
+            <section className="quality-review-ratings"><b>人工体验评分</b><p>1 分表示明显不可用，5 分表示可以直接使用。</p>{qualityRatingFields.map((field) => <div key={field.key}><span>{field.label}</span><div>{[1, 2, 3, 4, 5].map((rating) => <button type="button" key={rating} aria-pressed={qualityReviewDraft[field.key] === rating} aria-label={`${field.label} ${rating} 分`} className={qualityReviewDraft[field.key] === rating ? "selected" : ""} onClick={() => setQualityReviewDraft((current) => ({ ...current, [field.key]: rating }))}>{rating}</button>)}</div></div>)}</section>
+            <label className="quality-review-notes"><span>问题记录</span><textarea value={qualityReviewDraft.notes} onChange={(event) => setQualityReviewDraft((current) => ({ ...current, notes: event.target.value }))} maxLength={600} placeholder="例如：两人交叉发言时被误识别为第三位发言人；行业简称需要手动替换。" /></label>
+            <footer><p><ShieldCheck size={14} /> 评分仅保存在本机，用于比较后续版本效果。</p><div><button type="button" onClick={() => setQualityReviewMeeting(null)} disabled={qualitySaving}>取消</button><button type="submit" className="primary" disabled={qualitySaving || (!qualityReviewDraft.scenarioTags.length && !qualityReviewDraft.notes.trim() && qualityRatingFields.every((field) => qualityReviewDraft[field.key] === null))}>{qualitySaving ? "正在保存…" : "保存评测"}</button></div></footer>
+          </form>
+        </div>
+      )}
       {memoryDialogOpen && (
-        <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target && !memoryBusyId) setMemoryDialogOpen(false); }}>
+        <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target && !memoryBusyId && !memoryMergingId) setMemoryDialogOpen(false); }}>
           <section className="memory-dialog" role="dialog" aria-modal="true" aria-labelledby="memory-dialog-title">
             <header>
               <div><span><Brain size={20} weight="duotone" /></span><div><h2 id="memory-dialog-title">会议记忆</h2><p>只有确认后的内容才会成为长期记忆；所有内容保留会议与原文来源。</p></div></div>
@@ -5460,6 +5790,22 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
               <button type="button" className={memoryFilter === "confirmed" ? "active" : ""} onClick={() => setMemoryFilter("confirmed")}>已确认 <span>{memoryStats.confirmed}</span></button>
               <button type="button" className={memoryFilter === "all" ? "active" : ""} onClick={() => setMemoryFilter("all")}>全部 <span>{memoryStats.total}</span></button>
             </nav>
+            {(memoryInsights.duplicateCount > 0 || memoryInsights.conflictCount > 0) && (
+              <section className="memory-insight-panel">
+                <header><div><ArrowsMerge size={16} weight="duotone" /><span><b>{memoryInsights.duplicateCount} 组可能重复</b><small>{memoryInsights.conflictCount ? `另有 ${memoryInsights.conflictCount} 组内容可能冲突` : "合并后仍保留全部会议来源"}</small></span></div></header>
+                {memoryInsights.duplicates.slice(0, 3).map((pair) => (
+                  <article key={`${pair.primary.id}-${pair.duplicate.id}`}>
+                    <div><p>{pair.primary.content}</p><span>{pair.primary.sourceMeetingTitle}</span></div>
+                    <ArrowsMerge size={14} />
+                    <div><p>{pair.duplicate.content}</p><span>{pair.duplicate.sourceMeetingTitle}</span></div>
+                    <footer><button type="button" disabled={Boolean(memoryMergingId)} onClick={() => void mergeMeetingMemories(pair.primary, pair.duplicate)}>{memoryMergingId === pair.duplicate.id ? "合并中…" : "保留第一条并合并来源"}</button><button type="button" disabled={Boolean(memoryMergingId)} onClick={() => void mergeMeetingMemories(pair.duplicate, pair.primary)}>保留第二条</button></footer>
+                  </article>
+                ))}
+                {memoryInsights.conflicts.slice(0, 2).map((pair) => (
+                  <article className="conflict" key={`${pair.left.id}-${pair.right.id}`}><div><p>{pair.left.content}</p><button type="button" onClick={() => void openMemorySource(pair.left)}>查看来源</button></div><WarningCircle size={14} /><div><p>{pair.right.content}</p><button type="button" onClick={() => void openMemorySource(pair.right)}>查看来源</button></div><footer><span>可能存在时间变化或结论冲突，请根据原文人工确认。</span></footer></article>
+                ))}
+              </section>
+            )}
             <div className="memory-list">
               {visibleMemories.map((item) => (
                 <article key={item.id} className={`memory-item ${item.status}`}>
@@ -5467,8 +5813,8 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                   {memoryEditingId === item.id ? (
                     <div className="memory-edit"><textarea autoFocus value={memoryDraft} onChange={(event) => setMemoryDraft(event.target.value)} maxLength={280} /><div><button type="button" onClick={() => { setMemoryEditingId(null); setMemoryDraft(""); }} disabled={memoryBusyId === item.id}>取消</button><button type="button" className="primary" onClick={() => void updateMeetingMemory(item, { content: memoryDraft })} disabled={!memoryDraft.trim() || memoryBusyId === item.id}>{memoryBusyId === item.id ? "保存中…" : "保存并确认"}</button></div></div>
                   ) : <p>{item.content}</p>}
-                  <button type="button" className="memory-source" onClick={() => void openMemorySource(item)}><Quotes size={14} weight="duotone" /><span><b>回看原文 · {item.sourceMeetingTitle}</b><small>{item.sourceMeetingStartedAt ? formatMeetingDate(item.sourceMeetingStartedAt) : "来源会议"}{item.evidence[0]?.text ? ` · “${item.evidence[0].text.slice(0, 48)}${item.evidence[0].text.length > 48 ? "…" : ""}”` : ""}</small></span><ArrowRight size={13} /></button>
-                  {memoryEditingId !== item.id && <footer><button type="button" onClick={() => { setMemoryEditingId(item.id); setMemoryDraft(item.content); }} disabled={Boolean(memoryBusyId)}><PencilSimple size={13} /> 编辑</button>{item.status === "pending" && <button type="button" className="primary" onClick={() => void updateMeetingMemory(item, { status: "confirmed" })} disabled={Boolean(memoryBusyId)}><CheckCircle size={13} />{memoryBusyId === item.id ? "确认中…" : "确认记忆"}</button>}<button type="button" className="danger" onClick={() => void dismissMeetingMemory(item)} disabled={Boolean(memoryBusyId)}><Trash size={13} />{item.status === "pending" ? "不保存" : "删除"}</button></footer>}
+                  <button type="button" className="memory-source" onClick={() => void openMemorySource(item)}><Quotes size={14} weight="duotone" /><span><b>回看原文 · {item.sourceMeetingTitle}{item.relatedSourceCount ? ` · 共 ${item.relatedSourceCount + 1} 个来源` : ""}</b><small>{item.sourceMeetingStartedAt ? formatMeetingDate(item.sourceMeetingStartedAt) : "来源会议"}{item.evidence[0]?.text ? ` · “${item.evidence[0].text.slice(0, 48)}${item.evidence[0].text.length > 48 ? "…" : ""}”` : ""}</small></span><ArrowRight size={13} /></button>
+                  {memoryEditingId !== item.id && <footer><button type="button" onClick={() => { setMemoryEditingId(item.id); setMemoryDraft(item.content); }} disabled={Boolean(memoryBusyId) || Boolean(memoryMergingId)}><PencilSimple size={13} /> 编辑</button>{item.relatedSourceCount > 0 && <button type="button" onClick={() => void unmergeMeetingMemory(item)} disabled={Boolean(memoryBusyId) || Boolean(memoryMergingId)}><ArrowClockwise size={13} />{memoryMergingId === item.id ? "恢复中…" : "恢复独立来源"}</button>}{item.status === "pending" && <button type="button" className="primary" onClick={() => void updateMeetingMemory(item, { status: "confirmed" })} disabled={Boolean(memoryBusyId) || Boolean(memoryMergingId)}><CheckCircle size={13} />{memoryBusyId === item.id ? "确认中…" : "确认记忆"}</button>}<button type="button" className="danger" onClick={() => void dismissMeetingMemory(item)} disabled={Boolean(memoryBusyId) || Boolean(memoryMergingId)}><Trash size={13} />{item.status === "pending" ? "不保存" : "删除"}</button></footer>}
                 </article>
               ))}
               {!memoryLoading && !visibleMemories.length && <div className="memory-empty"><CheckCircle size={26} weight="duotone" /><b>{memoryFilter === "pending" ? "没有待确认的记忆" : memoryFilter === "confirmed" ? "还没有长期记忆" : "还没有会议记忆"}</b><p>{memoryFilter === "pending" ? "新会议生成 AI 总结后，候选记忆会出现在这里。" : "确认有长期价值的候选内容后，它们会保存在这里。"}</p></div>}

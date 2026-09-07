@@ -9,7 +9,21 @@
 | macOS | Apple Silicon / arm64 | DMG | ZIP、blockmap、SHA-256、冒烟结果 |
 | Windows | x64 | NSIS EXE | blockmap、SHA-256、冒烟结果 |
 
-目前两个平台的安装包均未使用商业代码签名，只适合个人使用和获得授权后的内部测试。macOS 可能触发 Gatekeeper，Windows 可能触发 SmartScreen。
+当前仓库已经具备签名材料的安全接入口，但只有在 GitHub 仓库配置真实证书密钥并由构建结果验证后，安装包才算已签名。未配置时仍会产出内部测试用的未签名包，macOS 可能触发 Gatekeeper，Windows 可能触发 SmartScreen。
+
+## 签名材料与就绪检查
+
+个人名义发布仍需向对应证书机构申请真实身份材料，仓库不能代替申请或生成可信证书。不要把证书、密码或 Apple 登录信息写入代码、配置文件、构建日志和 Release。
+
+在 GitHub 仓库的 Actions secrets 中配置：
+
+| 平台 | Secret | 用途 |
+| --- | --- | --- |
+| macOS | `MAC_CSC_LINK`、`MAC_CSC_KEY_PASSWORD` | Developer ID Application 的 P12/base64 或安全链接及密码 |
+| macOS | `APPLE_ID`、`APPLE_APP_SPECIFIC_PASSWORD`、`APPLE_TEAM_ID` | Apple 公证账号、专用密码和团队 ID |
+| Windows | `WINDOWS_CSC_LINK`、`WINDOWS_CSC_KEY_PASSWORD` | Windows 代码签名证书的 PFX/base64 或安全链接及密码 |
+
+本地运行 `npm run release:signing-check`，或分别传入 `--platform=mac` / `--platform=win`，只会显示缺失项，不会打印 secret 内容。CI 也会生成相同的就绪报告。报告通过只代表材料齐备，最终仍必须检查 macOS 签名与公证票据、Windows Authenticode 签名和安装包实际启动结果。
 
 ## 日常开发验证
 
@@ -18,6 +32,7 @@
 1. `Windows build and smoke test` 在 Windows x64 上运行测试、模型推理、打包、安装、启动、覆盖升级和卸载数据保留检查。
 2. `macOS build and smoke test` 在 Apple Silicon runner 上运行测试、模型推理、生成 DMG/ZIP、挂载安装、启动、覆盖安装和移除应用后的数据保留检查。
 3. 只有绿色运行中的 artifact 才能交给测试人员。
+4. 需要对外分发时，还必须确认对应平台的签名就绪报告和安装包实际签名验证通过。
 
 ## 创建内部草稿版本
 
@@ -56,6 +71,7 @@ GitHub Release 正文会直接显示在应用的更新页面中，建议保持�
 - [ ] 两个平台的麦克风、电脑声音、混合录音、快捷键和长会议均人工通过。
 - [ ] 从上一正式版本覆盖安装后，历史会议、配置、声纹库和 MiniMax 设置均保留。
 - [ ] 更新说明明确列出新增能力、修复、已知限制和回退方式。
+- [ ] macOS 对外包已验证 Developer ID 签名与 Apple 公证；Windows 对外包已验证 Authenticode 签名。
 - [ ] 用户可以下载上一稳定版本，必要时可以回退应用本体。
 
 ## 自动更新的后续阶段

@@ -54,10 +54,12 @@ jobs:
   build-windows:
     needs: validate
     uses: ./.github/workflows/windows-build.yml
+    secrets: inherit
 
   build-macos:
     needs: validate
     uses: ./.github/workflows/macos-build.yml
+    secrets: inherit
 
   create-draft:
     needs: [build-windows, build-macos]

@@ -163,7 +163,7 @@ export class SpeakerEngine {
     if (best
       && best.score >= this.profileAutoThreshold
       && (!ranked.runnerUp || ranked.margin >= this.profileAutoMargin)) {
-      return storage.applySpeakerProfile(speaker.id, best.profile);
+      return storage.applySpeakerProfile(speaker.id, best.profile, best.score);
     }
     if (best
       && best.score >= this.profileSuggestionThreshold

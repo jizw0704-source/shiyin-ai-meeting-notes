@@ -18,9 +18,12 @@ import {
   recoverInterruptedMeetings,
 } from "../server/storage-maintenance.mjs";
 import { createWorkspaceBackup, restoreWorkspaceBackup } from "../server/workspace-backup.mjs";
+import { createDatabaseSnapshot, inspectDatabaseSnapshot } from "../server/database-snapshot.mjs";
 import { findAvailableLocalPort } from "../server/local-port.mjs";
 import { deriveAutomaticMeetingTitle, normalizeAutomaticMeetingTitle } from "../server/meeting-title.mjs";
-import { deriveMeetingMemoryCandidates } from "../server/meeting-memory.mjs";
+import { buildMeetingMemoryInsights, deriveMeetingMemoryCandidates } from "../server/meeting-memory.mjs";
+import { answerMeetingKnowledge } from "../server/meeting-knowledge.mjs";
+import { buildMeetingQualitySnapshot, normalizeQualityReview } from "../server/meeting-quality.mjs";
 import {
   buildMeetingPreflight,
   inspectMeetingStorage,
@@ -676,6 +679,7 @@ test("progressively matches a known voice during the meeting and performs a ligh
     const third = engine.assign(activeMeeting.id, voice, storage, { durationMs: 2500 });
     assert.equal(third.speaker.displayName, "王工");
     assert.equal(third.speaker.autoMatched, true);
+    assert.equal(third.speaker.profileMatchScore > 0.9, true);
 
     const finalMeeting = storage.createMeeting("结束时复核");
     const finalEngine = new SpeakerEngine({ modelPath: path.join(root, "missing-final-model.onnx") });
@@ -718,6 +722,9 @@ test("offers a one-click candidate when a voice is plausible but not safe to aut
     assert.equal(confirmed.displayName, "李工");
     assert.equal(confirmed.manuallyNamed, true);
     assert.equal(confirmed.suggestedProfileId, null);
+    const profile = storage.listSpeakerProfiles().find((item) => item.displayName === "李工");
+    assert.equal(profile.confirmationCount, 1);
+    assert.equal(storage.db.prepare("SELECT COUNT(*) AS count FROM speaker_feedback WHERE meeting_id = ?").get(meeting.id).count, 1);
   } finally {
     storage.close();
     rmSync(root, { recursive: true, force: true });
@@ -1201,6 +1208,12 @@ test("creates a verified workspace backup and safely merges it into another work
     });
     const backupMemory = sourceStorage.listMemories({ meetingId: meeting.id })[0];
     sourceStorage.updateMemory(backupMemory.id, { status: "confirmed" });
+    sourceStorage.saveQualityReview(meeting.id, {
+      scenarioTags: ["multi-person"],
+      transcriptionRating: 4,
+      speakerRating: 3,
+      notes: "备份质量记录",
+    });
     const audio = new AudioSession(sourceRoot, meeting.id);
     audio.append(Buffer.alloc(32000, 4));
     const audioPath = await audio.finalize();
@@ -1268,6 +1281,9 @@ test("creates a verified workspace backup and safely merges it into another work
     assert.equal(restoredMemories.length, 1);
     assert.equal(restoredMemories[0].content, "保留本机完整备份");
     assert.equal(restoredMemories[0].status, "confirmed");
+    assert.equal(targetStorage.getQualityReview(meeting.id).transcriptionRating, 4);
+    assert.equal(targetStorage.getQualityReview(meeting.id).notes, "备份质量记录");
+    assert.equal(targetStorage.db.prepare("SELECT COUNT(*) AS count FROM speaker_feedback WHERE meeting_id = ?").get(meeting.id).count > 0, true);
     assert.equal(restoredMeeting.maxSpeakers, 20);
     assert.equal(restoredMeeting.transcriptVersions.length, 1);
     assert.equal(restoredMeeting.attachments.length, 1);
@@ -1757,4 +1773,188 @@ test("splits a long ASR sentence at strong punctuation for speaker correction", 
   assert.equal(pieces.length, 2);
   assert.equal(pieces[0].text, "主持人介绍。");
   assert.equal(pieces[1].startMs, 5000);
+});
+
+test("tracks observable meeting quality separately from human ratings", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-quality-"));
+  const storage = new MeetingStorage(root);
+  try {
+    const meeting = storage.createMeeting("质量验证会议");
+    const speaker = storage.ensureSpeaker(meeting.id, "发言人1");
+    storage.addSegment(meeting.id, {
+      seq: 0, startMs: 0, endMs: 1200, text: "第一项已经确认。", speakerId: speaker.id,
+      source: "local-realtime", confidence: 0.92,
+    });
+    storage.addSegment(meeting.id, {
+      seq: 1, startMs: 1300, endMs: 2800, text: "第二项还需要讨论", speakerId: null,
+      source: "local-realtime", confidence: 0.55, overlapSuspected: true,
+    });
+    storage.saveSummary(meeting.id, normalizeMeetingSummary({
+      headline: "质量验证",
+      overview: "团队确认第一项，并继续讨论第二项。",
+      decisions: [{ content: "第一项已经确认", evidenceSeqs: [0] }],
+    }, storage.getMeeting(meeting.id)));
+    storage.updateMeeting(meeting.id, { status: "completed", durationMs: 2800 });
+
+    assert.throws(() => normalizeQualityReview({ transcriptionRating: 6 }), /1 到 5/);
+    const review = storage.saveQualityReview(meeting.id, {
+      scenarioTags: ["two-person", "overlap"],
+      transcriptionRating: 4,
+      punctuationRating: 3,
+      speakerRating: 2,
+      summaryRating: 5,
+      notes: "重叠发言处需要复核。",
+    });
+    assert.equal(review.scenarioTags.length, 2);
+    const report = storage.getQualityReport();
+    assert.equal(report.meetingCount, 1);
+    assert.equal(report.reviewedCount, 1);
+    assert.equal(report.humanScore, 70);
+    assert.equal(report.scenarioCounts.overlap, 1);
+    assert.equal(report.meetings[0].metrics.punctuationCoverage, 50);
+    assert.equal(report.meetings[0].metrics.unresolvedOverlap, 1);
+    assert.match(report.note, /不等同于.*准确率/);
+
+    const snapshot = buildMeetingQualitySnapshot(storage.getMeeting(meeting.id), review, 2);
+    assert.equal(snapshot.metrics.correctionCount, 2);
+  } finally {
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("finds, merges, and restores duplicate memories while preserving their sources", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-memory-insights-"));
+  const storage = new MeetingStorage(root);
+  try {
+    const createMemory = (title, content) => {
+      const meeting = storage.createMeeting(title);
+      storage.addSegment(meeting.id, { seq: 0, startMs: 0, endMs: 1000, text: content, source: "local-realtime" });
+      storage.saveSummary(meeting.id, {
+        overview: content,
+        memoryCandidates: [{ kind: "decision", content, confidence: "高", evidenceSeqs: [0] }],
+      });
+      const memory = storage.listMemories({ meetingId: meeting.id })[0];
+      return storage.updateMemory(memory.id, { status: "confirmed" });
+    };
+    const primary = createMemory("方案会一", "继续采用本地转写方案");
+    const duplicate = createMemory("方案会二", "继续采用本地转写方案。 ");
+    createMemory("方案会三", "停止采用本地转写方案");
+
+    const insights = storage.getMemoryInsights();
+    assert.equal(insights.duplicateCount, 1);
+    assert.equal(insights.conflictCount >= 1, true);
+    storage.mergeMemories(primary.id, [duplicate.id]);
+    assert.equal(storage.getMemory(primary.id).relatedSourceCount, 1);
+    assert.equal(storage.listMemories({ includeMerged: true }).find((item) => item.id === duplicate.id).mergedIntoId, primary.id);
+    assert.equal(storage.listMemories().some((item) => item.id === duplicate.id), false);
+    storage.unmergeMemory(primary.id);
+    assert.equal(storage.getMemory(primary.id).relatedSourceCount, 0);
+
+    const directInsights = buildMeetingMemoryInsights(storage.listMemories());
+    assert.equal(directInsights.duplicateCount, 1);
+  } finally {
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("answers cross-meeting questions locally with traceable source references", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-knowledge-"));
+  const storage = new MeetingStorage(root);
+  try {
+    const meeting = storage.createMeeting("材料研究院调研");
+    storage.addSegment(meeting.id, {
+      seq: 0, startMs: 1200, endMs: 3000,
+      text: "材料研究院希望统一管理实验和项目记录。", source: "local-realtime",
+    });
+    storage.saveSummary(meeting.id, {
+      overview: "材料研究院提出知识库需求。",
+      memoryCandidates: [{
+        kind: "need", content: "材料研究院希望统一管理实验和项目记录。", confidence: "高", evidenceSeqs: [0],
+      }],
+    });
+    const memory = storage.listMemories({ meetingId: meeting.id })[0];
+    storage.updateMemory(memory.id, { status: "confirmed" });
+    const unrelated = storage.createMeeting("招聘流程复盘");
+    storage.addSegment(unrelated.id, {
+      seq: 0, startMs: 0, endMs: 1000, text: "继续保留候选人的面试记录。", source: "local-realtime",
+    });
+    storage.saveSummary(unrelated.id, {
+      overview: "讨论招聘流程。",
+      memoryCandidates: [{ kind: "decision", content: "继续保留候选人的面试记录。", confidence: "高", evidenceSeqs: [0] }],
+    });
+    storage.updateMemory(storage.listMemories({ meetingId: unrelated.id })[0].id, { status: "confirmed" });
+
+    const result = await answerMeetingKnowledge({
+      storage,
+      question: "材料研究院希望如何管理实验记录？",
+      apiKey: null,
+    });
+    assert.equal(result.mode, "local-evidence");
+    assert.match(result.answer, /统一管理实验和项目记录/);
+    assert.equal(result.citations.length > 0, true);
+    assert.equal(result.sources.some((source) => source.ref === result.citations[0].ref), true);
+    assert.equal(result.sources.every((source) => source.meetingId === meeting.id), true);
+  } finally {
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("replaces an invented MiniMax quote with the exact cited source text", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-knowledge-citation-"));
+  const storage = new MeetingStorage(root);
+  const originalFetch = globalThis.fetch;
+  try {
+    const meeting = storage.createMeeting("预算会议");
+    storage.addSegment(meeting.id, {
+      seq: 0, startMs: 0, endMs: 1000, text: "预算上限确定为二十万元。", source: "local-realtime",
+    });
+    storage.updateMeeting(meeting.id, { status: "completed" });
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({
+        answer: "预算上限是二十万元。",
+        citations: [{ ref: "S1", quote: "模型自行改写的不存在原句" }],
+      }) } }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+
+    const result = await answerMeetingKnowledge({ storage, question: "预算上限是多少？", apiKey: "test-key" });
+    assert.equal(result.mode, "minimax");
+    assert.equal(result.citations[0].ref, "S1");
+    assert.equal(result.citations[0].quote, "预算上限确定为二十万元。");
+  } finally {
+    globalThis.fetch = originalFetch;
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("creates verifiable rolling database snapshots and exposes safe diagnostics", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "shiyin-snapshot-data-"));
+  const destinationRoot = mkdtempSync(path.join(os.tmpdir(), "shiyin-snapshot-output-"));
+  const storage = new MeetingStorage(root);
+  try {
+    const meeting = storage.createMeeting("快照验证会议");
+    storage.updateMeeting(meeting.id, { status: "completed" });
+    const snapshot = await createDatabaseSnapshot({
+      storage,
+      dataRoot: root,
+      destinationRoot,
+      appVersion: "test",
+      keep: 2,
+    });
+    assert.equal(existsSync(snapshot.path), true);
+    const manifest = await inspectDatabaseSnapshot(snapshot.path);
+    assert.equal(manifest.appVersion, "test");
+    assert.equal(manifest.size > 0, true);
+    const diagnostics = storage.getDiagnostics();
+    assert.equal(diagnostics.databaseIntegrity, "ok");
+    assert.equal(diagnostics.schemaVersion, 7);
+    assert.equal(diagnostics.meetingCount, 1);
+  } finally {
+    storage.close();
+    rmSync(root, { recursive: true, force: true });
+    rmSync(destinationRoot, { recursive: true, force: true });
+  }
 });

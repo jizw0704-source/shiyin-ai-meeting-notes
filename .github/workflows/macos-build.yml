@@ -2,6 +2,17 @@ name: macOS build and smoke test
 
 on:
   workflow_call:
+    secrets:
+      MAC_CSC_LINK:
+        required: false
+      MAC_CSC_KEY_PASSWORD:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_APP_SPECIFIC_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
   workflow_dispatch:
   push:
     branches: [main]
@@ -39,7 +50,12 @@ jobs:
       PUNCTUATION_MODEL_URL: https://github.com/k2-fsa/sherpa-onnx/releases/download/punctuation-models/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8.tar.bz2
       PUNCTUATION_ARCHIVE_SHA256: c0d5aa5f8eeb686032345e180bedf39319dc2e0556781c6264bcadba8328a6e1
       PUNCTUATION_MODEL_SHA256: 65a3fb9f5ad7bfb96bf69e0dc4481df97f6ee60513c1d94ce981ba6effd524b1
-      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      CSC_IDENTITY_AUTO_DISCOVERY: ${{ secrets.MAC_CSC_LINK != '' }}
+      CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       FFMPEG_VERSION: 8.1.2
       FFMPEG_SOURCE_SHA256: 464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c
 
@@ -113,6 +129,9 @@ jobs:
 
       - name: Verify macOS native models
         run: npm run test:native-models
+
+      - name: Report macOS signing readiness
+        run: node scripts/signing-readiness.mjs --platform=mac
 
       - name: Build pinned LGPL audio converter
         run: |

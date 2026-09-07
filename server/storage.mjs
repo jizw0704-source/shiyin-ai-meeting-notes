@@ -13,9 +13,15 @@ import { cleanTranscriptText, replaceTranscriptText } from "./transcript-cleanin
 import { normalizeMaxSpeakers, normalizeSpeakerLimitMode } from "./speaker-settings.mjs";
 import { deriveAutomaticMeetingTitle } from "./meeting-title.mjs";
 import {
+  buildMeetingMemoryInsights,
   deriveMeetingMemoryCandidates,
   normalizeMeetingMemoryPatch,
 } from "./meeting-memory.mjs";
+import {
+  aggregateQualityReport,
+  buildMeetingQualitySnapshot,
+  normalizeQualityReview,
+} from "./meeting-quality.mjs";
 
 const speakerPalette = [
   "green", "violet", "amber", "blue", "rose", "teal", "orange", "indigo", "cyan", "lime",
@@ -88,6 +94,7 @@ export class MeetingStorage {
         auto_matched INTEGER NOT NULL DEFAULT 0,
         suggested_profile_id TEXT,
         suggested_profile_score REAL,
+        profile_match_score REAL,
         UNIQUE(meeting_id, label)
       );
       CREATE TABLE IF NOT EXISTS speaker_profiles (
@@ -95,6 +102,8 @@ export class MeetingStorage {
         display_name TEXT NOT NULL,
         centroid_json TEXT NOT NULL,
         sample_count INTEGER NOT NULL DEFAULT 1,
+        confirmation_count INTEGER NOT NULL DEFAULT 0,
+        rejection_count INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -179,9 +188,30 @@ export class MeetingStorage {
         status TEXT NOT NULL DEFAULT 'pending',
         confidence TEXT NOT NULL DEFAULT 'medium',
         evidence_seqs_json TEXT NOT NULL DEFAULT '[]',
+        merged_into_id TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         UNIQUE(meeting_id, source_key)
+      );
+      CREATE TABLE IF NOT EXISTS meeting_quality_reviews (
+        meeting_id TEXT PRIMARY KEY REFERENCES meetings(id) ON DELETE CASCADE,
+        scenario_tags_json TEXT NOT NULL DEFAULT '[]',
+        transcription_rating INTEGER,
+        punctuation_rating INTEGER,
+        speaker_rating INTEGER,
+        summary_rating INTEGER,
+        notes TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS speaker_feedback (
+        id TEXT PRIMARY KEY,
+        meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+        segment_id TEXT REFERENCES segments(id) ON DELETE SET NULL,
+        from_speaker_id TEXT,
+        to_speaker_id TEXT,
+        kind TEXT NOT NULL,
+        created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_segments_meeting_seq ON segments(meeting_id, seq);
       CREATE INDEX IF NOT EXISTS idx_speakers_meeting ON speakers(meeting_id);
@@ -194,6 +224,7 @@ export class MeetingStorage {
       CREATE INDEX IF NOT EXISTS idx_meeting_memories_meeting ON meeting_memories(meeting_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_meeting_memories_status ON meeting_memories(status, updated_at);
       CREATE INDEX IF NOT EXISTS idx_meeting_memories_kind ON meeting_memories(kind, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_speaker_feedback_meeting ON speaker_feedback(meeting_id, created_at);
     `);
     const meetingColumns = new Set(
       this.db.prepare("PRAGMA table_info(meetings)").all().map((column) => column.name),
@@ -271,8 +302,28 @@ export class MeetingStorage {
     if (!speakerColumns.has("suggested_profile_score")) {
       this.db.exec("ALTER TABLE speakers ADD COLUMN suggested_profile_score REAL");
     }
+    if (!speakerColumns.has("profile_match_score")) {
+      this.db.exec("ALTER TABLE speakers ADD COLUMN profile_match_score REAL");
+    }
+    const profileColumns = new Set(
+      this.db.prepare("PRAGMA table_info(speaker_profiles)").all().map((column) => column.name),
+    );
+    if (!profileColumns.has("confirmation_count")) {
+      this.db.exec("ALTER TABLE speaker_profiles ADD COLUMN confirmation_count INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!profileColumns.has("rejection_count")) {
+      this.db.exec("ALTER TABLE speaker_profiles ADD COLUMN rejection_count INTEGER NOT NULL DEFAULT 0");
+    }
+    const memoryColumns = new Set(
+      this.db.prepare("PRAGMA table_info(meeting_memories)").all().map((column) => column.name),
+    );
+    if (!memoryColumns.has("merged_into_id")) {
+      this.db.exec("ALTER TABLE meeting_memories ADD COLUMN merged_into_id TEXT");
+    }
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_meeting_memories_merged ON meeting_memories(merged_into_id)");
     this.bootstrapSpeakerProfiles();
     this.backfillMeetingMemories();
+    this.db.exec("PRAGMA user_version = 7");
   }
 
   createMeeting(title = "未命名会议", options = {}) {
@@ -642,12 +693,15 @@ export class MeetingStorage {
       content: row.content,
       status: row.status,
       confidence: row.confidence,
+      mergedIntoId: row.merged_into_id || null,
       evidenceSeqs: seqs,
       evidence: evidenceRows.map((item) => ({ seq: item.seq, text: item.text, startMs: item.start_ms })),
       sourceMeetingTitle: row.meeting_title || "会议记录",
       sourceMeetingStartedAt: row.meeting_started_at || null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+      relatedSourceCount: Number(this.db.prepare("SELECT COUNT(*) AS count FROM meeting_memories WHERE merged_into_id = ?")
+        .get(row.id)?.count || 0),
     };
   }
 
@@ -661,7 +715,9 @@ export class MeetingStorage {
   }
 
   listMemories(options = {}) {
-    const where = ["meeting_memories.status != 'dismissed'"];
+    const where = [];
+    if (!options.includeDismissed) where.push("meeting_memories.status != 'dismissed'");
+    if (!options.includeMerged) where.push("meeting_memories.merged_into_id IS NULL");
     if (!options.includeDeleted) where.push("meetings.deleted_at IS NULL");
     const values = [];
     if (options.meetingId) {
@@ -676,7 +732,7 @@ export class MeetingStorage {
     return this.db.prepare(`
       SELECT meeting_memories.*, meetings.title AS meeting_title, meetings.started_at AS meeting_started_at
       FROM meeting_memories JOIN meetings ON meetings.id = meeting_memories.meeting_id
-      WHERE ${where.join(" AND ")}
+      WHERE ${where.length ? where.join(" AND ") : "1 = 1"}
       ORDER BY CASE meeting_memories.status WHEN 'pending' THEN 0 ELSE 1 END,
         meeting_memories.updated_at DESC
       LIMIT ?
@@ -688,6 +744,7 @@ export class MeetingStorage {
       SELECT meeting_memories.status, COUNT(*) AS count
       FROM meeting_memories JOIN meetings ON meetings.id = meeting_memories.meeting_id
       WHERE meetings.deleted_at IS NULL AND meeting_memories.status != 'dismissed'
+        AND meeting_memories.merged_into_id IS NULL
       GROUP BY meeting_memories.status
     `).all();
     const result = { total: 0, pending: 0, confirmed: 0 };
@@ -719,6 +776,41 @@ export class MeetingStorage {
     this.db.prepare("UPDATE meeting_memories SET status = 'dismissed', updated_at = ? WHERE id = ?")
       .run(new Date().toISOString(), id);
     return this.getMemory(id);
+  }
+
+  getMemoryInsights() {
+    return buildMeetingMemoryInsights(this.listMemories({ limit: 500 }));
+  }
+
+  mergeMemories(primaryId, duplicateIds = []) {
+    const primary = this.getMemory(primaryId);
+    if (!primary || primary.status === "dismissed") throw new Error("主记忆不存在");
+    const ids = [...new Set(duplicateIds.map(String))].filter((id) => id && id !== primaryId).slice(0, 50);
+    const duplicates = ids.map((id) => this.getMemory(id)).filter(Boolean);
+    if (!duplicates.length) throw new Error("请选择需要合并的重复记忆");
+    if (duplicates.some((item) => item.kind !== primary.kind)) throw new Error("不同类型的记忆不能合并");
+    const now = new Date().toISOString();
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare("UPDATE meeting_memories SET status = 'confirmed', merged_into_id = NULL, updated_at = ? WHERE id = ?")
+        .run(now, primaryId);
+      const merge = this.db.prepare(`
+        UPDATE meeting_memories SET status = 'confirmed', merged_into_id = ?, updated_at = ? WHERE id = ?
+      `);
+      for (const duplicate of duplicates) merge.run(primaryId, now, duplicate.id);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return this.getMemory(primaryId);
+  }
+
+  unmergeMemory(primaryId) {
+    if (!this.getMemory(primaryId)) throw new Error("会议记忆不存在");
+    this.db.prepare("UPDATE meeting_memories SET merged_into_id = NULL, updated_at = ? WHERE merged_into_id = ?")
+      .run(new Date().toISOString(), primaryId);
+    return this.getMemory(primaryId);
   }
 
   saveLiveSummary(meetingId, summary) {
@@ -803,6 +895,18 @@ export class MeetingStorage {
       WHERE id = ?
     `).run(speaker.id, segmentId);
     this.db.prepare("UPDATE meetings SET summary_stale = 1 WHERE id = ?").run(segment.meetingId);
+    this.recordSpeakerFeedback({
+      meetingId: segment.meetingId,
+      segmentId,
+      fromSpeakerId: segment.speakerId,
+      toSpeakerId: speaker.id,
+      kind: segment.overlapSuspected ? "overlap-confirmed" : "segment-reassigned",
+    });
+    if (speaker.manuallyNamed && speaker.centroid) this.learnSpeakerProfile(speaker.id, { refine: true });
+    if (speaker.profileId) {
+      this.db.prepare("UPDATE speaker_profiles SET confirmation_count = confirmation_count + 1, updated_at = ? WHERE id = ?")
+        .run(new Date().toISOString(), speaker.profileId);
+    }
     return this.getMeeting(segment.meetingId);
   }
 
@@ -1178,6 +1282,7 @@ export class MeetingStorage {
       suggestedProfileId: row.suggested_profile_id || null,
       suggestedName: row.suggested_profile_id ? this.getSpeakerProfile(row.suggested_profile_id)?.displayName || null : null,
       suggestedScore: row.suggested_profile_score ?? null,
+      profileMatchScore: row.profile_match_score ?? null,
     };
   }
 
@@ -1197,9 +1302,22 @@ export class MeetingStorage {
       UPDATE speakers
       SET display_name = ?, manually_named = 1, auto_matched = 0,
           profile_id = CASE WHEN display_name = ? THEN profile_id ELSE NULL END,
-          suggested_profile_id = NULL, suggested_profile_score = NULL
+          suggested_profile_id = NULL, suggested_profile_score = NULL, profile_match_score = NULL
       WHERE id = ?
     `).run(clean, clean, id);
+    this.recordSpeakerFeedback({
+      meetingId: existing.meetingId,
+      fromSpeakerId: existing.id,
+      toSpeakerId: existing.id,
+      kind: existing.autoMatched ? "auto-name-corrected" : "speaker-named",
+    });
+    if (existing.autoMatched && existing.profileId && clean !== existing.displayName) {
+      this.db.prepare("UPDATE speaker_profiles SET rejection_count = rejection_count + 1, updated_at = ? WHERE id = ?")
+        .run(new Date().toISOString(), existing.profileId);
+    } else if (existing.suggestedProfileId && clean === existing.suggestedName) {
+      this.db.prepare("UPDATE speaker_profiles SET confirmation_count = confirmation_count + 1, updated_at = ? WHERE id = ?")
+        .run(new Date().toISOString(), existing.suggestedProfileId);
+    }
     this.learnSpeakerProfile(id);
     return this.getSpeaker(id);
   }
@@ -1220,6 +1338,8 @@ export class MeetingStorage {
       displayName: row.display_name,
       centroid: JSON.parse(row.centroid_json),
       sampleCount: row.sample_count,
+      confirmationCount: row.confirmation_count || 0,
+      rejectionCount: row.rejection_count || 0,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -1267,14 +1387,14 @@ export class MeetingStorage {
     return this.getSpeaker(speakerId);
   }
 
-  applySpeakerProfile(speakerId, profile) {
+  applySpeakerProfile(speakerId, profile, score = null) {
     if (!profile) return this.getSpeaker(speakerId);
     this.db.prepare(`
       UPDATE speakers
       SET display_name = ?, profile_id = ?, auto_matched = 1,
-          suggested_profile_id = NULL, suggested_profile_score = NULL
+          suggested_profile_id = NULL, suggested_profile_score = NULL, profile_match_score = ?
       WHERE id = ? AND manually_named = 0
-    `).run(profile.displayName, profile.id, speakerId);
+    `).run(profile.displayName, profile.id, Number.isFinite(score) ? score : null, speakerId);
     return this.getSpeaker(speakerId);
   }
 
@@ -1283,7 +1403,7 @@ export class MeetingStorage {
       UPDATE speakers
       SET profile_id = NULL, auto_matched = 0,
           display_name = CASE WHEN manually_named = 0 THEN label ELSE display_name END,
-          suggested_profile_id = NULL, suggested_profile_score = NULL
+          suggested_profile_id = NULL, suggested_profile_score = NULL, profile_match_score = NULL
       WHERE id = ?
     `).run(speakerId);
     return this.getSpeaker(speakerId);
@@ -1332,6 +1452,161 @@ export class MeetingStorage {
     }
   }
 
+  recordSpeakerFeedback({ meetingId, segmentId = null, fromSpeakerId = null, toSpeakerId = null, kind }) {
+    if (!meetingId || !kind) return null;
+    const id = randomUUID();
+    this.db.prepare(`
+      INSERT INTO speaker_feedback
+      (id, meeting_id, segment_id, from_speaker_id, to_speaker_id, kind, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(id, meetingId, segmentId, fromSpeakerId, toSpeakerId, kind, new Date().toISOString());
+    return id;
+  }
+
+  getQualityReview(meetingId) {
+    const row = this.db.prepare("SELECT * FROM meeting_quality_reviews WHERE meeting_id = ?").get(meetingId);
+    if (!row) return null;
+    return {
+      meetingId: row.meeting_id,
+      scenarioTags: JSON.parse(row.scenario_tags_json || "[]"),
+      transcriptionRating: row.transcription_rating,
+      punctuationRating: row.punctuation_rating,
+      speakerRating: row.speaker_rating,
+      summaryRating: row.summary_rating,
+      notes: row.notes || "",
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  saveQualityReview(meetingId, value) {
+    if (!this.getMeeting(meetingId)) throw new Error("会议不存在");
+    const review = normalizeQualityReview(value);
+    const current = this.getQualityReview(meetingId);
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO meeting_quality_reviews
+      (meeting_id, scenario_tags_json, transcription_rating, punctuation_rating, speaker_rating,
+       summary_rating, notes, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(meeting_id) DO UPDATE SET
+        scenario_tags_json = excluded.scenario_tags_json,
+        transcription_rating = excluded.transcription_rating,
+        punctuation_rating = excluded.punctuation_rating,
+        speaker_rating = excluded.speaker_rating,
+        summary_rating = excluded.summary_rating,
+        notes = excluded.notes,
+        updated_at = excluded.updated_at
+    `).run(
+      meetingId,
+      JSON.stringify(review.scenarioTags),
+      review.transcriptionRating,
+      review.punctuationRating,
+      review.speakerRating,
+      review.summaryRating,
+      review.notes,
+      current?.createdAt || now,
+      now,
+    );
+    return this.getQualityReview(meetingId);
+  }
+
+  getQualityReport() {
+    const meetings = this.listMeetings()
+      .map((item) => this.getMeeting(item.id))
+      .filter((item) => ["completed", "failed"].includes(item.status));
+    const correctionRows = this.db.prepare(`
+      SELECT meeting_id, COUNT(*) AS count FROM speaker_feedback GROUP BY meeting_id
+    `).all();
+    const corrections = new Map(correctionRows.map((row) => [row.meeting_id, Number(row.count) || 0]));
+    return aggregateQualityReport(meetings.map((meeting) => buildMeetingQualitySnapshot(
+      meeting,
+      this.getQualityReview(meeting.id),
+      corrections.get(meeting.id) || 0,
+    )));
+  }
+
+  listKnowledgeSources(options = {}) {
+    const meetingId = options.meetingId ? String(options.meetingId) : null;
+    const limit = Math.min(2000, Math.max(50, Number(options.limit) || 1000));
+    const meetingClause = meetingId ? " AND meetings.id = ?" : "";
+    const values = meetingId ? [meetingId] : [];
+    const memories = this.db.prepare(`
+      SELECT meeting_memories.id, meeting_memories.meeting_id, meeting_memories.kind,
+        meeting_memories.content, meetings.title, meetings.started_at
+      FROM meeting_memories JOIN meetings ON meetings.id = meeting_memories.meeting_id
+      WHERE meetings.deleted_at IS NULL AND meeting_memories.status = 'confirmed'
+        AND meeting_memories.merged_into_id IS NULL${meetingClause}
+      ORDER BY meeting_memories.updated_at DESC LIMIT ?
+    `).all(...values, limit).map((row) => ({
+      id: `memory:${row.id}`,
+      sourceType: "memory",
+      kind: row.kind,
+      meetingId: row.meeting_id,
+      meetingTitle: row.title,
+      startedAt: row.started_at,
+      seq: null,
+      startMs: null,
+      text: row.content,
+    }));
+    const segments = this.db.prepare(`
+      SELECT segments.id, segments.meeting_id, segments.seq, segments.start_ms,
+        COALESCE(NULLIF(segments.edited_text, ''), segments.text) AS content,
+        meetings.title, meetings.started_at
+      FROM segments JOIN meetings ON meetings.id = segments.meeting_id
+      WHERE meetings.deleted_at IS NULL${meetingClause}
+      ORDER BY meetings.started_at DESC, segments.seq DESC LIMIT ?
+    `).all(...values, limit).map((row) => ({
+      id: `segment:${row.id}`,
+      sourceType: "transcript",
+      kind: "transcript",
+      meetingId: row.meeting_id,
+      meetingTitle: row.title,
+      startedAt: row.started_at,
+      seq: row.seq,
+      startMs: row.start_ms,
+      text: row.content,
+    }));
+    const attachments = this.db.prepare(`
+      SELECT meeting_attachments.id, meeting_attachments.meeting_id, meeting_attachments.original_name,
+        meeting_attachments.extracted_text, meetings.title, meetings.started_at
+      FROM meeting_attachments JOIN meetings ON meetings.id = meeting_attachments.meeting_id
+      WHERE meetings.deleted_at IS NULL AND meeting_attachments.extracted_text IS NOT NULL${meetingClause}
+      ORDER BY meeting_attachments.created_at DESC LIMIT ?
+    `).all(...values, Math.min(300, limit)).map((row) => ({
+      id: `attachment:${row.id}`,
+      sourceType: "attachment",
+      kind: "attachment",
+      meetingId: row.meeting_id,
+      meetingTitle: row.title,
+      startedAt: row.started_at,
+      seq: null,
+      startMs: null,
+      text: `${row.original_name}：${String(row.extracted_text).slice(0, 5000)}`,
+    }));
+    return [...memories, ...segments, ...attachments];
+  }
+
+  getDiagnostics() {
+    const integrity = this.db.prepare("PRAGMA quick_check").all().map((row) => Object.values(row)[0]);
+    const failedJobs = this.db.prepare(`
+      SELECT jobs.kind, jobs.error, jobs.updated_at, meetings.title
+      FROM jobs JOIN meetings ON meetings.id = jobs.meeting_id
+      WHERE jobs.status = 'failed' ORDER BY jobs.updated_at DESC LIMIT 8
+    `).all().map((row) => ({ kind: row.kind, error: row.error, updatedAt: row.updated_at, meetingTitle: row.title }));
+    return {
+      checkedAt: new Date().toISOString(),
+      databaseIntegrity: integrity.every((item) => item === "ok") ? "ok" : "warning",
+      databaseMessages: integrity,
+      schemaVersion: Number(this.db.prepare("PRAGMA user_version").get()?.user_version || 0),
+      meetingCount: Number(this.db.prepare("SELECT COUNT(*) AS count FROM meetings WHERE deleted_at IS NULL").get()?.count || 0),
+      deletedMeetingCount: Number(this.db.prepare("SELECT COUNT(*) AS count FROM meetings WHERE deleted_at IS NOT NULL").get()?.count || 0),
+      speakerProfileCount: Number(this.db.prepare("SELECT COUNT(*) AS count FROM speaker_profiles").get()?.count || 0),
+      confirmedMemoryCount: Number(this.db.prepare("SELECT COUNT(*) AS count FROM meeting_memories WHERE status = 'confirmed'").get()?.count || 0),
+      failedJobs,
+    };
+  }
+
   bootstrapSpeakerProfiles() {
     const rows = this.db.prepare(`
       SELECT id FROM speakers
@@ -1360,18 +1635,32 @@ export class MeetingStorage {
       const now = new Date().toISOString();
       if (existing) {
         if (incoming.id) this.profileImportAliases.set(incoming.id, existing.id);
+        this.db.prepare(`
+          UPDATE speaker_profiles SET
+            confirmation_count = MAX(confirmation_count, ?),
+            rejection_count = MAX(rejection_count, ?),
+            updated_at = ?
+          WHERE id = ?
+        `).run(
+          Math.max(0, Number(incoming.confirmationCount) || 0),
+          Math.max(0, Number(incoming.rejectionCount) || 0),
+          now,
+          existing.id,
+        );
       } else {
         const requestedId = String(incoming.id || "");
         const id = requestedId && !this.getSpeakerProfile(requestedId) ? requestedId : randomUUID();
         this.db.prepare(`
           INSERT INTO speaker_profiles
-          (id, display_name, centroid_json, sample_count, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?)
+          (id, display_name, centroid_json, sample_count, confirmation_count, rejection_count, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           id,
           displayName,
           JSON.stringify(vector),
           Math.max(1, Number(incoming.sampleCount) || 1),
+          Math.max(0, Number(incoming.confirmationCount) || 0),
+          Math.max(0, Number(incoming.rejectionCount) || 0),
           incoming.createdAt || now,
           incoming.updatedAt || now,
         );
@@ -1442,7 +1731,17 @@ export class MeetingStorage {
       transcriptEdits,
       attachments: this.listAttachments(meetingId),
       audioClips: this.listAudioClips(meetingId),
-      memories: this.listMemories({ meetingId, limit: 500, includeDeleted: true }),
+      memories: this.listMemories({ meetingId, limit: 500, includeDeleted: true, includeMerged: true, includeDismissed: true }),
+      qualityReview: this.getQualityReview(meetingId),
+      speakerFeedback: this.db.prepare("SELECT * FROM speaker_feedback WHERE meeting_id = ? ORDER BY created_at")
+        .all(meetingId).map((row) => ({
+          id: row.id,
+          segmentId: row.segment_id,
+          fromSpeakerId: row.from_speaker_id,
+          toSpeakerId: row.to_speaker_id,
+          kind: row.kind,
+          createdAt: row.created_at,
+        })),
       transcriptVersions: this.listTranscriptVersions(meetingId, true),
     };
   }
@@ -1493,8 +1792,8 @@ export class MeetingStorage {
         this.db.prepare(`
           INSERT INTO speakers
           (id, meeting_id, label, display_name, color, centroid_json, sample_count, manually_named, profile_id,
-           auto_matched, suggested_profile_id, suggested_profile_score)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           auto_matched, suggested_profile_id, suggested_profile_score, profile_match_score)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           speaker.id || randomUUID(),
           meetingId,
@@ -1508,6 +1807,7 @@ export class MeetingStorage {
           speaker.autoMatched && profileId ? 1 : 0,
           suggestedProfileId && this.getSpeakerProfile(suggestedProfileId) ? suggestedProfileId : null,
           suggestedProfileId ? speaker.suggestedScore ?? null : null,
+          speaker.profileMatchScore ?? null,
         );
       }
       for (const segment of snapshot.segments || []) {
@@ -1583,8 +1883,8 @@ export class MeetingStorage {
         if (!kind || !String(memory.content || "").trim()) continue;
         this.db.prepare(`
           INSERT OR IGNORE INTO meeting_memories
-          (id, meeting_id, source_key, kind, content, status, confidence, evidence_seqs_json, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (id, meeting_id, source_key, kind, content, status, confidence, evidence_seqs_json, merged_into_id, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           memory.id || randomUUID(),
           meetingId,
@@ -1594,8 +1894,43 @@ export class MeetingStorage {
           status,
           ["high", "medium", "low"].includes(memory.confidence) ? memory.confidence : "medium",
           JSON.stringify(Array.isArray(memory.evidenceSeqs) ? memory.evidenceSeqs : []),
+          memory.mergedIntoId || null,
           memory.createdAt || now,
           memory.updatedAt || memory.createdAt || now,
+        );
+      }
+      if (snapshot.qualityReview) {
+        const review = normalizeQualityReview(snapshot.qualityReview);
+        this.db.prepare(`
+          INSERT INTO meeting_quality_reviews
+          (meeting_id, scenario_tags_json, transcription_rating, punctuation_rating, speaker_rating,
+           summary_rating, notes, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          meetingId,
+          JSON.stringify(review.scenarioTags),
+          review.transcriptionRating,
+          review.punctuationRating,
+          review.speakerRating,
+          review.summaryRating,
+          review.notes,
+          snapshot.qualityReview.createdAt || now,
+          snapshot.qualityReview.updatedAt || now,
+        );
+      }
+      for (const feedback of snapshot.speakerFeedback || []) {
+        this.db.prepare(`
+          INSERT OR IGNORE INTO speaker_feedback
+          (id, meeting_id, segment_id, from_speaker_id, to_speaker_id, kind, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          feedback.id || randomUUID(),
+          meetingId,
+          feedback.segmentId || null,
+          feedback.fromSpeakerId || null,
+          feedback.toSpeakerId || null,
+          String(feedback.kind || "restored-feedback").slice(0, 80),
+          feedback.createdAt || now,
         );
       }
       this.db.exec("COMMIT");

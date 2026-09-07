@@ -1,6 +1,6 @@
 {
   "name": "shiyin-minimax-meeting-notes",
-  "version": "0.6.12",
+  "version": "0.7.0",
   "description": "本地实时转写、声纹识别、可追溯会议记忆与 MiniMax 纪要一体化桌面应用",
   "author": "LightningFlashEvE",
   "license": "UNLICENSED",
@@ -22,6 +22,7 @@
     "start": "vinext start",
     "test": "npm run build && node --test tests/rendered-html.test.mjs tests/local-persistence.test.mjs",
     "test:native-models": "node scripts/native-model-smoke.mjs",
+    "release:signing-check": "node scripts/signing-readiness.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern release --ignore-pattern .next",
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate"

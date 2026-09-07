@@ -113,6 +113,8 @@ const managedServices = [];
 let applicationUpdater = null;
 let updateStartupTimer = null;
 let updateIntervalTimer = null;
+let automaticSnapshotTimer = null;
+let automaticSnapshotInterval = null;
 let applicationUpdateState = {
   status: app.isPackaged ? "idle" : "unavailable",
   currentVersion: applicationVersion,
@@ -448,7 +450,7 @@ function updaterSupported() {
 }
 
 function publicApplicationUpdateState() {
-  const busy = ["checking", "downloading"].includes(applicationUpdateState.status);
+  const busy = ["checking", "downloading", "backing-up"].includes(applicationUpdateState.status);
   return {
     ...applicationUpdateState,
     supported: updaterSupported(),
@@ -456,6 +458,38 @@ function publicApplicationUpdateState() {
     canDownload: applicationUpdateState.status === "available",
     canInstall: applicationUpdateState.status === "downloaded" && !recordingActive,
   };
+}
+
+async function createAutomaticDatabaseSnapshot(options = {}) {
+  if (!app.isPackaged || recordingActive) return null;
+  const settings = readDesktopSettings();
+  const lastCreatedAt = new Date(settings.lastAutomaticSnapshotAt || 0).getTime();
+  if (!options.force && Number.isFinite(lastCreatedAt) && Date.now() - lastCreatedAt < 24 * 60 * 60 * 1000) {
+    return null;
+  }
+  const destinationRoot = path.join(runtimeRoot, "automatic-backups");
+  fs.mkdirSync(destinationRoot, { recursive: true });
+  const snapshot = await postBackend("/api/backups/snapshot", { destinationRoot });
+  writeDesktopSettings({
+    ...readDesktopSettings(),
+    lastAutomaticSnapshotAt: snapshot.createdAt,
+    lastAutomaticSnapshotPath: snapshot.path,
+  });
+  return snapshot;
+}
+
+async function createPreUpdateBackup() {
+  const destinationRoot = path.join(runtimeRoot, "update-backups");
+  fs.mkdirSync(destinationRoot, { recursive: true });
+  const backup = await postBackend("/api/backups/create", { destinationRoot });
+  await createAutomaticDatabaseSnapshot({ force: true });
+  writeDesktopSettings({
+    ...readDesktopSettings(),
+    lastPreUpdateBackupAt: backup.createdAt,
+    lastPreUpdateBackupPath: backup.path,
+    lastPreUpdateFromVersion: applicationVersion,
+  });
+  return backup;
 }
 
 function broadcastApplicationUpdateState(next = {}) {
@@ -1015,11 +1049,22 @@ ipcMain.handle("application-update:download", async () => {
   }
   return publicApplicationUpdateState();
 });
-ipcMain.handle("application-update:install", () => {
+ipcMain.handle("application-update:install", async () => {
   if (!applicationUpdater || applicationUpdateState.status !== "downloaded") {
     return publicApplicationUpdateState();
   }
   if (recordingActive) throw new Error("请先结束当前听记，再安装更新");
+  broadcastApplicationUpdateState({ status: "backing-up", message: "正在创建升级前安全备份…" });
+  try {
+    await createPreUpdateBackup();
+  } catch (error) {
+    console.error("Pre-update backup failed", error);
+    broadcastApplicationUpdateState({
+      status: "downloaded",
+      message: `升级前备份失败：${error?.message || "请稍后重试"}`,
+    });
+    return publicApplicationUpdateState();
+  }
   quitting = true;
   setImmediate(() => applicationUpdater.quitAndInstall(false, true));
   return publicApplicationUpdateState();
@@ -1042,6 +1087,18 @@ app.whenReady().then(async () => {
     if (!mainWindow) createWindow();
     registerGlobalShortcuts();
     await initializeApplicationUpdater();
+    automaticSnapshotTimer = setTimeout(() => {
+      createAutomaticDatabaseSnapshot().catch((error) => {
+        console.error("Automatic database snapshot failed", error);
+      });
+    }, 20000);
+    automaticSnapshotTimer.unref?.();
+    automaticSnapshotInterval = setInterval(() => {
+      createAutomaticDatabaseSnapshot().catch((error) => {
+        console.error("Scheduled database snapshot failed", error);
+      });
+    }, 6 * 60 * 60 * 1000);
+    automaticSnapshotInterval.unref?.();
   } catch (error) {
     dialog.showErrorBox("拾音 AI 无法启动", error.message);
     quitting = true;
@@ -1055,6 +1112,8 @@ app.on("before-quit", () => {
   quitting = true;
   if (updateStartupTimer) clearTimeout(updateStartupTimer);
   if (updateIntervalTimer) clearInterval(updateIntervalTimer);
+  if (automaticSnapshotTimer) clearTimeout(automaticSnapshotTimer);
+  if (automaticSnapshotInterval) clearInterval(automaticSnapshotInterval);
   globalShortcut.unregisterAll();
   if (powerBlockerId !== null && powerSaveBlocker.isStarted(powerBlockerId)) {
     powerSaveBlocker.stop(powerBlockerId);

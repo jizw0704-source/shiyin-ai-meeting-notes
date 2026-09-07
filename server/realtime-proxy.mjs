@@ -11,8 +11,10 @@ import { importedMeetingTitle, normalizeImportedAudio, validateImportedMedia } f
 import { AudioSession } from "./audio-session.mjs";
 import { createEditedWav } from "./audio-editing.mjs";
 import { correctMeetingSpeakers } from "./correction.mjs";
+import { createDatabaseSnapshot } from "./database-snapshot.mjs";
 import { transcribeHistoricalWav } from "./historical-transcription.mjs";
 import { LocalAsrEngine } from "./local-asr-engine.mjs";
+import { answerMeetingKnowledge } from "./meeting-knowledge.mjs";
 import { buildMeetingPreflight, inspectMeetingStorage } from "./meeting-preflight.mjs";
 import { enhanceOverlappingSegments, OverlapSeparationEngine } from "./overlap-enhancement.mjs";
 import { SpeakerEngine } from "./speaker-engine.mjs";
@@ -569,6 +571,18 @@ const httpServer = createServer(async (request, response) => {
         stats: storage.getMemoryStats(),
       });
     }
+    if (request.method === "GET" && url.pathname === "/api/memories/insights") {
+      return jsonResponse(response, 200, storage.getMemoryInsights());
+    }
+    if (request.method === "POST" && url.pathname === "/api/memories/merge") {
+      const body = await readJson(request);
+      const memory = storage.mergeMemories(String(body.primaryId || ""), Array.isArray(body.duplicateIds) ? body.duplicateIds : []);
+      return jsonResponse(response, 200, { memory, insights: storage.getMemoryInsights() });
+    }
+    const memoryUnmergeMatch = url.pathname.match(/^\/api\/memories\/([^/]+)\/unmerge$/);
+    if (request.method === "POST" && memoryUnmergeMatch) {
+      return jsonResponse(response, 200, storage.unmergeMemory(memoryUnmergeMatch[1]));
+    }
     const memoryMatch = url.pathname.match(/^\/api\/memories\/([^/]+)$/);
     if (request.method === "PATCH" && memoryMatch) {
       const body = await readJson(request);
@@ -578,6 +592,38 @@ const httpServer = createServer(async (request, response) => {
     if (request.method === "DELETE" && memoryMatch) {
       const memory = storage.dismissMemory(memoryMatch[1]);
       return jsonResponse(response, memory ? 200 : 404, memory ? { ok: true } : { error: "会议记忆不存在" });
+    }
+    if (request.method === "GET" && url.pathname === "/api/quality-report") {
+      return jsonResponse(response, 200, storage.getQualityReport());
+    }
+    const qualityReviewMatch = url.pathname.match(/^\/api\/meetings\/([^/]+)\/quality-review$/);
+    if (request.method === "PATCH" && qualityReviewMatch) {
+      const review = storage.saveQualityReview(qualityReviewMatch[1], await readJson(request));
+      return jsonResponse(response, 200, { review, report: storage.getQualityReport() });
+    }
+    if (request.method === "POST" && url.pathname === "/api/knowledge/ask") {
+      const body = await readJson(request);
+      const result = await answerMeetingKnowledge({
+        storage,
+        question: body.question,
+        apiKey: miniMaxApiKey,
+        model: miniMaxModel,
+        meetingId: body.meetingId || null,
+      });
+      return jsonResponse(response, 200, result);
+    }
+    if (request.method === "GET" && url.pathname === "/api/diagnostics") {
+      return jsonResponse(response, 200, {
+        ...storage.getDiagnostics(),
+        appVersion,
+        asrMode,
+        localAsrAvailable: localAsrEngine.available,
+        punctuationModelAvailable: localAsrEngine.punctuationAvailable,
+        speakerModelAvailable: speakerEngine.available,
+        overlapSeparationModelAvailable: overlapSeparationEngine.available,
+        miniMaxConfigured: Boolean(miniMaxApiKey),
+        workspaceBusy: workspaceIsBusy(),
+      });
     }
     if (request.method === "GET" && url.pathname === "/api/meetings/trash") {
       return jsonResponse(response, 200, { meetings: storage.listDeletedMeetings() });
@@ -618,6 +664,19 @@ const httpServer = createServer(async (request, response) => {
       if (workspaceIsBusy()) return jsonResponse(response, 409, { error: "有会议正在录音或处理，请完成后再备份" });
       const body = await readJson(request);
       return jsonResponse(response, 200, await createWorkspaceBackup({
+        storage,
+        dataRoot,
+        destinationRoot: body.destinationRoot,
+        appVersion,
+      }));
+    }
+    if (request.method === "POST" && url.pathname === "/api/backups/snapshot") {
+      if (!desktopControlToken || request.headers["x-shiyin-control-token"] !== desktopControlToken) {
+        return jsonResponse(response, 403, { error: "桌面快照授权失败" });
+      }
+      if (workspaceIsBusy()) return jsonResponse(response, 409, { error: "有会议正在录音或处理，请稍后创建快照" });
+      const body = await readJson(request);
+      return jsonResponse(response, 200, await createDatabaseSnapshot({
         storage,
         dataRoot,
         destinationRoot: body.destinationRoot,

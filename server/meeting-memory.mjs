@@ -113,3 +113,64 @@ export function normalizeMeetingMemoryPatch(patch = {}) {
   }
   return result;
 }
+
+function memoryTokens(value) {
+  const normalized = cleanText(value, 280).toLocaleLowerCase("zh-CN").replace(/[\s，。；：、,.!?！？（）()\-]/g, "");
+  if (!normalized) return new Set();
+  const result = new Set([normalized]);
+  for (let index = 0; index < normalized.length - 1; index += 1) result.add(normalized.slice(index, index + 2));
+  return result;
+}
+
+function similarity(left, right) {
+  const a = memoryTokens(left);
+  const b = memoryTokens(right);
+  if (!a.size || !b.size) return 0;
+  let common = 0;
+  for (const token of a) if (b.has(token)) common += 1;
+  return common / (a.size + b.size - common);
+}
+
+const oppositeSignals = [
+  ["继续", "停止"], ["保留", "取消"], ["赞成", "反对"], ["同意", "不同意"],
+  ["可以", "不可以"], ["采用", "不采用"], ["提前", "延期"], ["增加", "减少"],
+  ["线上", "线下"],
+];
+
+function containsSignal(value, signal, counterpart) {
+  if (!value.includes(signal)) return false;
+  return signal.length >= counterpart.length || !value.includes(counterpart);
+}
+
+function possiblyConflicting(left, right, score) {
+  if (score < 0.22 || score > 0.72) return false;
+  return oppositeSignals.some(([positive, negative]) =>
+    (containsSignal(left, positive, negative) && left.includes(negative) === false && right.includes(negative))
+      || (left.includes(negative) && containsSignal(right, positive, negative) && right.includes(negative) === false));
+}
+
+export function buildMeetingMemoryInsights(memories = []) {
+  const active = memories.filter((item) => item.status !== "dismissed" && !item.mergedIntoId);
+  const duplicates = [];
+  const conflicts = [];
+  for (let leftIndex = 0; leftIndex < active.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < active.length; rightIndex += 1) {
+      const left = active[leftIndex];
+      const right = active[rightIndex];
+      if (left.kind !== right.kind || left.meetingId === right.meetingId) continue;
+      const score = similarity(left.content, right.content);
+      if (["decision", "need", "project"].includes(left.kind)
+        && possiblyConflicting(left.content, right.content, score)) {
+        conflicts.push({ left, right, similarity: Number(score.toFixed(2)) });
+      } else if (score >= 0.48) {
+        duplicates.push({ primary: left, duplicate: right, similarity: Number(score.toFixed(2)) });
+      }
+    }
+  }
+  return {
+    duplicateCount: duplicates.length,
+    conflictCount: conflicts.length,
+    duplicates: duplicates.sort((a, b) => b.similarity - a.similarity).slice(0, 20),
+    conflicts: conflicts.sort((a, b) => b.similarity - a.similarity).slice(0, 20),
+  };
+}
