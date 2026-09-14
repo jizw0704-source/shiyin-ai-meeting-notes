@@ -45,10 +45,8 @@ jobs:
       PUNCTUATION_ARCHIVE_SHA256: c0d5aa5f8eeb686032345e180bedf39319dc2e0556781c6264bcadba8328a6e1
       PUNCTUATION_MODEL_SHA256: 65a3fb9f5ad7bfb96bf69e0dc4481df97f6ee60513c1d94ce981ba6effd524b1
       CSC_IDENTITY_AUTO_DISCOVERY: ${{ secrets.WINDOWS_CSC_LINK != '' }}
-      CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
-      CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
-      FFMPEG_WINDOWS_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-01-13-13/ffmpeg-n8.1.2-50-g1a748fe2cd-win64-lgpl-8.1.zip
-      FFMPEG_WINDOWS_SHA256: 14fea72ee692a5f832b8d7b0c7f1c050af124f72cf43d6a948faf98ff3c0072d
+      FFMPEG_WINDOWS_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-13-14-50/ffmpeg-n8.1.2-52-g5a03dfa0f6-win64-lgpl-8.1.zip
+      FFMPEG_WINDOWS_SHA256: afce0579ca710a5fc2037977f8b5c5fbafd43365833a6da83e8b34c3f8ecb103
 
     steps:
       - name: Check out source
@@ -143,6 +141,19 @@ jobs:
 
       - name: Verify Windows native models
         run: npm run test:native-models
+
+      - name: Configure optional Windows code signing
+        shell: pwsh
+        env:
+          WINDOWS_CSC_LINK_VALUE: ${{ secrets.WINDOWS_CSC_LINK }}
+          WINDOWS_CSC_KEY_PASSWORD_VALUE: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+        run: |
+          if ($env:WINDOWS_CSC_LINK_VALUE) {
+            "CSC_LINK=$env:WINDOWS_CSC_LINK_VALUE" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
+          if ($env:WINDOWS_CSC_KEY_PASSWORD_VALUE) {
+            "CSC_KEY_PASSWORD=$env:WINDOWS_CSC_KEY_PASSWORD_VALUE" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
 
       - name: Report Windows signing readiness
         run: node scripts/signing-readiness.mjs --platform=win

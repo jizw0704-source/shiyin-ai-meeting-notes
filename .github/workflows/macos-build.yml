@@ -51,11 +51,6 @@ jobs:
       PUNCTUATION_ARCHIVE_SHA256: c0d5aa5f8eeb686032345e180bedf39319dc2e0556781c6264bcadba8328a6e1
       PUNCTUATION_MODEL_SHA256: 65a3fb9f5ad7bfb96bf69e0dc4481df97f6ee60513c1d94ce981ba6effd524b1
       CSC_IDENTITY_AUTO_DISCOVERY: ${{ secrets.MAC_CSC_LINK != '' }}
-      CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
-      CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       FFMPEG_VERSION: 8.1.2
       FFMPEG_SOURCE_SHA256: 464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c
 
@@ -129,6 +124,20 @@ jobs:
 
       - name: Verify macOS native models
         run: npm run test:native-models
+
+      - name: Configure optional macOS signing and notarization
+        env:
+          MAC_CSC_LINK_VALUE: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD_VALUE: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID_VALUE: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD_VALUE: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID_VALUE: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [[ -n "$MAC_CSC_LINK_VALUE" ]]; then printf 'CSC_LINK=%s\n' "$MAC_CSC_LINK_VALUE" >> "$GITHUB_ENV"; fi
+          if [[ -n "$MAC_CSC_KEY_PASSWORD_VALUE" ]]; then printf 'CSC_KEY_PASSWORD=%s\n' "$MAC_CSC_KEY_PASSWORD_VALUE" >> "$GITHUB_ENV"; fi
+          if [[ -n "$APPLE_ID_VALUE" ]]; then printf 'APPLE_ID=%s\n' "$APPLE_ID_VALUE" >> "$GITHUB_ENV"; fi
+          if [[ -n "$APPLE_APP_SPECIFIC_PASSWORD_VALUE" ]]; then printf 'APPLE_APP_SPECIFIC_PASSWORD=%s\n' "$APPLE_APP_SPECIFIC_PASSWORD_VALUE" >> "$GITHUB_ENV"; fi
+          if [[ -n "$APPLE_TEAM_ID_VALUE" ]]; then printf 'APPLE_TEAM_ID=%s\n' "$APPLE_TEAM_ID_VALUE" >> "$GITHUB_ENV"; fi
 
       - name: Report macOS signing readiness
         run: node scripts/signing-readiness.mjs --platform=mac

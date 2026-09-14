@@ -10,7 +10,7 @@
 
 本地转写不消耗云端语音时长。原始录音、逐字稿、发言人声纹、历史版本和会议列表默认保存在自己的电脑上；只有主动生成 AI 总结时，会议文本才会发送给 MiniMax。
 
-> 当前开发基线：`0.7.0`<br>
+> 当前开发基线：`0.7.1`<br>
 > 使用阶段：个人使用与团队内部测试<br>
 > 支持平台：Apple Silicon macOS、Windows x64<br>
 > 授权状态：`UNLICENSED`，不是开源许可证；公开分发或商业使用前请先确认授权条件
@@ -18,13 +18,13 @@
 [![macOS build](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/macos-build.yml/badge.svg)](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/macos-build.yml)
 [![Windows build](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/windows-build.yml/badge.svg)](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/windows-build.yml)
 
-## 0.7.0 版本亮点
+## 0.7.1 版本亮点
 
-- **真实会议质量报告**：自动统计标点、发言人覆盖、低置信度与引用覆盖等可观察风险，并允许按双人、多人、重叠发言等场景保存人工评分；自动指标不会冒充真实准确率。
-- **可信会议记忆**：跨会议提示重复与潜在冲突，用户确认后才合并；合并项继续保留原会议与逐字稿来源。
-- **跨会议知识问答**：从确认记忆、逐字稿和会议资料中检索答案，每条引用都可直接返回对应会议；未配置 MiniMax 时也能使用本机证据检索。
-- **声纹反馈闭环**：展示自动姓名匹配置信度，记录人工确认和改名反馈，为后续声纹校准保留依据。
-- **数据与发布保护**：增加数据库诊断、每日滚动快照和更新前完整备份，并为 macOS 签名公证、Windows 代码签名预留安全接入与就绪检查。
+- **信息板式会议简报**：采用白色报告纸、编号分区和低饱和信息卡，让未参会者快速看懂会议重点。
+- **要点化阅读与编辑**：较长总结自动拆分为会议要点，用户仍可双击修改主题、内容、行动项和核心共识。
+- **所见即所得图片导出**：屏幕简报与完整 PNG 使用统一视觉语言，图片高度会随内容自动调整，避免信息截断。
+- **跨主题清晰显示**：深色工作区中的简报固定为高对比白色纸面，窄窗口自动改为单栏布局。
+- **双平台发布修复**：避免空签名变量阻断未签名构建，并更新 Windows 音频转换工具的固定下载来源与校验值。
 
 ## 为什么做拾音 AI
 
