@@ -153,7 +153,13 @@ test("supports local transcription and keeps cloud keys behind the realtime prox
   assert.match(styles, /memory-dialog/);
   assert.match(styles, /history-context-menu/);
   assert.match(styles, /meeting-brief-conclusion/);
+  assert.match(styles, /Editorial meeting brief/);
   assert.match(page, /downloadBriefImage/);
+  assert.match(page, /drawRoundedCanvasRect/);
+  assert.match(page, /briefContentPoints/);
+  assert.match(page, /最终会议总结/);
+  assert.match(page, /AI MEETING BRIEF/);
+  assert.match(page, /核心共识/);
   assert.match(page, /导出图片/);
   assert.match(page, /编辑内容/);
   assert.match(styles, /meeting-brief-canvas/);

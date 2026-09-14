@@ -2490,6 +2490,46 @@ html[data-theme="dark"] .workspace-summary-state.ready{color:#91d6ae;background:
 .meeting-start-pending{max-width:560px;margin-top:10px}
 @media(max-width:720px){.meeting-start-page{min-height:460px;padding:44px 24px 52px}.meeting-start-page h2{font-size:34px}.meeting-start-copy>p{margin-top:15px}.meeting-start-button{width:100%;margin-top:28px}.meeting-start-state{width:100%}.meeting-start-secondary{width:100%;justify-content:space-between;gap:2px}.meeting-start-secondary>button{padding-inline:7px;font-size:8px}}
 
+/* Editorial meeting brief: a restrained, export-ready information board. */
+.meeting-brief-workspace{background:#eef1f3}
+.meeting-brief-toolbar{max-width:1040px}
+.meeting-brief-canvas{max-width:1040px;min-height:1180px;padding:58px 62px 72px;color:#20262b;background:#fff;box-shadow:0 22px 60px rgba(39,51,65,.11)}
+.meeting-brief-canvas>header{padding-bottom:28px;border-bottom:3px solid #e5e8eb}
+.meeting-brief-kicker{display:flex;align-items:center;justify-content:space-between;gap:16px;color:#7f8891;font-size:8px;font-weight:680;letter-spacing:.1em}
+.meeting-brief-kicker span{color:#3e4852}.meeting-brief-kicker small{font:650 7px var(--font-number);letter-spacing:.13em}
+.meeting-brief-canvas>header>h2{max-width:34ch;margin:15px 0 0;color:#171d22;font-family:inherit;font-size:30px;font-weight:760;line-height:1.25;letter-spacing:-.035em;text-wrap:balance}
+.meeting-brief-deck{max-width:65ch;margin:9px 0 0;color:#65707a;font-size:10px;line-height:1.65;text-wrap:pretty}
+.meeting-brief-meta{margin-top:14px;color:#7e8891;font-size:8px;font-variant-numeric:tabular-nums}.meeting-brief-meta i{background:#d7dce0}
+.meeting-brief-timeline{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px 16px;padding-top:28px}
+.meeting-brief-timeline>section{--brief-accent:#ad4847;--brief-tint:#fbf1f1;display:grid;grid-template-columns:36px minmax(0,1fr);align-content:start;gap:12px;padding:18px;border:0;border-radius:14px;background:var(--brief-tint)}
+.meeting-brief-timeline>section:nth-of-type(2){--brief-accent:#b88916;--brief-tint:#fbf7e9;padding-left:18px;border-left:0}
+.meeting-brief-timeline>section:nth-of-type(3){--brief-accent:#178e91;--brief-tint:#edf8f7}
+.meeting-brief-timeline>section:nth-of-type(4){--brief-accent:#2d68bc;--brief-tint:#eff4fb}
+.meeting-brief-timeline>section:nth-of-type(5){--brief-accent:#bb517b;--brief-tint:#fbf1f5}
+.meeting-brief-timeline>section:nth-of-type(n+6){--brief-accent:#8a6840;--brief-tint:#f7f3ed}
+.meeting-brief-timeline>section:nth-of-type(n+3){grid-column:auto}
+.meeting-brief-timeline>section>span{width:34px;height:30px;display:grid;place-items:center;border-radius:3px;color:#fff;background:var(--brief-accent);font:680 12px var(--font-number);line-height:1}
+.meeting-brief-timeline>section>div{min-width:0;padding:15px 16px 16px;border:1px solid color-mix(in srgb,var(--brief-accent) 25%,transparent);border-radius:10px;background:rgba(255,255,255,.88)}
+.meeting-brief-timeline>section>div>header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding-bottom:9px;border-bottom:1px solid color-mix(in srgb,var(--brief-accent) 18%,transparent)}
+.meeting-brief-timeline h3{color:#262d32;font-size:12px;font-weight:720;letter-spacing:-.01em}.meeting-brief-timeline>section>div>header small{flex:0 0 auto;color:var(--brief-accent);font-size:7px;font-weight:680}
+.meeting-brief-timeline p,.meeting-brief-timeline li{color:#4b555d;font-size:9px;line-height:1.72;text-wrap:pretty}.meeting-brief-timeline p{margin:11px 0 0;white-space:pre-wrap}.meeting-brief-timeline ul{margin:10px 0 0;padding-left:17px}.meeting-brief-timeline li+li{margin-top:5px}.meeting-brief-timeline li::marker{color:var(--brief-accent)}
+.meeting-brief-timeline section input{border-color:color-mix(in srgb,var(--brief-accent) 28%,#d9dde0);font-size:11px}.meeting-brief-timeline section textarea{min-height:108px;border-color:color-mix(in srgb,var(--brief-accent) 28%,#d9dde0);font-size:9px}
+.brief-add-section{grid-column:1/-1;margin:0;min-height:38px;border-style:dashed;background:#f7f8f8}
+.meeting-brief-actions,.meeting-brief-suggestion,.meeting-brief-conclusion{margin:18px 0 0;padding:18px 20px 20px;border:0;border-radius:14px}
+.meeting-brief-actions{background:#f5f3fb}.meeting-brief-suggestion{background:#eff4fb}.meeting-brief-conclusion{background:#f7f3ed;border-left:0}
+.meeting-brief-actions>header,.meeting-brief-suggestion>header,.meeting-brief-conclusion>header{display:flex;align-items:center;gap:11px;margin:0 0 14px;padding-bottom:9px;border-bottom:1px solid rgba(40,50,60,.1)}
+.meeting-brief-actions>header>span,.meeting-brief-suggestion>header>span,.meeting-brief-conclusion>header>span{width:34px;height:29px;display:grid;place-items:center;border-radius:3px;color:#fff;font:680 11px var(--font-number)}
+.meeting-brief-actions>header>span{background:#7658aa}.meeting-brief-suggestion>header>span{background:#2d68bc}.meeting-brief-conclusion>header>span{background:#8a6840}
+.meeting-brief-actions h3,.meeting-brief-suggestion h3,.meeting-brief-conclusion h3{margin:0;color:#293036;font-size:12px;font-weight:720}
+.meeting-brief-actions>div{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.meeting-brief-actions>div>div:not(.brief-action-edit){display:grid;grid-template-columns:24px minmax(0,1fr);gap:4px 9px;padding:12px 13px;border:1px solid rgba(118,88,170,.18);border-radius:9px;background:rgba(255,255,255,.85)}
+.meeting-brief-actions>div>div:not(.brief-action-edit) span{grid-row:1/3;color:#7658aa}.meeting-brief-actions>div>div:not(.brief-action-edit) p{font-size:9px;line-height:1.55}.meeting-brief-actions>div>div:not(.brief-action-edit) small{grid-column:2;font-size:7px}.brief-add-action{grid-column:1/-1}
+.meeting-brief-suggestion ul{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px 24px;margin:0;padding-left:18px}.meeting-brief-suggestion li{margin:0;color:#4b5661;font-size:9px;line-height:1.65}.meeting-brief-suggestion li::marker{color:#2d68bc}
+.meeting-brief-conclusion p{max-width:none;margin:0;padding:15px 17px;border:1px solid rgba(138,104,64,.2);border-radius:9px;color:#443b31;background:rgba(255,255,255,.82);font-size:11px;font-weight:610;line-height:1.75}.meeting-brief-conclusion textarea{margin-top:0;border-color:rgba(138,104,64,.28)}
+.meeting-brief-edit-hint{right:20px;bottom:16px;color:#a2a8ad}
+@media(hover:hover) and (pointer:fine){.meeting-brief-timeline>section>div{transition:transform .18s ease,box-shadow .18s ease}.meeting-brief-timeline>section>div:hover{transform:translateY(-1px);box-shadow:0 8px 22px rgba(37,49,61,.07)}}
+@media(max-width:900px){.meeting-brief-timeline{grid-template-columns:1fr}.meeting-brief-timeline>section:nth-of-type(n){grid-column:auto}.meeting-brief-actions>div,.meeting-brief-suggestion ul{grid-template-columns:1fr}}
+@media(max-width:720px){.meeting-brief-canvas{min-height:900px;padding:36px 22px 52px}.meeting-brief-canvas>header>h2{font-size:24px}.meeting-brief-timeline{padding-top:20px}.meeting-brief-timeline>section{grid-template-columns:30px minmax(0,1fr);gap:9px;padding:12px}.meeting-brief-timeline>section>span,.meeting-brief-actions>header>span,.meeting-brief-suggestion>header>span,.meeting-brief-conclusion>header>span{width:29px;height:27px;font-size:10px}.meeting-brief-timeline>section>div{padding:13px}.meeting-brief-actions,.meeting-brief-suggestion,.meeting-brief-conclusion{padding:14px}.meeting-brief-suggestion{margin-left:0}.meeting-brief-actions{margin-left:0}}
+
 /* Refined Shiyin waveform: one consistent mark across the app and installers. */
 .brand-mark,.window-chrome-mark{
   position:relative;

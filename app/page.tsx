@@ -728,6 +728,16 @@ function briefDate(iso: string) {
   }).replaceAll("/", ".");
 }
 
+function briefContentPoints(value: string) {
+  const normalized = String(value || "").replace(/\r/g, "").trim();
+  if (!normalized) return ["会议中未明确"];
+  const points = normalized
+    .split(/\n+|[；。]\s*/)
+    .map((item) => item.replace(/^[•·・\-—]\s*/, "").trim())
+    .filter(Boolean);
+  return points.length > 1 ? points.slice(0, 6) : [normalized];
+}
+
 function wrapCanvasText(context: CanvasRenderingContext2D, value: string, maxWidth: number) {
   const lines: string[] = [];
   for (const paragraph of String(value || "").split(/\n+/)) {
@@ -746,104 +756,214 @@ function wrapCanvasText(context: CanvasRenderingContext2D, value: string, maxWid
   return lines.length ? lines : ["会议中未明确"];
 }
 
+function drawRoundedCanvasRect(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number,
+  fill: string,
+  stroke?: string,
+) {
+  const safeRadius = Math.min(radius, width / 2, height / 2);
+  context.beginPath();
+  context.moveTo(x + safeRadius, y);
+  context.arcTo(x + width, y, x + width, y + height, safeRadius);
+  context.arcTo(x + width, y + height, x, y + height, safeRadius);
+  context.arcTo(x, y + height, x, y, safeRadius);
+  context.arcTo(x, y, x + width, y, safeRadius);
+  context.closePath();
+  context.fillStyle = fill;
+  context.fill();
+  if (stroke) {
+    context.strokeStyle = stroke;
+    context.lineWidth = 1;
+    context.stroke();
+  }
+}
+
 function downloadBriefImage(meeting: Meeting, summary: Summary, brief: EditableMeetingBrief) {
   const width = 1240;
-  const margin = 118;
+  const margin = 72;
   const contentWidth = width - margin * 2;
+  const sectionGap = 22;
+  const sectionWidth = (contentWidth - sectionGap) / 2;
+  const actionWidth = (contentWidth - 36 - sectionGap) / 2;
+  const sectionPalettes = [
+    { accent: "#aa4545", tint: "#fbf1f1", border: "#edcccc" },
+    { accent: "#b48713", tint: "#fbf7e9", border: "#ead99f" },
+    { accent: "#178f92", tint: "#edf8f7", border: "#b9dedd" },
+    { accent: "#2d68bc", tint: "#eff4fb", border: "#bed1ec" },
+    { accent: "#b94f79", tint: "#fbf1f5", border: "#ebc4d3" },
+    { accent: "#896740", tint: "#f7f3ed", border: "#dfd0bd" },
+  ];
   const measureCanvas = document.createElement("canvas");
   const measure = measureCanvas.getContext("2d");
   if (!measure) throw new Error("当前设备无法生成简报图片");
-  measure.font = '32px "PingFang SC", "Microsoft YaHei", sans-serif';
-  const sectionLayouts = brief.sections.map((section) => ({
-    ...section,
-    lines: wrapCanvasText(measure, section.content, contentWidth - 150),
-  }));
-  measure.font = '600 34px "PingFang SC", "Microsoft YaHei", sans-serif';
-  const conclusionLines = wrapCanvasText(measure, brief.conclusion, contentWidth - 96);
+  measure.font = '23px "PingFang SC", "Microsoft YaHei", sans-serif';
+  const sectionLayouts = brief.sections.map((section, index) => {
+    const points = briefContentPoints(section.content).slice(0, 5).map((point) => wrapCanvasText(measure, point, sectionWidth - 104));
+    return {
+      ...section,
+      points,
+      palette: sectionPalettes[index % sectionPalettes.length],
+      height: 126 + points.reduce((total, lines) => total + lines.length * 32 + 10, 0),
+    };
+  });
+  measure.font = '600 25px "PingFang SC", "Microsoft YaHei", sans-serif';
+  const conclusionLines = wrapCanvasText(measure, brief.conclusion, contentWidth - 104);
   const actionLayouts = brief.actionItems.slice(0, 8).map((item) => ({
     ...item,
-    lines: wrapCanvasText(measure, item.task, contentWidth - 330),
+    lines: wrapCanvasText(measure, item.task, actionWidth - 82),
   }));
-  const suggestionLines = brief.aiSuggestions.flatMap((item) => wrapCanvasText(measure, item, contentWidth - 70));
-  const bodyHeight = 128 + conclusionLines.length * 48
-    + sectionLayouts.reduce((total, section) => total + 94 + section.lines.length * 43, 0)
-    + (actionLayouts.length ? 130 + actionLayouts.reduce((total, item) => total + Math.max(68, item.lines.length * 38), 0) : 0)
-    + (suggestionLines.length ? 150 + suggestionLines.length * 42 : 0);
-  const height = Math.max(1754, 570 + bodyHeight);
+  measure.font = '23px "PingFang SC", "Microsoft YaHei", sans-serif';
+  const suggestionLayouts = brief.aiSuggestions.slice(0, 6).map((item) => wrapCanvasText(measure, item, contentWidth - 116));
+  const sectionRows = Array.from({ length: Math.ceil(sectionLayouts.length / 2) }, (_, rowIndex) => {
+    const pair = sectionLayouts.slice(rowIndex * 2, rowIndex * 2 + 2);
+    return Math.max(...pair.map((section) => section.height));
+  });
+  const actionRows = Array.from({ length: Math.ceil(actionLayouts.length / 2) }, (_, rowIndex) => {
+    const pair = actionLayouts.slice(rowIndex * 2, rowIndex * 2 + 2);
+    return Math.max(...pair.map((item) => 80 + item.lines.length * 31));
+  });
+  const sectionsHeight = sectionRows.reduce((total, rowHeight) => total + rowHeight + sectionGap, 0);
+  const actionsHeight = actionLayouts.length ? 112 + actionRows.reduce((total, rowHeight) => total + rowHeight + 14, 0) : 0;
+  const suggestionsHeight = suggestionLayouts.length
+    ? 116 + suggestionLayouts.reduce((total, lines) => total + lines.length * 31 + 9, 0)
+    : 0;
+  const conclusionHeight = 126 + conclusionLines.length * 34;
+  const height = Math.max(1754, 380 + sectionsHeight + actionsHeight + suggestionsHeight + conclusionHeight + 160);
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
   const context = canvas.getContext("2d");
   if (!context) throw new Error("当前设备无法生成简报图片");
-  context.fillStyle = "#f9f7f1";
+  context.fillStyle = "#ffffff";
   context.fillRect(0, 0, width, height);
-  context.fillStyle = "#315fae";
-  context.font = '600 24px "PingFang SC", "Microsoft YaHei", sans-serif';
-  context.fillText("会议简报  ·  给未参会的人", margin, 104);
-  context.fillStyle = "#202421";
-  context.font = '600 48px "Songti SC", "STSong", serif';
+  context.fillStyle = "#1d242a";
+  context.font = '700 48px "PingFang SC", "Microsoft YaHei", sans-serif';
   const titleLines = wrapCanvasText(context, brief.subject || meeting.title, contentWidth);
-  titleLines.slice(0, 2).forEach((line, index) => context.fillText(line, margin, 184 + index * 62));
-  let y = 225 + Math.min(2, titleLines.length) * 62;
-  context.fillStyle = "#59605a";
-  context.font = '25px "PingFang SC", "Microsoft YaHei", sans-serif';
+  titleLines.slice(0, 2).forEach((line, index) => context.fillText(line, margin, 94 + index * 58));
+  let y = 120 + Math.min(2, titleLines.length) * 58;
+  const deck = summary.headline && summary.headline !== brief.subject ? summary.headline : "把讨论整理成清晰结论与下一步";
+  context.fillStyle = "#6d757c";
+  context.font = '22px "PingFang SC", "Microsoft YaHei", sans-serif';
+  const deckLines = wrapCanvasText(context, deck, contentWidth).slice(0, 2);
+  deckLines.forEach((line, index) => context.fillText(line, margin, y + index * 32));
+  y += deckLines.length * 32 + 24;
+  context.fillStyle = "#8a9197";
+  context.font = '17px "PingFang SC", "Microsoft YaHei", sans-serif';
   context.fillText(`${briefDate(meeting.startedAt)}  ·  ${formatClock(meeting.durationMs)}  ·  ${brief.participants}`, margin, y);
-  y += 65;
-  context.strokeStyle = "#d2d3cb";
-  context.lineWidth = 1;
-  context.beginPath(); context.moveTo(margin, y); context.lineTo(width - margin, y); context.stroke();
-  y += 76;
-  context.fillStyle = "#eef0f5";
-  const conclusionHeight = 74 + conclusionLines.length * 48;
-  context.fillRect(margin, y - 26, contentWidth, conclusionHeight);
-  context.fillStyle = "#315fae";
-  context.font = '600 21px "PingFang SC", "Microsoft YaHei", sans-serif';
-  context.fillText("核心结论", margin + 42, y + 10);
-  context.fillStyle = "#273149";
-  context.font = '600 34px "PingFang SC", "Microsoft YaHei", sans-serif';
-  conclusionLines.forEach((line, index) => context.fillText(line, margin + 42, y + 58 + index * 48));
-  y += conclusionHeight + 42;
-  sectionLayouts.forEach((section, index) => {
-    context.fillStyle = "#315fae";
-    context.font = '500 37px "Georgia", serif';
-    context.fillText(String(index + 1).padStart(2, "0"), margin, y);
-    context.fillStyle = "#202421";
-    context.font = '600 32px "PingFang SC", "Microsoft YaHei", sans-serif';
-    context.fillText(section.title, margin + 118, y);
-    context.fillStyle = "#3e443f";
-    context.font = '28px "PingFang SC", "Microsoft YaHei", sans-serif';
-    section.lines.forEach((line, lineIndex) => context.fillText(line, margin + 118, y + 54 + lineIndex * 43));
-    y += 92 + section.lines.length * 43;
-    context.strokeStyle = "#dbdcd5";
-    context.beginPath(); context.moveTo(margin + 118, y - 24); context.lineTo(width - margin, y - 24); context.stroke();
-  });
-  if (actionLayouts.length) {
-    context.fillStyle = "#202421";
-    context.font = '600 32px "PingFang SC", "Microsoft YaHei", sans-serif';
-    context.fillText("会后推进", margin + 118, y + 20);
-    y += 70;
-    context.font = '27px "PingFang SC", "Microsoft YaHei", sans-serif';
-    actionLayouts.forEach((item, index) => {
-      context.fillStyle = "#788474";
-      context.fillText(String(index + 1).padStart(2, "0"), margin + 118, y);
-      context.fillStyle = "#303531";
-      item.lines.forEach((line, lineIndex) => context.fillText(line, margin + 182, y + lineIndex * 38));
-      context.fillStyle = "#656b66";
-      context.fillText(`${item.owner}  ${item.due}`, width - margin - 230, y);
-      y += Math.max(68, item.lines.length * 38);
+  y += 36;
+  context.fillStyle = "#e4e7e9";
+  context.fillRect(margin, y, contentWidth, 3);
+  y += 32;
+
+  sectionRows.forEach((rowHeight, rowIndex) => {
+    sectionLayouts.slice(rowIndex * 2, rowIndex * 2 + 2).forEach((section, columnIndex) => {
+      const x = margin + columnIndex * (sectionWidth + sectionGap);
+      drawRoundedCanvasRect(context, x, y, sectionWidth, rowHeight, 16, section.palette.tint);
+      drawRoundedCanvasRect(context, x + 18, y + 18, 48, 36, 3, section.palette.accent);
+      context.fillStyle = "#ffffff";
+      context.font = '600 20px "PingFang SC", "Microsoft YaHei", sans-serif';
+      context.fillText(String(rowIndex * 2 + columnIndex + 1).padStart(2, "0"), x + 27, y + 43);
+      context.fillStyle = "#252c31";
+      context.font = '600 25px "PingFang SC", "Microsoft YaHei", sans-serif';
+      context.fillText(section.title, x + 82, y + 44);
+      const innerY = y + 70;
+      drawRoundedCanvasRect(context, x + 18, innerY, sectionWidth - 36, rowHeight - 88, 10, "rgba(255,255,255,0.93)", section.palette.border);
+      context.fillStyle = section.palette.accent;
+      context.font = '600 15px "PingFang SC", "Microsoft YaHei", sans-serif';
+      context.fillText("会议要点", x + 40, innerY + 30);
+      let textY = innerY + 62;
+      section.points.forEach((lines) => {
+        context.fillStyle = section.palette.accent;
+        context.beginPath();
+        context.arc(x + 43, textY - 7, 3, 0, Math.PI * 2);
+        context.fill();
+        context.fillStyle = "#465159";
+        context.font = '23px "PingFang SC", "Microsoft YaHei", sans-serif';
+        lines.forEach((line, lineIndex) => context.fillText(line, x + 58, textY + lineIndex * 32));
+        textY += lines.length * 32 + 10;
+      });
     });
+    y += rowHeight + sectionGap;
+  });
+
+  let nextSectionNumber = sectionLayouts.length + 1;
+  if (actionLayouts.length) {
+    const blockHeight = actionsHeight - 18;
+    drawRoundedCanvasRect(context, margin, y, contentWidth, blockHeight, 16, "#f5f2fb");
+    drawRoundedCanvasRect(context, margin + 18, y + 18, 48, 36, 3, "#7658aa");
+    context.fillStyle = "#ffffff";
+    context.font = '600 20px "PingFang SC", "Microsoft YaHei", sans-serif';
+    context.fillText(String(nextSectionNumber++).padStart(2, "0"), margin + 27, y + 43);
+    context.fillStyle = "#252c31";
+    context.font = '600 25px "PingFang SC", "Microsoft YaHei", sans-serif';
+    context.fillText("会后推进", margin + 82, y + 44);
+    let actionY = y + 72;
+    actionRows.forEach((rowHeight, rowIndex) => {
+      actionLayouts.slice(rowIndex * 2, rowIndex * 2 + 2).forEach((item, columnIndex) => {
+        const x = margin + 18 + columnIndex * (actionWidth + sectionGap);
+        drawRoundedCanvasRect(context, x, actionY, actionWidth, rowHeight, 9, "rgba(255,255,255,0.94)", "#d8cfea");
+        context.fillStyle = "#7658aa";
+        context.font = '600 18px "PingFang SC", "Microsoft YaHei", sans-serif';
+        context.fillText(String(rowIndex * 2 + columnIndex + 1).padStart(2, "0"), x + 20, actionY + 31);
+        context.fillStyle = "#424b52";
+        context.font = '23px "PingFang SC", "Microsoft YaHei", sans-serif';
+        item.lines.forEach((line, lineIndex) => context.fillText(line, x + 58, actionY + 31 + lineIndex * 31));
+        context.fillStyle = "#7d7588";
+        context.font = '16px "PingFang SC", "Microsoft YaHei", sans-serif';
+        context.fillText(`${item.owner} · ${item.due}`, x + 58, actionY + rowHeight - 20);
+      });
+      actionY += rowHeight + 14;
+    });
+    y += blockHeight + sectionGap;
   }
-  if (suggestionLines.length) {
-    y += 24;
-    context.fillStyle = "#eceee8";
-    context.fillRect(margin + 118, y, contentWidth - 118, 105 + suggestionLines.length * 42);
-    context.fillStyle = "#65715f";
-    context.font = '600 29px "PingFang SC", "Microsoft YaHei", sans-serif';
-    context.fillText("AI 推进建议", margin + 155, y + 48);
-    context.fillStyle = "#414741";
-    context.font = '27px "PingFang SC", "Microsoft YaHei", sans-serif';
-    suggestionLines.forEach((line, index) => context.fillText(line, margin + 155, y + 94 + index * 42));
+
+  if (suggestionLayouts.length) {
+    const blockHeight = suggestionsHeight - 18;
+    drawRoundedCanvasRect(context, margin, y, contentWidth, blockHeight, 16, "#eff4fb");
+    drawRoundedCanvasRect(context, margin + 18, y + 18, 48, 36, 3, "#2d68bc");
+    context.fillStyle = "#ffffff";
+    context.font = '600 20px "PingFang SC", "Microsoft YaHei", sans-serif';
+    context.fillText(String(nextSectionNumber++).padStart(2, "0"), margin + 27, y + 43);
+    context.fillStyle = "#252c31";
+    context.font = '600 25px "PingFang SC", "Microsoft YaHei", sans-serif';
+    context.fillText("AI 推进建议", margin + 82, y + 44);
+    let suggestionY = y + 85;
+    suggestionLayouts.forEach((lines) => {
+      context.fillStyle = "#2d68bc";
+      context.beginPath();
+      context.arc(margin + 42, suggestionY - 7, 3, 0, Math.PI * 2);
+      context.fill();
+      context.fillStyle = "#465159";
+      context.font = '23px "PingFang SC", "Microsoft YaHei", sans-serif';
+      lines.forEach((line, lineIndex) => context.fillText(line, margin + 58, suggestionY + lineIndex * 31));
+      suggestionY += lines.length * 31 + 9;
+    });
+    y += blockHeight + sectionGap;
   }
+
+  const finalConclusionHeight = conclusionHeight;
+  drawRoundedCanvasRect(context, margin, y, contentWidth, finalConclusionHeight, 16, "#f7f3ed");
+  drawRoundedCanvasRect(context, margin + 18, y + 18, 48, 36, 3, "#896740");
+  context.fillStyle = "#ffffff";
+  context.font = '600 20px "PingFang SC", "Microsoft YaHei", sans-serif';
+  context.fillText(String(nextSectionNumber).padStart(2, "0"), margin + 27, y + 43);
+  context.fillStyle = "#252c31";
+  context.font = '600 25px "PingFang SC", "Microsoft YaHei", sans-serif';
+  context.fillText("核心共识", margin + 82, y + 44);
+  drawRoundedCanvasRect(context, margin + 18, y + 70, contentWidth - 36, finalConclusionHeight - 88, 9, "rgba(255,255,255,0.94)", "#dfd0bd");
+  context.fillStyle = "#433b32";
+  context.font = '600 25px "PingFang SC", "Microsoft YaHei", sans-serif';
+  conclusionLines.forEach((line, index) => context.fillText(line, margin + 46, y + 111 + index * 34));
+  context.fillStyle = "#a6aaad";
+  context.font = '14px "PingFang SC", "Microsoft YaHei", sans-serif';
+  context.textAlign = "center";
+  context.fillText("内容由拾音 AI 根据会议记录整理", width / 2, height - 48);
+  context.textAlign = "start";
   canvas.toBlob((blob) => {
     if (!blob) return;
     const url = URL.createObjectURL(blob);
@@ -4688,10 +4808,11 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                       </header>
                       <article className={`meeting-brief-canvas ${briefEditing ? "editing" : ""}`} onDoubleClick={() => !briefEditing && beginBriefEditing()}>
                         <header>
-                          <p>会议简报</p>
+                          <div className="meeting-brief-kicker"><span>最终会议总结</span><small>AI MEETING BRIEF</small></div>
                           {briefEditing ? (
                             <input aria-label="会议简报主题" value={activeBrief.subject} onChange={(event) => setBriefDraft((current) => current ? { ...current, subject: event.target.value } : current)} />
                           ) : <h2>{activeBrief.subject}</h2>}
+                          {!briefEditing && usableSummary.headline && usableSummary.headline !== activeBrief.subject && <p className="meeting-brief-deck">{usableSummary.headline}</p>}
                           <div className="meeting-brief-meta">
                             <span>{briefDate(meeting.startedAt)}</span><i />
                             <span>{formatClock(meeting.durationMs)}</span><i />
@@ -4700,12 +4821,6 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                             ) : <span>{activeBrief.participants}</span>}
                           </div>
                         </header>
-                        <section className="meeting-brief-conclusion">
-                          <span>核心结论</span>
-                          {briefEditing ? (
-                            <textarea aria-label="会议核心结论" value={activeBrief.conclusion} onChange={(event) => setBriefDraft((current) => current ? { ...current, conclusion: event.target.value } : current)} />
-                          ) : <p>{activeBrief.conclusion}</p>}
-                        </section>
                         <div className="meeting-brief-timeline">
                           {activeBrief.sections.map((section, index) => (
                             <section key={`${section.id}-${index}`}>
@@ -4721,9 +4836,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                                       <button className="danger" onClick={() => setBriefDraft((current) => current ? { ...current, sections: current.sections.filter((_, itemIndex) => itemIndex !== index) } : current)}>隐藏此栏</button>
                                     </div>
                                   </>
-                                ) : (
-                                  <><h3>{section.title}</h3><p>{section.content}</p></>
-                                )}
+                                ) : <><header><h3>{section.title}</h3><small>会议要点</small></header>{briefContentPoints(section.content).length > 1 ? <ul>{briefContentPoints(section.content).map((point) => <li key={point}>{point}</li>)}</ul> : <p>{section.content}</p>}</>}
                               </div>
                             </section>
                           ))}
@@ -4733,7 +4846,7 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                         </div>
                         {(activeBrief.actionItems.length > 0 || briefEditing) && (
                           <section className="meeting-brief-actions">
-                            <h3>会后推进</h3>
+                            <header><span>{String(activeBrief.sections.length + 1).padStart(2, "0")}</span><h3>会后推进</h3></header>
                             <div>
                               {activeBrief.actionItems.map((item, index) => briefEditing ? (
                                 <div className="brief-action-edit" key={`${index}-${item.task}`}>
@@ -4751,12 +4864,18 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                         )}
                         {(activeBrief.aiSuggestions.length > 0 || briefEditing) && (
                           <aside className="meeting-brief-suggestion">
-                            <h3>AI 推进建议</h3>
+                            <header><span>{String(activeBrief.sections.length + (activeBrief.actionItems.length > 0 || briefEditing ? 2 : 1)).padStart(2, "0")}</span><h3>AI 推进建议</h3></header>
                             {briefEditing ? (
                               <textarea aria-label="AI 推进建议" value={activeBrief.aiSuggestions.join("\n")} onChange={(event) => setBriefDraft((current) => current ? { ...current, aiSuggestions: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean) } : current)} />
                             ) : <ul>{activeBrief.aiSuggestions.map((item) => <li key={item}>{item}</li>)}</ul>}
                           </aside>
                         )}
+                        <section className="meeting-brief-conclusion">
+                          <header><span>{String(activeBrief.sections.length + (activeBrief.actionItems.length > 0 || briefEditing ? 1 : 0) + (activeBrief.aiSuggestions.length > 0 || briefEditing ? 1 : 0) + 1).padStart(2, "0")}</span><h3>核心共识</h3></header>
+                          {briefEditing ? (
+                            <textarea aria-label="会议核心结论" value={activeBrief.conclusion} onChange={(event) => setBriefDraft((current) => current ? { ...current, conclusion: event.target.value } : current)} />
+                          ) : <p>{activeBrief.conclusion}</p>}
+                        </section>
                         {!briefEditing && <small className="meeting-brief-edit-hint">双击内容或使用上方“编辑内容”进行修改</small>}
                       </article>
                     </section>
