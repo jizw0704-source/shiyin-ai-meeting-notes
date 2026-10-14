@@ -15,14 +15,20 @@ const context = await browser.newContext({ viewport: { width: 1440, height: 900 
 const page = await context.newPage();
 const errors = [];
 page.on("pageerror", error => errors.push(error.message));
-// Read-only local API requests get an explicit CORS header for the separate dev origin.
+// Isolate reading-preference checks from real meetings, keys and microphone access.
 await page.route("http://127.0.0.1:8788/**", async route => {
   if (route.request().method() !== "GET" && route.request().method() !== "OPTIONS") {
     await route.abort();
     return;
   }
-  const response = await route.fetch();
-  await route.fulfill({ response, headers: { ...response.headers(), "access-control-allow-origin": origin } });
+  const pathname = new URL(route.request().url()).pathname;
+  const data = pathname === "/health"
+    ? { ok: true, service: "shiyin-ai-backend", appOrigin: origin, asrMode: "local", localAsrAvailable: true, punctuationModelAvailable: true, speakerModelAvailable: true, overlapSeparationModelAvailable: true, miniMaxConfigured: false }
+    : pathname === "/api/meetings" ? { meetings: [] }
+      : pathname === "/api/preflight" ? { status: "ready", checks: [{ id: "storage", label: "本机存储", status: "ready", detail: "测试工作区", blocking: false }] }
+        : pathname === "/api/storage" ? { meetingCount: 0, totalBytes: 0 }
+          : {};
+  await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(data), headers: { "access-control-allow-origin": origin, "access-control-allow-headers": "content-type" } });
 });
 async function settings() {
   await page.waitForFunction(() => Boolean(document.documentElement.dataset.fontSize));

@@ -2572,7 +2572,7 @@ html[data-theme="dark"] .workspace-summary-state.ready{color:#91d6ae;background:
 }
 
 /* Reading preference scales text, not the window, icons or exported files. */
-.settings-font-size{display:grid;gap:16px;padding:22px 0;border-bottom:1px solid var(--ui-border)}
+.settings-font-size{display:grid;gap:16px;padding:22px 24px;border-bottom:1px solid var(--ui-border)}
 .settings-font-size>div:first-child b{color:var(--ui-text);font-size:calc(12px * var(--ui-font-scale,1));font-weight:600}
 .settings-font-size>div:first-child p{margin:6px 0 0;color:var(--ui-text-secondary);font-size:calc(12px * var(--ui-font-scale,1));line-height:1.6}
 .settings-font-options{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
