@@ -10,7 +10,7 @@
 
 本地转写不消耗云端语音时长。原始录音、逐字稿、发言人声纹、历史版本和会议列表默认保存在自己的电脑上；只有主动生成 AI 总结时，会议文本才会发送给 MiniMax。
 
-> 当前开发基线：`0.7.1`<br>
+> 当前开发基线：`0.7.2`<br>
 > 使用阶段：个人使用与团队内部测试<br>
 > 支持平台：Apple Silicon macOS、Windows x64<br>
 > 授权状态：`UNLICENSED`，不是开源许可证；公开分发或商业使用前请先确认授权条件
@@ -18,7 +18,13 @@
 [![macOS build](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/macos-build.yml/badge.svg)](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/macos-build.yml)
 [![Windows build](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/windows-build.yml/badge.svg)](https://github.com/jizw0704-source/shiyin-ai-meeting-notes/actions/workflows/windows-build.yml)
 
-## 0.7.1 版本亮点
+## 0.7.2 版本亮点
+
+- **按习惯调整字号**：在“设置 → 常规 → 字体大小”选择小、标准、大、特大，支持即时预览和键盘方向键操作。
+- **阅读偏好自动保留**：设置、历史列表、逐字稿与会议总结同步调整，重启应用后仍保留选择。
+- **分享版式保持稳定**：本机显示字号不改变 PNG 图片与导出报告的固定版式。
+
+## 0.7.1 会议简报升级
 
 - **信息板式会议简报**：采用白色报告纸、编号分区和低饱和信息卡，让未参会者快速看懂会议重点。
 - **要点化阅读与编辑**：较长总结自动拆分为会议要点，用户仍可双击修改主题、内容、行动项和核心共识。

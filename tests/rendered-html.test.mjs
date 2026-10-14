@@ -3,6 +3,16 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
 import { normalizeWindowsStaticCache } from "../server/vinext-windows-static-cache.mjs";
+import { fontSizeOptions, fontSizeScale, normalizeFontSize } from "../server/display-preferences.mjs";
+
+test("normalizes saved reading preferences and keeps invalid values at standard size", () => {
+  assert.equal(fontSizeOptions.length, 4);
+  assert.deepEqual(fontSizeOptions.map((option) => fontSizeScale(option.id)), [0.9, 1, 1.15, 1.3]);
+  for (const invalid of [null, undefined, "200%", "huge", {}, ""]) {
+    assert.equal(normalizeFontSize(invalid), "standard");
+    assert.equal(fontSizeScale(invalid), 1);
+  }
+});
 
 async function render() {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);

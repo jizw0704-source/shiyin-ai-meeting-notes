@@ -43,6 +43,7 @@ import {
   X,
 } from "@phosphor-icons/react";
 import versionHistoryData from "../public/version-history.json";
+import { fontSizeOptions, fontSizeScale, normalizeFontSize } from "../server/display-preferences.mjs";
 
 type View = "transcript" | "summary" | "actions";
 type MeetingStatus = "recording" | "importing" | "correcting" | "summarizing" | "retranscribing" | "enhancing" | "completed" | "failed";
@@ -55,6 +56,7 @@ type SpeakerLimitMode = "auto" | "manual";
 type TranscriptMode = "organized" | "original";
 type TranscriptOrder = "ascending" | "descending";
 type ThemeMode = "system" | "light" | "dark";
+type FontSizeId = "small" | "standard" | "large" | "extra-large";
 type RecordingBackdrop = "paper" | "focus" | "wave" | "midnight";
 type WorkspaceView = "meetings" | "knowledge" | "quality";
 type SettingsSection = "general" | "meeting" | "ai" | "notebook" | "data" | "updates";
@@ -1221,6 +1223,7 @@ export default function Home() {
   const [showBackToTop, setShowBackToTop] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>("system");
+  const [fontSize, setFontSize] = useState<FontSizeId>("standard");
   const [recordingBackdrop, setRecordingBackdrop] = useState<RecordingBackdrop>("paper");
   const [autoSummaryEnabled, setAutoSummaryEnabled] = useState(true);
   const [autoTitleEnabled, setAutoTitleEnabled] = useState(true);
@@ -1355,6 +1358,7 @@ export default function Home() {
       const savedObsidianAutoSave = window.localStorage.getItem("shiyin.obsidianAutoSave");
       const savedTranscriptOrder = window.localStorage.getItem("shiyin.transcriptOrder");
       const savedTheme = window.localStorage.getItem("shiyin.themeMode") as ThemeMode | null;
+      const savedFontSize = window.localStorage.getItem("shiyin.fontSize");
       const savedBackdrop = window.localStorage.getItem("shiyin.recordingBackdrop") as RecordingBackdrop | null;
       const savedAutoSummary = window.localStorage.getItem("shiyin.autoSummary");
       const savedAutoTitle = window.localStorage.getItem("shiyin.autoTitle");
@@ -1370,6 +1374,7 @@ export default function Home() {
       setObsidianAutoSave(savedObsidianAutoSave === "true");
       if (savedTranscriptOrder === "descending") setTranscriptOrder("descending");
       if (["system", "light", "dark"].includes(savedTheme || "")) setThemeMode(savedTheme!);
+      setFontSize(normalizeFontSize(savedFontSize));
       if (recordingBackdrops.some((item) => item.id === savedBackdrop)) setRecordingBackdrop(savedBackdrop!);
       setAutoSummaryEnabled(savedAutoSummary !== "false");
       setAutoTitleEnabled(savedAutoTitle !== "false");
@@ -1391,6 +1396,11 @@ export default function Home() {
     systemPreference.addEventListener("change", applyTheme);
     return () => systemPreference.removeEventListener("change", applyTheme);
   }, [themeMode]);
+
+  useEffect(() => {
+    document.documentElement.style.setProperty("--ui-font-scale", String(fontSizeScale(fontSize)));
+    document.documentElement.dataset.fontSize = fontSize;
+  }, [fontSize]);
 
   useEffect(() => {
     let active = true;
@@ -2034,6 +2044,11 @@ export default function Home() {
   function selectTheme(mode: ThemeMode) {
     setThemeMode(mode);
     window.localStorage.setItem("shiyin.themeMode", mode);
+  }
+
+  function selectFontSize(size: FontSizeId) {
+    setFontSize(size);
+    window.localStorage.setItem("shiyin.fontSize", size);
   }
 
   function selectRecordingBackdrop(backdrop: RecordingBackdrop) {
@@ -4144,6 +4159,21 @@ ${topicHtml ? `<section><h2>主题与关键词</h2><div>${topicHtml}</div></sect
                         <button className={themeMode === "light" ? "active" : ""} onClick={() => selectTheme("light")}><Sun size={14} /> 浅色</button>
                         <button className={themeMode === "dark" ? "active" : ""} onClick={() => selectTheme("dark")}><Moon size={14} /> 深色</button>
                       </div>
+                    </div>
+                    <div className="settings-font-size">
+                      <div><b id="font-size-label">字体大小</b><p>即时调整界面与会议记录的阅读字号，自动记住选择。</p></div>
+                      <div className="settings-font-options" role="radiogroup" aria-labelledby="font-size-label" onKeyDown={(event) => {
+                        const keys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"];
+                        if (!keys.includes(event.key)) return;
+                        event.preventDefault();
+                        const index = fontSizeOptions.findIndex((option) => option.id === fontSize);
+                        const next = event.key === "Home" ? 0 : event.key === "End" ? fontSizeOptions.length - 1 : (index + (["ArrowLeft", "ArrowUp"].includes(event.key) ? -1 : 1) + fontSizeOptions.length) % fontSizeOptions.length;
+                        selectFontSize(fontSizeOptions[next].id);
+                        event.currentTarget.querySelectorAll<HTMLButtonElement>("button")[next]?.focus();
+                      }}>
+                        {fontSizeOptions.map((option) => <button type="button" key={option.id} role="radio" aria-checked={fontSize === option.id} tabIndex={fontSize === option.id ? 0 : -1} className={fontSize === option.id ? "active" : ""} onClick={() => selectFontSize(option.id)}>{option.label}<small>{Math.round(option.scale * 100)}%</small></button>)}
+                      </div>
+                      <div className="settings-font-preview" aria-label="字体大小预览"><b>听见讨论，看见下一步</b><p>这是一段会议记录。文字会随字号设置即时调整。</p><small>仅影响本机显示；导出报告和图片仍保持原定版式。</small></div>
                     </div>
                     <div className="settings-row">
                       <div><b>逐字稿排列</b><small>设置打开会议记录时的默认顺序。</small></div>

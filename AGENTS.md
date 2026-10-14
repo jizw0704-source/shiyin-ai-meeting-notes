@@ -7,6 +7,7 @@
 - Run the browser UI and local backend: `npm run dev`
 - Check: `npm run lint`, `npm run typecheck`, and `npm test`
 - Verify native ASR and speaker models: `npm run test:native-models`
+- Verify reading-size UI against an isolated dev page: `SHIYIN_QA_NODE_MODULES=/path/to/existing/node_modules SHIYIN_FONT_TEST_URL=http://127.0.0.1:3014 npm run test:font-size-ui` (requires an existing Playwright runtime; start that page with `SHIYIN_WEB_PORT=3014 ASR_PROXY_PORT=8797 npm run dev`).
 - Build: `npm run build`
 - Package the current platform installer: `npm run desktop:dist`
 - Package Apple Silicon DMG and ZIP from a Mac: `npm run desktop:dist:mac`
